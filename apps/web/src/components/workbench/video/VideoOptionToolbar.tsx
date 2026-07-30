@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import { Clock, Grid3X3, Monitor, Sparkles, Target, Wand2 } from "lucide-react";
+import { Clock, Grid3X3, Monitor, Music2, Sparkles, Target, Wand2 } from "lucide-react";
 import {
   DEFAULT_VIDEO_COUNT_OPTIONS,
   enumLabel,
@@ -30,6 +30,8 @@ function iconFor(name?: string): ReactNode {
       return <Target size={16} />;
     case "wand":
       return <Wand2 size={16} />;
+    case "music":
+      return <Music2 size={16} />;
     case "4k":
       return <span className="text-[10px] font-bold leading-none">4K</span>;
     default:
@@ -41,12 +43,26 @@ const FIELD_TITLE_KEY: Record<string, string> = {
   count: "imageToolbar.count",
   duration: "video.duration",
   orientation: "video.orientation",
+  generation_mode: "video.generationMode",
+  generate_audio: "video.generateAudio",
+  ratio: "video.ratio",
+  resolution: "video.resolution",
+  watermark: "video.watermark",
+  return_last_frame: "video.returnLastFrame",
+  priority: "video.priority",
 };
 
 const FIELD_DESC_KEY: Record<string, string> = {
   count: "imageToolbar.countDesc",
   duration: "video.durationDesc",
   orientation: "video.orientationDesc",
+  generation_mode: "video.generationModeDesc",
+  generate_audio: "video.generateAudioDesc",
+  ratio: "video.ratioDesc",
+  resolution: "video.resolutionDesc",
+  watermark: "video.watermarkDesc",
+  return_last_frame: "video.returnLastFrameDesc",
+  priority: "video.priorityDesc",
 };
 
 function safeSchemaText(text: unknown, fallback: string) {
@@ -264,6 +280,11 @@ export function VideoTopControls({
   const { t } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => isTopPlacementField(prop));
+  const priorityIndex = entries.findIndex(([key]) => key === "priority");
+  const audioIndex = entries.findIndex(([key]) => key === "generate_audio");
+  if (priorityIndex >= 0 && audioIndex >= 0 && priorityIndex > audioIndex) {
+    [entries[priorityIndex], entries[audioIndex]] = [entries[audioIndex], entries[priorityIndex]];
+  }
   if (entries.length === 0) return null;
   return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, videoConfig, countUnit)}</span>)}</>;
 }

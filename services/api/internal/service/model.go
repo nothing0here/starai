@@ -138,6 +138,36 @@ func (s *ModelService) GetFullByCode(ctx context.Context, code string) (*ModelFu
 	return &m, nil
 }
 
+// GetFullByIDForAdmin returns the complete stored upstream configuration for
+// admin-only operations such as connection testing. Unlike GetFullByCode it
+// intentionally includes disabled models, so an administrator can verify a
+// model before enabling it.
+func (s *ModelService) GetFullByIDForAdmin(ctx context.Context, id int64) (*ModelFull, error) {
+	var m ModelFull
+	var tags, schema, defaults, price, extra, runtimeRule []byte
+	err := s.db.QueryRow(ctx, `
+		SELECT id, code, display_name, new_api_model, new_api_endpoint, request_mode, category,
+			icon_url, description, tags, input_schema, default_params, new_api_extra_params, price_rule, runtime_rule,
+			retention_days, is_enabled, sort_order
+		FROM models WHERE id=$1`, id).Scan(
+		&m.ID, &m.Code, &m.DisplayName, &m.NewAPIModel, &m.NewAPIEndpoint, &m.RequestMode, &m.Category,
+		&m.IconURL, &m.Description, &tags, &schema, &defaults, &extra, &price, &runtimeRule,
+		&m.RetentionDays, &m.IsEnabled, &m.SortOrder)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("模型不存在")
+		}
+		return nil, err
+	}
+	json.Unmarshal(tags, &m.Tags)
+	json.Unmarshal(schema, &m.InputSchema)
+	json.Unmarshal(defaults, &m.DefaultParams)
+	json.Unmarshal(extra, &m.NewAPIExtraParams)
+	json.Unmarshal(price, &m.PriceRule)
+	json.Unmarshal(runtimeRule, &m.RuntimeRule)
+	return &m, nil
+}
+
 func (s *ModelService) ResolveChatModel(ctx context.Context, identifier string) (*ModelFull, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -293,9 +323,116 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 			n = v
 		}
 		return unitPrice * duration * n
+	case "dynamic":
+		return estimateDynamicCost(model.PriceRule, params)
 	default:
 		return 0.01
 	}
+}
+
+func estimateDynamicCost(rule map[string]interface{}, params map[string]interface{}) float64 {
+	switch strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"]))) {
+	case "seedance_2_tokens":
+		return estimateSeedance2TokenCost(rule, params)
+	default:
+		return floatValue(rule["fallback_cost"])
+	}
+}
+
+func estimateSeedance2TokenCost(rule map[string]interface{}, params map[string]interface{}) float64 {
+	resolution := strings.ToLower(strings.TrimSpace(stringValue(params["resolution"])))
+	if resolution == "" {
+		resolution = strings.ToLower(strings.TrimSpace(stringValue(rule["default_resolution"])))
+	}
+	if resolution == "" {
+		resolution = "720p"
+	}
+
+	tokensPerSecond := mapFloatValue(rule["tokens_per_second"], resolution)
+	if tokensPerSecond <= 0 {
+		tokensPerSecond = map[string]float64{
+			"480p":  10044,
+			"720p":  21600,
+			"1080p": 48600,
+			"4k":    194400,
+		}[resolution]
+	}
+	if tokensPerSecond <= 0 {
+		tokensPerSecond = 21600
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(stringValue(params["generation_mode"])))
+	hasVideoInput := strings.Contains(mode, "video") || urlFieldCount(params["reference_videos"]) > 0
+	if portraitID := strings.TrimSpace(stringValue(params["portrait_asset_id"])); portraitID != "" &&
+		strings.EqualFold(strings.TrimSpace(stringValue(params["portrait_asset_type"])), "video") {
+		hasVideoInput = true
+	}
+
+	rateKey := "without_video"
+	if hasVideoInput {
+		rateKey = "with_video"
+	}
+	ratePerMillion := nestedMapFloatValue(rule["rates_per_m_tokens"], resolution, rateKey)
+	if ratePerMillion <= 0 {
+		defaultRates := map[string]map[string]float64{
+			"480p":  {"without_video": 46, "with_video": 28},
+			"720p":  {"without_video": 46, "with_video": 28},
+			"1080p": {"without_video": 51, "with_video": 31},
+			"4k":    {"without_video": 26, "with_video": 16},
+		}
+		ratePerMillion = defaultRates[resolution][rateKey]
+	}
+	if ratePerMillion <= 0 {
+		return floatValue(rule["fallback_cost"])
+	}
+
+	outputDuration := parseDurationSeconds(params)
+	tokenUsage := outputDuration * tokensPerSecond
+	if hasVideoInput {
+		inputDuration := floatValue(params["reference_video_duration_seconds"])
+		if inputDuration <= 0 {
+			inputDuration = floatValue(rule["default_input_video_seconds"])
+		}
+		if inputDuration <= 0 {
+			inputDuration = 4
+		}
+		tokenUsage = (outputDuration + inputDuration) * tokensPerSecond
+		minMultiplier := floatValue(rule["video_min_token_multiplier"])
+		if minMultiplier <= 0 {
+			minMultiplier = 1.8
+		}
+		minTokens := outputDuration * tokensPerSecond * minMultiplier
+		if tokenUsage < minTokens {
+			tokenUsage = minTokens
+		}
+	}
+
+	cost := tokenUsage / 1_000_000 * ratePerMillion
+	multiplier := floatValue(rule["platform_multiplier"])
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	pointsPerCurrency := floatValue(rule["points_per_cny"])
+	if pointsPerCurrency <= 0 {
+		pointsPerCurrency = 1
+	}
+	return cost * multiplier * pointsPerCurrency
+}
+
+func mapFloatValue(raw interface{}, key string) float64 {
+	m, _ := raw.(map[string]interface{})
+	if m == nil {
+		return 0
+	}
+	return floatValue(m[key])
+}
+
+func nestedMapFloatValue(raw interface{}, firstKey, secondKey string) float64 {
+	m, _ := raw.(map[string]interface{})
+	if m == nil {
+		return 0
+	}
+	return mapFloatValue(m[firstKey], secondKey)
 }
 
 // perTokenPrice resolves a per-token price from price_rule, supporting both

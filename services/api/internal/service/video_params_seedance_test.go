@@ -1,0 +1,108 @@
+package service
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestValidateSeedance2InputCombinations(t *testing.T) {
+	cfg := videoRuntimeConfig{
+		UploadProfile:      "seedance_2",
+		MaxReferenceImages: 9,
+		FirstFrameKey:      "first_frame",
+		LastFrameKey:       "last_frame",
+		ReferenceImagesKey: "reference_images",
+		ReferenceVideosKey: "reference_videos",
+		MaxReferenceVideos: 3,
+		ReferenceAudiosKey: "reference_audios",
+		MaxReferenceAudios: 3,
+		ModeParam:          "generation_mode",
+	}
+	tests := []struct {
+		name    string
+		params  map[string]interface{}
+		wantErr string
+	}{
+		{
+			name:   "text",
+			params: map[string]interface{}{"generation_mode": "text", "prompt": "一只猫跑过街道"},
+		},
+		{
+			name: "all multimodal",
+			params: map[string]interface{}{
+				"generation_mode":  "image_video_audio",
+				"reference_images": []interface{}{"https://example.com/a.jpg"},
+				"reference_videos": []interface{}{"https://example.com/a.mp4"},
+				"reference_audios": []interface{}{"https://example.com/a.mp3"},
+			},
+		},
+		{
+			name: "authorized portrait can satisfy image input",
+			params: map[string]interface{}{
+				"generation_mode":     "image",
+				"portrait_asset_id":   "asset://authorized-person",
+				"portrait_asset_type": "image",
+			},
+		},
+		{
+			name: "portrait must use asset ID",
+			params: map[string]interface{}{
+				"generation_mode":     "image",
+				"portrait_asset_id":   "https://example.com/person.jpg",
+				"portrait_asset_type": "image",
+			},
+			wantErr: "asset://",
+		},
+		{
+			name: "audio cannot stand alone",
+			params: map[string]interface{}{
+				"generation_mode":  "video_audio",
+				"reference_audios": []interface{}{"https://example.com/a.mp3"},
+			},
+			wantErr: "同时上传视频和音频",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateVideoUpload(cfg, tt.params)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateVideoParamsPreservesProviderDurationEnumType(t *testing.T) {
+	veo := &ModelFull{ModelDTO: ModelDTO{
+		InputSchema: map[string]interface{}{
+			"properties": map[string]interface{}{
+				"duration": map[string]interface{}{"enum": []interface{}{"4s", "8s", "12s"}},
+			},
+		},
+	}}
+	veoParams := map[string]interface{}{"duration": float64(4)}
+	if err := ValidateVideoParams(veo, veoParams); err != nil {
+		t.Fatalf("Veo equivalent duration should be normalized: %v", err)
+	}
+	if got := veoParams["duration"]; got != "4s" {
+		t.Fatalf("Veo duration=%#v, want string 4s", got)
+	}
+
+	seedance := &ModelFull{ModelDTO: ModelDTO{
+		InputSchema: map[string]interface{}{
+			"properties": map[string]interface{}{
+				"duration": map[string]interface{}{"enum": []interface{}{float64(5), float64(8), float64(10)}},
+			},
+		},
+	}}
+	seedanceParams := map[string]interface{}{"duration": "8s"}
+	if err := ValidateVideoParams(seedance, seedanceParams); err != nil {
+		t.Fatalf("Seedance equivalent duration should be normalized: %v", err)
+	}
+	if got := seedanceParams["duration"]; got != float64(8) {
+		t.Fatalf("Seedance duration=%#v, want numeric 8", got)
+	}
+}

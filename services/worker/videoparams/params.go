@@ -49,6 +49,9 @@ func BuildUpstreamVideoPayload(
 		if !ok || val == nil {
 			continue
 		}
+		if key == "duration" {
+			val = normalizeVideoDuration(val)
+		}
 		upKey := key
 		if upCfg.Map != nil {
 			if mapped, ok := upCfg.Map[key]; ok && mapped != "" {
@@ -59,8 +62,14 @@ func BuildUpstreamVideoPayload(
 			continue
 		}
 		setPayloadValue(out, upKey, normalizeUpstreamValue(val))
+		if key == "duration" && upKey == "duration" {
+			out["_preserve_video_params"] = true
+		}
 	}
 	out = ApplyUpstreamTransforms(out, runtimeRule, params)
+	if strings.EqualFold(upCfg.Adapter, "volcengine_seedance_2") {
+		out = buildVolcengineSeedancePayload(out, params)
+	}
 	return SanitizeUpstreamPayload(out, "")
 }
 
@@ -68,13 +77,21 @@ func BuildUpstreamVideoPayload(
 // endpoint hint: e.g. "/v1/videos" enables Sora-style image_url promotion.
 func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[string]interface{} {
 	delete(out, "connection")
-	for _, k := range []string{
-		"n", "count", "duration", "asset_ids", "reference_asset_ids", "file_asset_ids",
+	preserveVideoParams, _ := out["_preserve_video_params"].(bool)
+	if endpoint != "" {
+		delete(out, "_preserve_video_params")
+	}
+	platformOnly := []string{
+		"n", "count", "asset_ids", "reference_asset_ids", "file_asset_ids",
 		"role_prompt", "channel_key", "fallback_enabled", "web_search", "timeout_sec", "asset_context",
 		"negative_prompt", "style", "selling_points", "user_intent", "asset_notes",
 		"language", "language_label", "language_name", "generation_language", "generation_language_label", "generation_language_name",
 		"_skip_billing", "_workflow_project",
-	} {
+	}
+	if !preserveVideoParams {
+		platformOnly = append(platformOnly, "duration")
+	}
+	for _, k := range platformOnly {
 		delete(out, k)
 	}
 	normalizeAspectRatioField(out)
@@ -254,6 +271,7 @@ type upstreamConfig struct {
 	Include []string
 	Map     map[string]string
 	Static  map[string]interface{}
+	Adapter string
 }
 
 func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
@@ -282,7 +300,147 @@ func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
 	if st, ok := up["static"].(map[string]interface{}); ok {
 		cfg.Static = st
 	}
+	if adapter, ok := up["adapter"].(string); ok {
+		cfg.Adapter = strings.TrimSpace(adapter)
+	}
 	return cfg
+}
+
+func buildVolcengineSeedancePayload(out, params map[string]interface{}) map[string]interface{} {
+	content := make([]interface{}, 0, 16)
+	seenMedia := map[string]bool{}
+	if duration, ok := out["duration"]; ok {
+		out["duration"] = normalizeVideoDuration(duration)
+	}
+	mode := strings.TrimSpace(fmt.Sprint(params["generation_mode"]))
+	prompt := strings.TrimSpace(fmt.Sprint(params["prompt"]))
+	draftTaskID := strings.TrimSpace(fmt.Sprint(params["draft_task_id"]))
+	if mode == "draft_task" && draftTaskID != "" {
+		content = append(content, map[string]interface{}{
+			"type":       "draft_task",
+			"draft_task": map[string]interface{}{"id": draftTaskID},
+		})
+	} else {
+		if prompt != "" {
+			content = append(content, map[string]interface{}{"type": "text", "text": prompt})
+		}
+		addImage := func(raw interface{}, role string) {
+			for _, mediaURL := range mediaURLList(raw) {
+				if !isValidSeedanceMediaReference(mediaURL) || seenMedia[mediaURL] {
+					continue
+				}
+				seenMedia[mediaURL] = true
+				item := map[string]interface{}{
+					"type":      "image_url",
+					"image_url": map[string]interface{}{"url": mediaURL},
+				}
+				if role != "" {
+					item["role"] = role
+				}
+				content = append(content, item)
+			}
+		}
+		if mode == "first_frame" || mode == "first_last" {
+			addImage(params["first_frame"], "first_frame")
+		}
+		if mode == "first_last" {
+			addImage(params["last_frame"], "last_frame")
+		}
+		useImages := mode == "image" || mode == "image_audio" || mode == "image_video" || mode == "image_video_audio"
+		useVideos := mode == "video" || mode == "video_audio" || mode == "image_video" || mode == "image_video_audio"
+		useAudios := mode == "image_audio" || mode == "video_audio" || mode == "image_video_audio"
+		portraitAssetID := strings.TrimSpace(fmt.Sprint(params["portrait_asset_id"]))
+		if portraitAssetID == "<nil>" {
+			portraitAssetID = ""
+		}
+		if portraitAssetID != "" && (useImages || useVideos) {
+			if !strings.HasPrefix(portraitAssetID, "asset://") {
+				portraitAssetID = "asset://" + portraitAssetID
+			}
+			seenMedia[portraitAssetID] = true
+			if strings.EqualFold(strings.TrimSpace(fmt.Sprint(params["portrait_asset_type"])), "video") {
+				content = append(content, map[string]interface{}{
+					"type": "video_url", "video_url": map[string]interface{}{"url": portraitAssetID}, "role": "reference_video",
+				})
+			} else {
+				content = append(content, map[string]interface{}{
+					"type": "image_url", "image_url": map[string]interface{}{"url": portraitAssetID}, "role": "reference_image",
+				})
+			}
+		}
+		if useImages {
+			for _, mediaURL := range mediaURLList(params["reference_images"]) {
+				if !isValidSeedanceMediaReference(mediaURL) || seenMedia[mediaURL] {
+					continue
+				}
+				seenMedia[mediaURL] = true
+				content = append(content, map[string]interface{}{
+					"type": "image_url", "image_url": map[string]interface{}{"url": mediaURL}, "role": "reference_image",
+				})
+			}
+		}
+		if useVideos {
+			for _, mediaURL := range mediaURLList(params["reference_videos"]) {
+				if !isValidSeedanceMediaReference(mediaURL) || seenMedia[mediaURL] {
+					continue
+				}
+				seenMedia[mediaURL] = true
+				content = append(content, map[string]interface{}{
+					"type": "video_url", "video_url": map[string]interface{}{"url": mediaURL}, "role": "reference_video",
+				})
+			}
+		}
+		if useAudios {
+			for _, mediaURL := range mediaURLList(params["reference_audios"]) {
+				if !isValidSeedanceMediaReference(mediaURL) || seenMedia[mediaURL] {
+					continue
+				}
+				seenMedia[mediaURL] = true
+				content = append(content, map[string]interface{}{
+					"type": "audio_url", "audio_url": map[string]interface{}{"url": mediaURL}, "role": "reference_audio",
+				})
+			}
+		}
+	}
+	delete(out, "prompt")
+	for _, key := range []string{
+		"generation_mode", "draft_task_id", "first_frame", "last_frame",
+		"portrait_asset_id", "portrait_asset_type",
+		"reference_images", "reference_videos", "reference_audios",
+	} {
+		delete(out, key)
+	}
+	out["content"] = content
+	out["_preserve_video_params"] = true
+	return out
+}
+
+func isValidSeedanceMediaReference(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "http://") ||
+		strings.HasPrefix(value, "https://") ||
+		strings.HasPrefix(value, "data:") ||
+		strings.HasPrefix(value, "asset://")
+}
+
+func normalizeVideoDuration(raw interface{}) interface{} {
+	switch value := raw.(type) {
+	case int, int32, int64, float32, float64:
+		return value
+	}
+	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+	text = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(text, "秒"), "s"))
+	if text == "" {
+		return raw
+	}
+	value, err := strconv.ParseFloat(text, 64)
+	if err != nil {
+		return raw
+	}
+	if math.Trunc(value) == value {
+		return int(value)
+	}
+	return value
 }
 
 func mappedUpstreamKey(upCfg upstreamConfig, key string, fallback string) string {

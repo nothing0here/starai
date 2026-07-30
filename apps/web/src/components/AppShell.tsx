@@ -17,6 +17,7 @@ import { SiteBrand, useSiteBranding } from "./SiteBrand";
 import { ReferralShareButton } from "./ReferralShareButton";
 import { useI18n } from "@/i18n/I18nProvider";
 import { WorkbenchTopActions } from "./WorkbenchTopActions";
+import { InfiniteCanvasWorkspace } from "./workbench/InfiniteCanvasWorkspace";
 
 const PRIMARY_NAV = [
   { id: "models", label: "大模型", icon: LayoutGrid },
@@ -35,6 +36,7 @@ const SUBPAGE_LINKS = [
 ] as const;
 
 type Section = "models" | "agents" | "gallery";
+const INFINITE_CANVAS_CODE = "infinite_canvas";
 
 const MOBILE_SUBPAGE_LINKS = [
   { href: "/app", label: "工作台", icon: Home },
@@ -68,6 +70,7 @@ interface ModelCategory {
 interface AppShellProps {
   children: React.ReactNode;
   selectedModelCode?: string;
+  selectedAgentCode?: string;
 }
 
 function useIsMobile() {
@@ -82,7 +85,7 @@ function useIsMobile() {
   return isMobile;
 }
 
-export function AppShell({ children, selectedModelCode }: AppShellProps) {
+export function AppShell({ children, selectedModelCode, selectedAgentCode }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { t, td, locale } = useI18n();
@@ -94,7 +97,7 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const isMobile = useIsMobile();
 
-  const [section, setSection] = useState<Section>("models");
+  const [section, setSection] = useState<Section>(selectedAgentCode ? "agents" : "models");
   const [category, setCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
@@ -105,14 +108,15 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
   const [promptNonce, setPromptNonce] = useState(0);
 
   const [agents, setAgents] = useState<AgentItem[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [agentSearch, setAgentSearch] = useState("");
   const [agentCategory, setAgentCategory] = useState("all");
-  const [activeAgentCode, setActiveAgentCode] = useState<string | undefined>();
+  const [activeAgentCode, setActiveAgentCode] = useState<string | undefined>(selectedAgentCode);
 
   const [galleryTags, setGalleryTags] = useState<GalleryTag[]>([]);
   const [activeTag, setActiveTag] = useState("all");
 
-  const isWorkbench = pathname === "/app" || pathname.startsWith("/app/models/");
+  const isWorkbench = pathname === "/app" || pathname.startsWith("/app/models/") || pathname.startsWith("/app/agents/");
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
@@ -156,8 +160,21 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
   }, [user]);
 
   useEffect(() => {
-    if (selectedModelCode) setActiveModelCode(selectedModelCode);
+    if (selectedModelCode) {
+      setSection("models");
+      setActiveModelCode(selectedModelCode);
+      setActiveAgentCode(undefined);
+    }
   }, [selectedModelCode]);
+
+  useEffect(() => {
+    if (selectedAgentCode) {
+      setSection("agents");
+      setActiveAgentCode(selectedAgentCode);
+      setActiveModelCode(undefined);
+      setActiveModel(null);
+    }
+  }, [selectedAgentCode]);
 
   useEffect(() => {
     if (!isWorkbench || section !== "models") return;
@@ -171,7 +188,7 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
     const hasModels = enabled.size > 0;
     const hasChatLike = enabled.has("chat") || enabled.has("multi_collab");
     return CATEGORIES.filter((cat) => {
-      if (cat.code === "mine") return false;
+      if (cat.code === "mine") return true;
       if (cat.code === "all") return true;
       if (!hasModels) return false;
       if (cat.code === "chat") return hasChatLike;
@@ -226,14 +243,23 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
 
   useEffect(() => {
     if (!isWorkbench || section !== "agents") return;
+    setAgentsLoaded(false);
     const controller = new AbortController();
     apiForLocale<{ items: AgentItem[] }>("/api/agents", locale, { signal: controller.signal })
       .then((r) => {
-        setAgents(r.items || []);
-        if (!isMobile) setActiveAgentCode((prev) => prev || r.items?.[0]?.code);
+        const items = r.items || [];
+        setAgents(items);
+        setAgentsLoaded(true);
+        if (!isMobile) {
+          setActiveAgentCode((prev) => prev && items.some((item) => item.code === prev) ? prev : items[0]?.code);
+        }
       })
       .catch((error) => {
-        if (error?.name !== "AbortError") setAgents([]);
+        if (error?.name !== "AbortError") {
+          setAgents([]);
+          setAgentsLoaded(false);
+          if (!isMobile) setActiveAgentCode(INFINITE_CANVAS_CODE);
+        }
       });
     return () => controller.abort();
   }, [isWorkbench, section, isMobile, locale]);
@@ -256,12 +282,21 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
 
   const filteredAgents = useMemo(() => {
     const q = agentSearch.trim().toLowerCase();
-    return agents.filter((a) => {
+    const canvasAgent: AgentItem = {
+      code: INFINITE_CANVAS_CODE,
+      name: t("canvas.title"),
+      description: t("canvas.description"),
+      icon: "∞",
+      category: "tool",
+      nodes: [],
+    };
+    const source = agentsLoaded ? agents : [canvasAgent, ...agents.filter((item) => item.code !== INFINITE_CANVAS_CODE)];
+    return source.filter((a) => {
       if (agentCategory !== "all" && (a.category || "workflow") !== agentCategory) return false;
       if (q && !a.name.toLowerCase().includes(q) && !a.description?.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [agents, agentSearch, agentCategory]);
+  }, [agents, agentsLoaded, agentSearch, agentCategory, t]);
 
   const showApiDocEntry = useMemo(() => {
     if (agentCategory !== "all" && agentCategory !== "api") return false;
@@ -296,6 +331,7 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
       ? (activeModel ? td(`model.${activeModel.code}.name`, activeModel.display_name) : t("nav.models"))
       : section === "agents"
         ? (() => {
+            if (activeAgentCode === INFINITE_CANVAS_CODE) return t("canvas.title");
             const agent = agents.find((a) => a.code === activeAgentCode);
             return agent ? td(`agent.${agent.code}.name`, agent.name) : t("nav.agents");
           })()
@@ -315,7 +351,22 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
               key={item.id}
               onClick={() => {
                 setSection(item.id as Section);
-                if (item.id !== "models") setActiveModelCode(undefined);
+                if (item.id === "models") {
+                  setActiveAgentCode(undefined);
+                  router.push(activeModelCode ? `/app/models/${encodeURIComponent(activeModelCode)}` : "/app");
+                } else {
+                  setActiveModelCode(undefined);
+                  setActiveModel(null);
+                }
+                if (item.id === "agents") {
+                  const code = activeAgentCode || (agentsLoaded ? agents[0]?.code : INFINITE_CANVAS_CODE);
+                  setActiveAgentCode(code);
+                  router.push(`/app/agents/${encodeURIComponent(code || INFINITE_CANVAS_CODE)}`);
+                }
+                if (item.id === "gallery") {
+                  router.push("/app");
+                }
+                closeDrawer();
               }}
               className={clsx(
                 "flex min-w-0 flex-col items-center gap-1.5 rounded-xl px-0.5 py-3 text-[11px] transition xl:text-xs",
@@ -348,6 +399,7 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
                     setActiveModelCode(undefined);
                     setActiveModel(null);
                     setCategory(cat.code);
+                    router.push("/app");
                   }}
                   className={clsx(
                     "px-1 py-1.5 rounded-full text-[11px] leading-none text-center truncate transition",
@@ -389,6 +441,8 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
                   onClick={() => {
                     setModelPrompt("");
                     setActiveModelCode(model.code);
+                    setSection("models");
+                    router.push(`/app/models/${encodeURIComponent(model.code)}`);
                     closeDrawer();
                   }}
                   className={clsx(
@@ -428,7 +482,10 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
       {section === "agents" && (
         <>
           <div className="px-2.5 pb-1">
-            <div className="grid grid-cols-5 gap-1">
+            <div
+              className="grid gap-1"
+              style={{ gridTemplateColumns: `repeat(${AGENT_CATEGORIES.length}, minmax(0, 1fr))` }}
+            >
               {AGENT_CATEGORIES.map((cat) => (
                 <button
                   key={cat.code}
@@ -495,14 +552,16 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
             )}
             {filteredAgents.map((a) => {
               const selected = a.code === activeAgentCode;
-              const agentName = td(`agent.${a.code}.name`, a.name);
-              const agentDesc = td(`agent.${a.code}.description`, a.description || "");
+              const agentName = a.code === INFINITE_CANVAS_CODE ? t("canvas.title") : td(`agent.${a.code}.name`, a.name);
+              const agentDesc = a.code === INFINITE_CANVAS_CODE ? t("canvas.description") : td(`agent.${a.code}.description`, a.description || "");
               return (
                 <button
                   key={a.code}
                   data-active={selected ? "true" : "false"}
                   onClick={() => {
                     setActiveAgentCode(a.code);
+                    setSection("agents");
+                    router.push(`/app/agents/${encodeURIComponent(a.code)}`);
                     closeDrawer();
                   }}
                   className={clsx(
@@ -808,7 +867,11 @@ export function AppShell({ children, selectedModelCode }: AppShellProps) {
 
             {section === "agents" &&
               (activeAgentCode ? (
-                <AgentWorkspace key={activeAgentCode} code={activeAgentCode} />
+                activeAgentCode === INFINITE_CANVAS_CODE ? (
+                  <InfiniteCanvasWorkspace key={activeAgentCode} authenticated={Boolean(user)} />
+                ) : (
+                  <AgentWorkspace key={activeAgentCode} code={activeAgentCode} />
+                )
               ) : (
                 <div className="lg:hidden flex-1 flex flex-col min-h-0 bg-[#EEF1F6] overflow-y-auto dark:bg-gray-950">
                   {renderSidebarBody({ showFooter: false })}

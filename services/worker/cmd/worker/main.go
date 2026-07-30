@@ -32,6 +32,7 @@ var objectStore storage.Store
 
 const (
 	TypeImageTask    = "image:generate"
+	TypeComposeTask  = "media:compose"
 	TypeWorkflowTask = "workflow:run"
 )
 
@@ -46,6 +47,12 @@ type ImageTaskPayload struct {
 type WorkflowTaskPayload struct {
 	ProjectID int64 `json:"project_id"`
 	UserID    int64 `json:"user_id"`
+}
+
+type ComposeTaskPayload struct {
+	TaskNo string                 `json:"task_no"`
+	UserID int64                  `json:"user_id"`
+	Input  map[string]interface{} `json:"input"`
 }
 
 func main() {
@@ -136,6 +143,13 @@ func main() {
 			return err
 		}
 		return processWorkflowTask(ctx, pool, newAPIBase, newAPIToken, payload)
+	})
+	mux.HandleFunc(TypeComposeTask, func(ctx context.Context, t *asynq.Task) error {
+		var payload ComposeTaskPayload
+		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
+			return err
+		}
+		return processComposeTask(ctx, pool, payload)
 	})
 
 	log.Println("StarAI Worker started")
@@ -406,6 +420,15 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 				if stored, err := storeBase64MediaResult(ctx, p.TaskNo, idx+1, item.B64JSON, item.MimeType, "image"); err != nil {
 					log.Printf("Task %s store base64 image #%d failed: %v", p.TaskNo, idx+1, err)
 				} else if stored != "" {
+					url = stored
+				}
+			}
+			if url != "" && item.B64JSON == "" {
+				stored, err := persistGeneratedMedia(ctx, conn, url, p.TaskNo, fmt.Sprintf("image_%d", idx+1), "image", 50<<20)
+				if err != nil {
+					log.Printf("Task %s persist image #%d failed: %v", p.TaskNo, idx+1, err)
+				}
+				if stored != "" {
 					url = stored
 				}
 			}
@@ -1197,6 +1220,21 @@ type pollConfig struct {
 }
 
 func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, endpoint string) {
+	if content, ok := payload["content"].([]interface{}); ok {
+		for _, raw := range content {
+			item, _ := raw.(map[string]interface{})
+			if item == nil {
+				continue
+			}
+			if imageObj, ok := item["image_url"].(map[string]interface{}); ok {
+				if src, ok := imageObj["url"].(string); ok {
+					if strings.HasPrefix(src, "data:") || isPrivateMediaURL(src) {
+						imageObj["url"] = normalizeReferenceImage(ctx, src)
+					}
+				}
+			}
+		}
+	}
 	videoAPI := strings.Contains(endpoint, "/v1/videos")
 	for _, key := range []string{"image", "image_url", "images", "reference_images", "first_frame", "last_frame", "reference_audio"} {
 		v, ok := payload[key]
@@ -1243,7 +1281,7 @@ func collapseMediaToString(v interface{}) string {
 
 // postVideoUpstream uses JSON (public image_url) or multipart (local/private reference file).
 func postVideoUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload map[string]interface{}, taskNo string) ([]byte, int, error) {
-	target := conn.BaseURL + endpoint
+	target := joinBaseEndpoint(conn.BaseURL, endpoint)
 	refURL := ""
 	if s, ok := payload["image_url"].(string); ok {
 		refURL = strings.TrimSpace(s)
@@ -1526,13 +1564,13 @@ func extractMediaItems(raw map[string]interface{}) []mediaItem {
 
 func mediaItemFromMap(m map[string]interface{}) (mediaItem, bool) {
 	if mediaURL := firstMediaURL(m, mediaURLKeys()...); mediaURL != "" {
-		thumb := firstMediaURL(m, "thumbnail", "cover_url", "poster_url")
+		thumb := firstMediaURL(m, "thumbnail", "cover_url", "poster_url", "last_frame_url")
 		return mediaItem{URL: mediaURL, Thumbnail: thumb}, true
 	}
 	if b64 := firstString(m, encodedMediaKeys()...); b64 != "" && looksLikeEncodedMedia(b64) {
 		return mediaItem{B64JSON: b64, MimeType: firstString(m, "mime_type", "mime", "content_type", "format", "audio_format")}, true
 	}
-	for _, key := range []string{"data", "result", "output", "audio_result"} {
+	for _, key := range []string{"data", "result", "output", "content", "audio_result"} {
 		if it, ok := mediaItemFromValue(m[key], m); ok {
 			return it, true
 		}
@@ -1572,6 +1610,9 @@ func encodedMediaKeys() []string {
 
 func firstDirectMediaURL(raw map[string]interface{}) string {
 	raw = unwrapUpstreamBody(raw)
+	if item, ok := mediaItemFromMap(raw); ok && isHTTPURL(item.URL) {
+		return item.URL
+	}
 	for _, key := range []string{"video_url", "result_url", "url", "download_url", "file_url", "fail_reason", "content_url"} {
 		if u := firstMediaURL(raw, key); u != "" && !strings.Contains(strings.ToLower(u), "/content") {
 			return u
@@ -1714,6 +1755,61 @@ func shouldMirrorMediaURL(raw string, conn connectionConfig) bool {
 	}
 	// 同源地址（含 /v1/videos/{id}/content）需带鉴权下载后转存；公网 CDN 直链跳过转存
 	return strings.EqualFold(u.Host, base.Host)
+}
+
+func isManagedMediaURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "/uploads-local/") || strings.Contains(lower, "/starai-works/works/") {
+		return true
+	}
+	for _, base := range []string{
+		os.Getenv("MINIO_PUBLIC_URL"),
+		os.Getenv("LOCAL_STORAGE_PUBLIC_URL"),
+	} {
+		base = strings.TrimRight(strings.TrimSpace(base), "/")
+		if base != "" && strings.HasPrefix(raw, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// persistGeneratedMedia makes externally hosted generation results durable and
+// browser-friendly. Some providers return image CDN URLs as
+// application/octet-stream; storing the detected media type avoids intermittent
+// broken previews and keeps completed projects independent from expiring URLs.
+func persistGeneratedMedia(ctx context.Context, conn connectionConfig, mediaURL, taskNo, itemName, kind string, maxBytes int64) (string, error) {
+	mediaURL = strings.TrimSpace(mediaURL)
+	if mediaURL == "" || strings.HasPrefix(mediaURL, "data:") || !isHTTPURL(mediaURL) || isManagedMediaURL(mediaURL) {
+		return "", nil
+	}
+	if objectStore == nil {
+		return "", fmt.Errorf("对象存储未配置")
+	}
+	data, contentType, err := downloadAuthenticatedMedia(ctx, conn, mediaURL, maxBytes)
+	if err != nil {
+		return "", err
+	}
+	detected := http.DetectContentType(data)
+	if strings.TrimSpace(contentType) == "" || strings.Contains(strings.ToLower(contentType), "octet-stream") {
+		contentType = detected
+	}
+	if !validDownloadedMedia(kind, contentType, data) {
+		return "", fmt.Errorf("上游返回的%s格式无效: content-type=%s", mediaKindLabel(kind), contentType)
+	}
+	ext := mediaExtForContentType(contentType, kind)
+	safeName := strings.NewReplacer("/", "_", "\\", "_", " ", "_").Replace(itemName)
+	objectName := fmt.Sprintf("works/%s/%s/%s_%d%s", kind, taskNo, safeName, time.Now().UnixNano(), ext)
+	publicURL, err := objectStore.Upload(ctx, objectName, contentType, bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return "", err
+	}
+	log.Printf("Task %s persisted external %s -> %s (%d bytes)", taskNo, kind, publicURL, len(data))
+	return publicURL, nil
 }
 
 func mirrorUpstreamMedia(ctx context.Context, conn connectionConfig, mediaURL, upstreamID, taskNo, kind string) (string, error) {
@@ -2114,6 +2210,10 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 		case "succeeded", "success", "completed", "done", "finished":
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
 				return nil, fmt.Errorf("%s", failMsg)
+			}
+			if items := extractMediaItems(raw); len(items) > 0 {
+				log.Printf("Task %s poll #%d got %d media item(s)", taskNo, attempt, len(items))
+				return items, nil
 			}
 			if mediaURL := firstSuccessMediaURL(raw, upstreamID, conn); mediaURL != "" {
 				log.Printf("Task %s poll #%d got media url: %s", taskNo, attempt, truncateText(mediaURL, 100))

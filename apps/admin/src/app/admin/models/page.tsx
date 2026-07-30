@@ -37,9 +37,40 @@ interface ChannelPreset {
   sort_order: number;
 }
 
+interface ModelConnectionTest {
+  ok: boolean;
+  message: string;
+  status_code?: number;
+  latency_ms: number;
+}
+
 const REQUEST_MODES = ["chat_completions", "responses", "images", "video", "audio", "custom"];
 const PAGE_SIZE = 10;
 const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
+const SEEDANCE_RESOLUTIONS = ["480p", "720p", "1080p", "4k"] as const;
+const DEFAULT_SEEDANCE_PRICE_RULE = {
+  billing_type: "dynamic",
+  strategy: "seedance_2_tokens",
+  currency: "¥",
+  points_per_cny: 1,
+  platform_multiplier: 1,
+  default_resolution: "720p",
+  default_input_video_seconds: 4,
+  video_min_token_multiplier: 1.8,
+  tokens_per_second: {
+    "480p": 10044,
+    "720p": 21600,
+    "1080p": 48600,
+    "4k": 194400,
+  },
+  rates_per_m_tokens: {
+    "480p": { without_video: 46, with_video: 28 },
+    "720p": { without_video: 46, with_video: 28 },
+    "1080p": { without_video: 51, with_video: 31 },
+    "4k": { without_video: 26, with_video: 16 },
+  },
+  fallback_cost: 4.97,
+};
 
 const normalizeImageQuality = (value: unknown) => {
   const text = String(value ?? "").trim().toUpperCase();
@@ -61,6 +92,48 @@ function ModelLogo({ model }: { model: Pick<AdminModel, "display_name" | "icon_u
     return <img src={model.icon_url} alt={model.display_name} onError={() => setFailed(true)} className="h-9 w-9 rounded-xl object-cover ring-1 ring-gray-100" />;
   }
   return <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-950 text-xs font-semibold text-white">{initial}</div>;
+}
+
+function ConnectionTestIcon({ loading = false }: { loading?: boolean }) {
+  if (loading) {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4 animate-spin fill-none stroke-current" strokeWidth="2">
+        <path d="M20 12a8 8 0 1 1-2.34-5.66" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.8">
+      <path d="M8 11V5m8 6V5M6 8h12v3a6 6 0 0 1-6 6v3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9.5 5V3m5 2V3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SeedancePriceInput({
+  label,
+  value,
+  step,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="text-xs text-gray-500">
+      {label}
+      <input
+        type="number"
+        min={0}
+        step={step}
+        className="mt-1 w-full rounded-lg border bg-white px-2 py-2 text-sm"
+        value={value}
+        onChange={(event) => onChange(Math.max(0, Number(event.target.value) || 0))}
+      />
+    </label>
+  );
 }
 
 const BRAND_WORDS: Record<string, string> = {
@@ -291,6 +364,9 @@ export default function ModelsPage() {
   const [languageErr, setLanguageErr] = useState("");
   const [languageSaving, setLanguageSaving] = useState(false);
   const [audioTemplateKey, setAudioTemplateKey] = useState("");
+  const [videoTemplateKey, setVideoTemplateKey] = useState("");
+  const [testingModelId, setTestingModelId] = useState<number | null>(null);
+  const [connectionTests, setConnectionTests] = useState<Record<number, ModelConnectionTest>>({});
 
   const [filterCategory, setFilterCategory] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -368,6 +444,7 @@ export default function ModelsPage() {
     setForm(emptyForm);
     setBatchRows([emptyBatchRow()]);
     setAudioTemplateKey("");
+    setVideoTemplateKey("");
     setErr("");
     setShowForm(true);
   };
@@ -407,6 +484,9 @@ export default function ModelsPage() {
       runtime_rule: JSON.stringify(m.runtime_rule ?? {}, null, 2),
     });
     setAudioTemplateKey("");
+    setVideoTemplateKey(
+      (m.runtime_rule as any)?.upstream?.adapter === "volcengine_seedance_2" ? "volcengine_seedance_2" : ""
+    );
     setErr("");
     setShowForm(true);
   };
@@ -418,6 +498,34 @@ export default function ModelsPage() {
       return fallback;
     }
   };
+
+  const getSeedancePriceRule = (priceRuleText: string) => {
+    const current = safeParseJson(priceRuleText, {}) as Record<string, any>;
+    const currentTokens = (current.tokens_per_second ?? {}) as Record<string, unknown>;
+    const currentRates = (current.rates_per_m_tokens ?? {}) as Record<string, any>;
+    return {
+      ...DEFAULT_SEEDANCE_PRICE_RULE,
+      ...current,
+      tokens_per_second: {
+        ...DEFAULT_SEEDANCE_PRICE_RULE.tokens_per_second,
+        ...currentTokens,
+      },
+      rates_per_m_tokens: Object.fromEntries(
+        SEEDANCE_RESOLUTIONS.map((resolution) => [
+          resolution,
+          {
+            ...DEFAULT_SEEDANCE_PRICE_RULE.rates_per_m_tokens[resolution],
+            ...((currentRates[resolution] ?? {}) as Record<string, unknown>),
+          },
+        ])
+      ),
+    } as Record<string, any>;
+  };
+
+  const updateSeedancePriceRule = (
+    priceRuleText: string,
+    updater: (rule: Record<string, any>) => Record<string, any>
+  ) => JSON.stringify(updater(getSeedancePriceRule(priceRuleText)), null, 2);
 
   const getCaps = (runtimeRuleText: string) => {
     const rr = safeParseJson(runtimeRuleText, {});
@@ -603,6 +711,7 @@ export default function ModelsPage() {
     { value: "single_ref", label: "单参考图 (Sora 类)" },
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
     { value: "frame_pair", label: "首尾帧 + 参考图 (VEO 类)" },
+    { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
     { value: "none", label: "不上传图片" },
   ];
 
@@ -617,6 +726,9 @@ export default function ModelsPage() {
       max_reference_images: Number(video.max_reference_images ?? 1),
       max_total_images: Number(video.max_total_images ?? 9),
       ref_slot_max: Number(ref.max ?? 4),
+      ref_video_max: Number(((video.reference_videos ?? {}) as Record<string, any>).max ?? 3),
+      ref_audio_max: Number(((video.reference_audios ?? {}) as Record<string, any>).max ?? 3),
+      mode_param: String(video.mode_param || "generation_mode"),
       prompt_hint: video.prompt_hint || "",
       show_channel: video.show_channel === true,
       show_web_search: video.show_web_search === true,
@@ -696,6 +808,9 @@ export default function ModelsPage() {
             last: { key: "last_frame", label: "尾帧", max: 1 },
           },
           reference_images: { key: "reference_images", max: next.ref_slot_max },
+          reference_videos: { key: "reference_videos", max: next.ref_video_max },
+          reference_audios: { key: "reference_audios", max: next.ref_audio_max },
+          mode_param: next.mode_param,
         },
         upstream: { ...(((rr?.upstream as Record<string, unknown>) ?? {}) as Record<string, unknown>), include, map: mapObj },
         capabilities: { ...(rr?.capabilities ?? {}), web_search: false, deep_think: false },
@@ -1389,6 +1504,178 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_second", unit_price: 0.08 }, null, 2),
   });
 
+  const applyVolcengineSeedance2Standard = (prev: FormState): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    new_api_model:
+      prev.new_api_model && prev.new_api_model.toLowerCase().includes("seedance")
+        ? prev.new_api_model
+        : "doubao-seedance-2-0-260128",
+    new_api_endpoint: "/contents/generations/tasks",
+    new_api_extra_params: setConnection(prev.new_api_extra_params, {
+      protocol: "new_api",
+      auth_type: "bearer",
+      base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      api_key_header: "Authorization",
+    }),
+    input_schema: JSON.stringify(
+      {
+        type: "object",
+        properties: {
+          generation_mode: {
+            type: "string",
+            title: "素材组合",
+            enum: [
+              "text",
+              "image",
+              "video",
+              "image_audio",
+              "image_video",
+              "video_audio",
+              "image_video_audio",
+              "draft_task",
+            ],
+            enumLabels: {
+              text: "纯文本",
+              image: "图片 + 文本（可选）",
+              video: "视频 + 文本（可选）",
+              image_audio: "图片 + 音频 + 文本（可选）",
+              image_video: "图片 + 视频 + 文本（可选）",
+              video_audio: "视频 + 音频 + 文本（可选）",
+              image_video_audio: "图片 + 视频 + 音频 + 文本（可选）",
+              draft_task: "样片任务 ID",
+            },
+            default: "text",
+            "x-order": 1,
+            "x-widget": "option_menu",
+            "x-icon": "sparkles",
+            "x-highlight": true,
+          },
+          generate_audio: {
+            type: "boolean",
+            title: "同步音频",
+            default: true,
+            "x-order": 2,
+            "x-widget": "boolean_toggle",
+            "x-icon": "music",
+            "x-placement": "top",
+          },
+          duration: {
+            type: "integer",
+            title: "视频时长",
+            enum: [4, 5, 6, 8, 10, 12, 15, -1],
+            enumLabels: { "4": "4s", "5": "5s", "6": "6s", "8": "8s", "10": "10s", "12": "12s", "15": "15s", "-1": "智能时长" },
+            default: 5,
+            "x-order": 3,
+            "x-widget": "option_menu",
+            "x-icon": "clock",
+          },
+          ratio: {
+            type: "string",
+            title: "画面比例",
+            enum: ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
+            enumLabels: { adaptive: "智能适配" },
+            default: "adaptive",
+            "x-order": 4,
+            "x-widget": "option_menu",
+            "x-icon": "ratio",
+          },
+          resolution: {
+            type: "string",
+            title: "分辨率",
+            enum: ["480p", "720p", "1080p", "4k"],
+            default: "720p",
+            "x-order": 5,
+            "x-widget": "option_menu",
+            "x-icon": "4k",
+          },
+          watermark: {
+            type: "boolean",
+            title: "AI 水印",
+            default: false,
+            "x-order": 6,
+            "x-widget": "boolean_toggle",
+            "x-icon": "sparkles",
+          },
+          return_last_frame: {
+            type: "boolean",
+            title: "返回尾帧",
+            default: false,
+            "x-order": 7,
+            "x-widget": "boolean_toggle",
+            "x-icon": "target",
+          },
+          priority: {
+            type: "integer",
+            title: "任务优先级",
+            enum: [0, 3, 5, 9],
+            enumLabels: { "0": "普通", "3": "较高", "5": "高", "9": "最高" },
+            default: 0,
+            "x-order": 8,
+            "x-widget": "option_menu",
+            "x-icon": "target",
+            "x-placement": "top",
+          },
+        },
+      },
+      null,
+      2
+    ),
+    default_params: JSON.stringify(
+      {
+        generation_mode: "text",
+        generate_audio: true,
+        duration: 5,
+        ratio: "adaptive",
+        resolution: "720p",
+        watermark: false,
+        return_last_frame: false,
+        priority: 0,
+        portrait_asset_id: "",
+        portrait_asset_type: "image",
+        draft_task_id: "",
+      },
+      null,
+      2
+    ),
+    runtime_rule: JSON.stringify(
+      {
+        video: {
+          upload_profile: "seedance_2",
+          min_reference_images: 0,
+          max_reference_images: 9,
+          max_total_images: 9,
+          count_toward_total: true,
+          prompt_hint: "描述目标视频；在素材组合模式下可留空，并可用“图片1 / 视频1 / 音频1”引用素材",
+          prompt_required: false,
+          show_channel: false,
+          show_web_search: false,
+          count_options: [1],
+          count_allow_custom: false,
+          count_max: 1,
+          mode_param: "generation_mode",
+          reference_images: { key: "reference_images", max: 9 },
+          reference_videos: { key: "reference_videos", max: 3 },
+          reference_audios: { key: "reference_audios", max: 3 },
+        },
+        upstream: {
+          adapter: "volcengine_seedance_2",
+          include: ["generation_mode", "generate_audio", "duration", "ratio", "resolution", "watermark", "return_last_frame", "priority", "reference_images", "reference_videos", "reference_audios", "portrait_asset_id", "portrait_asset_type", "draft_task_id"],
+          map: {},
+          poll_path: "/contents/generations/tasks/{id}",
+          poll_interval_sec: 10,
+          poll_timeout_sec: 7200,
+          request_timeout_sec: 120,
+        },
+        capabilities: { web_search: false, deep_think: false },
+      },
+      null,
+      2
+    ),
+    price_rule: JSON.stringify(DEFAULT_SEEDANCE_PRICE_RULE, null, 2),
+  });
+
   const applyImageStandard = (prev: FormState): FormState => ({
     ...applyImageEndpointPreset(prev, prev.new_api_endpoint === "/v1/videos" ? "banana_async" : "openai_images"),
   });
@@ -1414,6 +1701,28 @@ export default function ModelsPage() {
     } catch {
       setErr("JSON 字段格式有误，请检查 input_schema / default_params / new_api_extra_params / price_rule / runtime_rule");
       return;
+    }
+    const parsedRuntimeRule = runtimeRule as Record<string, any>;
+    const parsedPriceRule = priceRule as Record<string, any>;
+    const isSeedance2 =
+      form.category === "video" &&
+      (parsedRuntimeRule?.upstream?.adapter === "volcengine_seedance_2" ||
+        parsedRuntimeRule?.video?.upload_profile === "seedance_2");
+    if (isSeedance2) {
+      if (parsedPriceRule.billing_type !== "dynamic" || parsedPriceRule.strategy !== "seedance_2_tokens") {
+        setErr("Seedance 2.0 必须使用动态 Token 计费，请在“Seedance 2.0 动态计费”区域点击修复并设置价格");
+        return;
+      }
+      const invalidResolution = SEEDANCE_RESOLUTIONS.find((resolution) => {
+        const tokens = Number(parsedPriceRule.tokens_per_second?.[resolution] ?? 0);
+        const withoutVideo = Number(parsedPriceRule.rates_per_m_tokens?.[resolution]?.without_video ?? 0);
+        const withVideo = Number(parsedPriceRule.rates_per_m_tokens?.[resolution]?.with_video ?? 0);
+        return tokens <= 0 || withoutVideo <= 0 || withVideo <= 0;
+      });
+      if (invalidResolution) {
+        setErr(`Seedance 2.0 的 ${invalidResolution} Token/秒及两档价格必须大于 0`);
+        return;
+      }
     }
     const isMultiCollabForm = form.category === "multi_collab";
     const defaultChannelKey = getDefaultChannelKey(form.default_params);
@@ -1567,6 +1876,31 @@ export default function ModelsPage() {
     load();
   };
 
+  const testConnection = async (m: AdminModel) => {
+    if (testingModelId !== null) return;
+    setTestingModelId(m.id);
+    setConnectionTests((current) => {
+      const next = { ...current };
+      delete next[m.id];
+      return next;
+    });
+    try {
+      const result = await adminApi<ModelConnectionTest>(`/models/${m.id}/test-connection`, { method: "POST" });
+      setConnectionTests((current) => ({ ...current, [m.id]: result }));
+    } catch (error) {
+      setConnectionTests((current) => ({
+        ...current,
+        [m.id]: {
+          ok: false,
+          message: error instanceof Error ? error.message : "测试连接失败",
+          latency_ms: 0,
+        },
+      }));
+    } finally {
+      setTestingModelId(null);
+    }
+  };
+
   const remove = async (m: AdminModel) => {
     if (
       !confirm(
@@ -1640,6 +1974,50 @@ export default function ModelsPage() {
     } finally {
       setLogoUploading("");
     }
+  };
+
+  const currentPriceRule = safeParseJson(form.price_rule, {}) as Record<string, any>;
+  const seedancePriceRule = getSeedancePriceRule(form.price_rule);
+  const isSeedanceVideoForm =
+    form.category === "video" &&
+    (videoTemplateKey === "volcengine_seedance_2" ||
+      getVideoRule(form.runtime_rule).upload_profile === "seedance_2" ||
+      (safeParseJson(form.runtime_rule, {}) as any)?.upstream?.adapter === "volcengine_seedance_2");
+  const isLegacySeedancePrice =
+    isSeedanceVideoForm &&
+    (currentPriceRule.billing_type !== "dynamic" || currentPriceRule.strategy !== "seedance_2_tokens");
+  const setSeedanceScalar = (key: string, value: string | number) => {
+    setForm((prev) => ({
+      ...prev,
+      price_rule: updateSeedancePriceRule(prev.price_rule, (rule) => ({ ...rule, [key]: value })),
+    }));
+  };
+  const setSeedanceResolutionPrice = (
+    resolution: (typeof SEEDANCE_RESOLUTIONS)[number],
+    field: "tokens_per_second" | "without_video" | "with_video",
+    value: number
+  ) => {
+    setForm((prev) => ({
+      ...prev,
+      price_rule: updateSeedancePriceRule(prev.price_rule, (rule) => {
+        if (field === "tokens_per_second") {
+          return {
+            ...rule,
+            tokens_per_second: { ...rule.tokens_per_second, [resolution]: value },
+          };
+        }
+        return {
+          ...rule,
+          rates_per_m_tokens: {
+            ...rule.rates_per_m_tokens,
+            [resolution]: {
+              ...rule.rates_per_m_tokens[resolution],
+              [field]: value,
+            },
+          },
+        };
+      }),
+    }));
   };
 
   return (
@@ -2098,6 +2476,7 @@ export default function ModelsPage() {
               onChange={(e) =>
                 setForm((prev) => {
                   setAudioTemplateKey("");
+                  setVideoTemplateKey("");
                   const next = {
                     ...prev,
                     request_mode: e.target.value,
@@ -2126,6 +2505,7 @@ export default function ModelsPage() {
               onChange={(e) =>
                 setForm((prev) => {
                   setAudioTemplateKey("");
+                  setVideoTemplateKey("");
                   if (e.target.value === "multi_collab") return applyMultiCollabStandard(prev);
                   if (e.target.value === "image") return applyImageStandard(prev);
                   if (e.target.value === "video") return applyVideoStandard(prev);
@@ -2181,6 +2561,7 @@ export default function ModelsPage() {
                 value={form.new_api_endpoint}
                 onChange={(e) => {
                   if (form.category === "audio") setAudioTemplateKey("");
+                  if (form.category === "video") setVideoTemplateKey("");
                   setForm({ ...form, new_api_endpoint: e.target.value });
                 }}
               />
@@ -2397,6 +2778,111 @@ export default function ModelsPage() {
                 <div className="text-xs text-gray-500">
                   视频模型通过 runtime_rule.video 驱动前台上传区与参数条；input_schema 定义底部可选参数（x-widget / x-order）。
                 </div>
+                <div className="rounded-xl border border-cyan-100 bg-cyan-50/60 p-4">
+                  <label className="text-xs text-gray-500">上游接口模板</label>
+                  <div className="mt-1 flex gap-2">
+                    <select
+                      className="min-w-0 flex-1 rounded-lg border bg-white px-3 py-2 text-sm"
+                      value={videoTemplateKey}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setVideoTemplateKey(value);
+                        if (value === "volcengine_seedance_2") {
+                          setForm((prev) => applyVolcengineSeedance2Standard(prev));
+                        }
+                      }}
+                    >
+                      <option value="">通用视频接口 / 自定义配置</option>
+                      <option value="volcengine_seedance_2">火山方舟 · Doubao Seedance 2.0（官方异步 API）</option>
+                    </select>
+                    {videoTemplateKey === "volcengine_seedance_2" && (
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-xs font-medium text-cyan-700 hover:bg-cyan-50"
+                        onClick={() => setForm((prev) => applyVolcengineSeedance2Standard(prev))}
+                      >
+                        重新应用模板
+                      </button>
+                    )}
+                  </div>
+                  <div className="mt-2 text-[11px] leading-5 text-gray-500">
+                    自动配置官方 Base URL、创建任务与轮询地址、8 种官方内容组合、9 图 / 3 视频 / 3 音频上限及 4–15 秒参数。已存在的模型可点“重新应用模板”同步新配置，API Key 仍需管理员填写。
+                  </div>
+                </div>
+                {isSeedanceVideoForm && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">Seedance 2.0 动态计费</div>
+                        <div className="mt-1 text-[11px] leading-5 text-gray-500">
+                          不是固定“算力/秒”。实际费用 = 输出时长 × 对应分辨率 Token/秒 × 价格/百万 Token；包含参考视频时使用“含视频输入”价格并计入输入视频 Token。
+                        </div>
+                      </div>
+                      {isLegacySeedancePrice && (
+                        <button
+                          type="button"
+                          className="shrink-0 rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-white hover:bg-amber-600"
+                          onClick={() => setForm((prev) => ({ ...prev, price_rule: JSON.stringify(DEFAULT_SEEDANCE_PRICE_RULE, null, 2) }))}
+                        >
+                          修复为动态计费
+                        </button>
+                      )}
+                    </div>
+                    {isLegacySeedancePrice && (
+                      <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-600">
+                        当前仍是旧计费规则：{String(currentPriceRule.billing_type || "未配置")}
+                        {currentPriceRule.unit_price != null ? `，单价 ${currentPriceRule.unit_price}` : ""}。请点击“修复为动态计费”后保存模型。
+                      </div>
+                    )}
+                    <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+                      <label className="text-xs text-gray-500">
+                        默认分辨率
+                        <select
+                          className="mt-1 w-full rounded-lg border bg-white px-2 py-2 text-sm"
+                          value={String(seedancePriceRule.default_resolution || "720p")}
+                          onChange={(e) => setSeedanceScalar("default_resolution", e.target.value)}
+                        >
+                          {SEEDANCE_RESOLUTIONS.map((resolution) => <option key={resolution} value={resolution}>{resolution}</option>)}
+                        </select>
+                      </label>
+                      <SeedancePriceInput label="算力点/元" value={Number(seedancePriceRule.points_per_cny ?? 1)} step={0.01} onChange={(value) => setSeedanceScalar("points_per_cny", value)} />
+                      <SeedancePriceInput label="平台倍率" value={Number(seedancePriceRule.platform_multiplier ?? 1)} step={0.01} onChange={(value) => setSeedanceScalar("platform_multiplier", value)} />
+                      <SeedancePriceInput label="默认输入视频秒数" value={Number(seedancePriceRule.default_input_video_seconds ?? 4)} step={0.1} onChange={(value) => setSeedanceScalar("default_input_video_seconds", value)} />
+                      <SeedancePriceInput label="估价兜底算力" value={Number(seedancePriceRule.fallback_cost ?? 0)} step={0.01} onChange={(value) => setSeedanceScalar("fallback_cost", value)} />
+                    </div>
+                    <div className="mt-4 overflow-x-auto rounded-xl border border-amber-100 bg-white">
+                      <table className="w-full min-w-[680px] text-xs">
+                        <thead className="bg-amber-50 text-gray-500">
+                          <tr>
+                            <th className="px-3 py-2 text-left">分辨率</th>
+                            <th className="px-3 py-2 text-left">输出 Token/秒</th>
+                            <th className="px-3 py-2 text-left">不含视频输入（元/1M Tokens）</th>
+                            <th className="px-3 py-2 text-left">含视频输入（元/1M Tokens）</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {SEEDANCE_RESOLUTIONS.map((resolution) => (
+                            <tr key={resolution} className="border-t border-amber-100">
+                              <td className="px-3 py-2 font-semibold text-gray-800">{resolution}</td>
+                              <td className="px-3 py-2">
+                                <input type="number" min={0} step={1} className="w-full rounded-lg border px-2 py-1.5" value={Number(seedancePriceRule.tokens_per_second?.[resolution] ?? 0)} onChange={(e) => setSeedanceResolutionPrice(resolution, "tokens_per_second", Math.max(0, Number(e.target.value) || 0))} />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input type="number" min={0} step={0.01} className="w-full rounded-lg border px-2 py-1.5" value={Number(seedancePriceRule.rates_per_m_tokens?.[resolution]?.without_video ?? 0)} onChange={(e) => setSeedanceResolutionPrice(resolution, "without_video", Math.max(0, Number(e.target.value) || 0))} />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input type="number" min={0} step={0.01} className="w-full rounded-lg border px-2 py-1.5" value={Number(seedancePriceRule.rates_per_m_tokens?.[resolution]?.with_video ?? 0)} onChange={(e) => setSeedanceResolutionPrice(resolution, "with_video", Math.max(0, Number(e.target.value) || 0))} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3 text-[11px] text-gray-500">
+                      “含视频输入”不是 28 算力/秒；默认值 28 表示每百万输出 Token 的上游价格。平台最终换算为算力点并乘以平台倍率。
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="text-xs text-gray-500">上传形态 upload_profile</label>
@@ -2974,16 +3460,48 @@ export default function ModelsPage() {
                     {m.is_enabled ? "启用" : "禁用"}
                   </span>
                 </td>
-                <td className="px-4 py-3 space-x-3 whitespace-nowrap">
-                  <button onClick={() => openEdit(m)} className="text-xs text-secondary hover:underline">
-                    编辑
-                  </button>
-                  <button onClick={() => toggleEnabled(m)} className="text-xs text-gray-500 hover:underline">
-                    {m.is_enabled ? "禁用" : "启用"}
-                  </button>
-                  <button onClick={() => remove(m)} className="text-xs text-red-500 hover:underline">
-                    删除
-                  </button>
+                <td className="min-w-[260px] px-4 py-3">
+                  <div className="flex items-center gap-3 whitespace-nowrap">
+                    <button
+                      type="button"
+                      onClick={() => testConnection(m)}
+                      disabled={testingModelId !== null}
+                      title={testingModelId === m.id ? "正在测试连接" : "测试连接"}
+                      aria-label={`测试 ${m.display_name} 的模型连接`}
+                      className={[
+                        "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition",
+                        testingModelId === m.id
+                          ? "border-blue-200 bg-blue-50 text-blue-600"
+                          : connectionTests[m.id]?.ok
+                            ? "border-green-200 bg-green-50 text-green-600 hover:bg-green-100"
+                            : connectionTests[m.id]
+                              ? "border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+                              : "border-gray-200 bg-white text-gray-500 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-600",
+                        testingModelId !== null && testingModelId !== m.id ? "cursor-not-allowed opacity-40" : "",
+                      ].join(" ")}
+                    >
+                      <ConnectionTestIcon loading={testingModelId === m.id} />
+                    </button>
+                    <button onClick={() => openEdit(m)} className="text-xs text-secondary hover:underline">
+                      编辑
+                    </button>
+                    <button onClick={() => toggleEnabled(m)} className="text-xs text-gray-500 hover:underline">
+                      {m.is_enabled ? "禁用" : "启用"}
+                    </button>
+                    <button onClick={() => remove(m)} className="text-xs text-red-500 hover:underline">
+                      删除
+                    </button>
+                  </div>
+                  {testingModelId === m.id && <p className="mt-1.5 text-[11px] text-blue-600">正在验证地址、鉴权与模型路由…</p>}
+                  {testingModelId !== m.id && connectionTests[m.id] && (
+                    <p
+                      className={connectionTests[m.id].ok ? "mt-1.5 max-w-[300px] whitespace-normal text-[11px] leading-4 text-green-600" : "mt-1.5 max-w-[300px] whitespace-normal text-[11px] leading-4 text-red-600"}
+                      title={connectionTests[m.id].message}
+                    >
+                      {connectionTests[m.id].ok ? "连接正常" : "连接失败"} · {connectionTests[m.id].message}
+                      {connectionTests[m.id].latency_ms > 0 ? `（${connectionTests[m.id].latency_ms}ms）` : ""}
+                    </p>
+                  )}
                 </td>
               </tr>
             ))}

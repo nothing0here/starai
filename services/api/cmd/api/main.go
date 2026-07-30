@@ -68,6 +68,7 @@ func main() {
 	homeSvc := service.NewHomeService(pool)
 	presetSvc := service.NewPresetService(pool)
 	assetSvc := service.NewAssetService(pool)
+	canvasSvc := service.NewCanvasService(pool)
 	roleTplSvc := service.NewRoleTemplateService(pool)
 	oauthSvc := service.NewOAuthService(pool, billingSvc, authSvc, cacheClient)
 	captchaSvc := service.NewCaptchaService(cacheClient)
@@ -119,7 +120,7 @@ func main() {
 	}
 	startExpiredWorksCleaner(ctx, worksSvc, storageClient)
 
-	h := handler.New(cfg, authSvc, walletSvc, modelSvc, chatSvc, taskSvc, worksSvc, adminSvc, billingSvc, paymentSvc, opsSvc, gallerySvc, agentSvc, cacheClient, storageClient, homeSvc, presetSvc, assetSvc, roleTplSvc, oauthSvc, captchaSvc, emailOTPSvc, contentI18nSvc)
+	h := handler.New(cfg, authSvc, walletSvc, modelSvc, chatSvc, taskSvc, worksSvc, adminSvc, billingSvc, paymentSvc, opsSvc, gallerySvc, agentSvc, cacheClient, storageClient, homeSvc, presetSvc, assetSvc, roleTplSvc, oauthSvc, captchaSvc, emailOTPSvc, contentI18nSvc, canvasSvc)
 
 	r := gin.New()
 	trustedProxies := []string{}

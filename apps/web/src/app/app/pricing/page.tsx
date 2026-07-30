@@ -39,6 +39,17 @@ function priceText(m: Model, t: (key: string, vars?: Record<string, string | num
       return t("pricing.computePerRequest", { value: Number(r.unit_price ?? 0) });
     case "per_second":
       return t("pricing.computePerSecond", { value: Number(r.unit_price ?? 0) });
+    case "dynamic": {
+      if (r.strategy === "seedance_2_tokens") {
+        const rates = (r.rates_per_m_tokens ?? {}) as Record<string, Record<string, unknown>>;
+        const pair = (resolution: string) => {
+          const row = rates[resolution] || {};
+          return `${Number(row.without_video ?? 0)}/${Number(row.with_video ?? 0)}`;
+        };
+        return `480/720p ${pair("720p")} · 1080p ${pair("1080p")} · 4K ${pair("4k")} 元 / 1M Tokens（无/有视频输入）`;
+      }
+      return t("pricing.dynamicEstimate");
+    }
     default:
       return t("pricing.dynamicEstimate");
   }

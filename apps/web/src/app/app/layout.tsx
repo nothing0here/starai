@@ -10,6 +10,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const selectedModelCode = pathname.startsWith("/app/models/")
     ? pathname.split("/").pop()
     : undefined;
+  const selectedAgentCode = pathname.startsWith("/app/agents/")
+    ? pathname.split("/").pop()
+    : undefined;
 
   useEffect(() => {
     const stored = localStorage.getItem("theme");
@@ -19,7 +22,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <AppShell selectedModelCode={selectedModelCode}>{children}</AppShell>
+      <AppShell selectedModelCode={selectedModelCode} selectedAgentCode={selectedAgentCode}>{children}</AppShell>
       <ForcedAnnouncementModal />
     </>
   );

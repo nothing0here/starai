@@ -9,6 +9,7 @@ import (
 
 const (
 	TypeImageTask    = "image:generate"
+	TypeComposeTask  = "media:compose"
 	TypeWorkflowTask = "workflow:run"
 	QueueDefault     = "default"
 	QueueImage       = "image"
@@ -26,6 +27,12 @@ type ImageTaskPayload struct {
 type WorkflowTaskPayload struct {
 	ProjectID int64 `json:"project_id"`
 	UserID    int64 `json:"user_id"`
+}
+
+type ComposeTaskPayload struct {
+	TaskNo string                 `json:"task_no"`
+	UserID int64                  `json:"user_id"`
+	Input  map[string]interface{} `json:"input"`
 }
 
 func NewClient(redisURL string) (*asynq.Client, error) {
@@ -56,5 +63,15 @@ func EnqueueWorkflowTask(client *asynq.Client, payload WorkflowTaskPayload) erro
 	// AI 漫剧会串行经历规划、关键帧、视频片段和合成，默认 30 分钟不足以
 	// 覆盖正常的第三方视频轮询。阶段状态由数据库持久化，超时仍保留兜底重试。
 	_, err = client.Enqueue(task, asynq.Queue(QueueWorkflow), asynq.MaxRetry(1), asynq.Timeout(6*time.Hour))
+	return err
+}
+
+func EnqueueComposeTask(client *asynq.Client, payload ComposeTaskPayload) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	task := asynq.NewTask(TypeComposeTask, data)
+	_, err = client.Enqueue(task, asynq.Queue(QueueImage), asynq.MaxRetry(1), asynq.Timeout(90*time.Minute))
 	return err
 }

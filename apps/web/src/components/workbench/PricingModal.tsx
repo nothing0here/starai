@@ -98,6 +98,12 @@ export function PricingModal({
   const unitPrice = num(price?.unit_price);
   const currency = typeof price?.currency === "string" && price.currency ? price.currency : "";
   const surchargePerM = num(price?.surcharge_per_m);
+  const isSeedanceDynamic = billingType === "dynamic" && price?.strategy === "seedance_2_tokens";
+  const seedanceRates = ["480p", "720p", "1080p", "4k"].map((resolution) => ({
+    resolution,
+    withoutVideo: num(price?.rates_per_m_tokens?.[resolution]?.without_video),
+    withVideo: num(price?.rates_per_m_tokens?.[resolution]?.with_video),
+  }));
   const tokenRows = TOKEN_PRICE_ROWS.map((row) => ({
     ...row,
     value: pricePerM(price, row.key),
@@ -114,6 +120,8 @@ export function PricingModal({
           ? "按张计费"
           : billingType === "per_second"
             ? "按秒计费"
+            : isSeedanceDynamic
+              ? "按 Seedance 输出 Token 动态计费"
             : billingType || "未知";
 
   const headerHint =
@@ -121,6 +129,8 @@ export function PricingModal({
       ? "按 Token 计费，页面统一换算为每 1M Tokens 展示。"
       : billingType === "per_second"
         ? "按秒计费，通常会受到视频时长与生成数量共同影响。"
+        : isSeedanceDynamic
+          ? "按输出 Token 动态计费，分辨率、输出时长和是否包含参考视频都会影响费用。"
         : billingType === "per_request"
           ? "按次计费，每次调用消耗固定额度。"
           : "查看当前模型的计费方式、展示口径与单价。";
@@ -267,7 +277,9 @@ export function PricingModal({
                     <div className="text-xs text-gray-400">计费方式</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{billingLabel}</div>
                     <div className="mt-2 text-xs text-gray-400">
-                      {billingType === "per_second"
+                      {isSeedanceDynamic
+                        ? "预估费用会根据输出时长、分辨率、参考视频时长和官方 Token 单价动态计算。"
+                        : billingType === "per_second"
                         ? "费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。"
                         : billingType === "per_token"
                           ? "输入、输出、缓存读取等价格会分别展示，方便核对实际成本。"
@@ -277,7 +289,9 @@ export function PricingModal({
                   <div className="soft-card p-4">
                     <div className="text-xs text-gray-400">展示口径</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
-                      {billingType === "per_token"
+                      {isSeedanceDynamic
+                        ? "动态估算"
+                        : billingType === "per_token"
                         ? "每 1M Tokens"
                         : billingType === "per_second"
                           ? "算力 / 秒"
@@ -297,7 +311,25 @@ export function PricingModal({
 
                 <div className="soft-card p-5">
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">价格</div>
-                  {billingType === "per_token" ? (
+                  {isSeedanceDynamic ? (
+                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {seedanceRates.map((row) => (
+                        <div key={row.resolution} className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{row.resolution}</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <div className="text-gray-400">不含视频输入</div>
+                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{row.withoutVideo ?? "--"} 元 / 1M Tokens</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-400">包含视频输入</div>
+                              <div className="mt-0.5 font-medium text-gray-700 dark:text-gray-200">{row.withVideo ?? "--"} 元 / 1M Tokens</div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : billingType === "per_token" ? (
                     <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                       {tokenRows.map((row) => (
                         <div key={row.key} className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">

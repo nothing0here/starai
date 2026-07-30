@@ -47,10 +47,11 @@ type WorkflowDTO struct {
 	DisplayConfig map[string]interface{} `json:"display_config"`
 	RuntimeConfig map[string]interface{} `json:"runtime_config"`
 	IsEnabled     bool                   `json:"is_enabled"`
+	SortOrder     int                    `json:"sort_order"`
 }
 
 func (s *AgentService) List(ctx context.Context, includeDisabled bool) ([]WorkflowDTO, error) {
-	q := `SELECT code, name, description, icon, category, nodes, input_schema, price_rule, display_config, runtime_config, is_enabled FROM workflow_definitions`
+	q := `SELECT code, name, description, icon, category, nodes, input_schema, price_rule, display_config, runtime_config, is_enabled, sort_order FROM workflow_definitions`
 	if !includeDisabled {
 		q += ` WHERE is_enabled=true`
 	}
@@ -73,7 +74,7 @@ func (s *AgentService) List(ctx context.Context, includeDisabled bool) ([]Workfl
 
 func (s *AgentService) Get(ctx context.Context, code string) (*WorkflowDTO, error) {
 	row := s.db.QueryRow(ctx,
-		`SELECT code, name, description, icon, category, nodes, input_schema, price_rule, display_config, runtime_config, is_enabled FROM workflow_definitions WHERE code=$1`, code)
+		`SELECT code, name, description, icon, category, nodes, input_schema, price_rule, display_config, runtime_config, is_enabled, sort_order FROM workflow_definitions WHERE code=$1`, code)
 	return scanWorkflowRow(row)
 }
 
@@ -118,6 +119,7 @@ type WorkflowProjectDTO struct {
 
 type AgentMediaTaskDTO struct {
 	TaskNo       string                 `json:"task_no"`
+	Type         string                 `json:"type,omitempty"`
 	Status       string                 `json:"status"`
 	Progress     int                    `json:"progress"`
 	Output       map[string]interface{} `json:"output"`
@@ -217,6 +219,12 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 	}
 	if stringValue(def.RuntimeConfig["agent_mode"]) == "comic_drama" {
 		inputs = mergeComicDramaRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validateComicDramaGenerationModels(ctx, inputs); err != nil {
+			return nil, err
+		}
+		if err := s.ensureComicDramaProject(ctx, userID, code, inputs); err != nil {
+			return nil, err
+		}
 	}
 	estimated := 0.0
 	if v, ok := def.PriceRule["unit_price"].(float64); ok {
@@ -254,6 +262,110 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 		return nil, err
 	}
 	return s.GetProject(ctx, userID, publicID)
+}
+
+func (s *AgentService) validateComicDramaGenerationModels(ctx context.Context, inputs map[string]interface{}) error {
+	audioStrategy := normalizeComicAudioStrategy(stringValue(inputs["audio_strategy"]), stringValue(inputs["narration_model_code"]))
+	if audioStrategy != "video_native" && strings.TrimSpace(stringValue(inputs["narration_model_code"])) == "" {
+		return fmt.Errorf("AI 漫剧当前音频策略需要配置配音模型")
+	}
+	checks := []struct {
+		key      string
+		category string
+		label    string
+	}{
+		{key: "image_model_code", category: "image", label: "图片"},
+		{key: "video_model_code", category: "video", label: "视频"},
+	}
+	if strings.TrimSpace(stringValue(inputs["narration_model_code"])) != "" {
+		checks = append(checks, struct {
+			key      string
+			category string
+			label    string
+		}{key: "narration_model_code", category: "audio", label: "配音"})
+	}
+	for _, check := range checks {
+		code := strings.TrimSpace(stringValue(inputs[check.key]))
+		if code == "" {
+			return fmt.Errorf("AI 漫剧未配置%s模型", check.label)
+		}
+		var exists bool
+		if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category=$2 AND is_enabled=true)`, code, check.category).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("所选%s模型不存在、类型不匹配或已停用：%s", check.label, code)
+		}
+	}
+	for _, code := range agentStringSlice(inputs["dialogue_model_codes"], nil) {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		var exists bool
+		if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category='chat' AND is_enabled=true)`, code).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("所选对话模型不存在、类型不匹配或已停用：%s", code)
+		}
+	}
+	return nil
+}
+
+func (s *AgentService) ensureComicDramaProject(ctx context.Context, userID int64, workflowCode string, inputs map[string]interface{}) error {
+	if strings.TrimSpace(stringValue(inputs["comic_project_id"])) != "" {
+		return nil
+	}
+	prompt := firstAgentString(stringValue(inputs["user_prompt"]), stringValue(inputs["prompt"]), "未命名漫剧")
+	name := comicAutoProjectName(prompt)
+	description := strings.TrimSpace(prompt)
+	coverURL := firstAgentMediaURL(inputs)
+	style := map[string]interface{}{}
+	if value, ok := inputs["comic_style"].(map[string]interface{}); ok {
+		style = value
+	}
+	publicID := util.NewPublicID("cdp")
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO comic_drama_projects
+			(public_id, user_id, workflow_code, name, description, cover_url, style_snapshot, orientation, quality)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		publicID, userID, workflowCode, name, description, coverURL, mustAgentJSON(style),
+		normalizeComicOrientation(stringValue(inputs["orientation"])),
+		normalizeComicQuality(stringValue(inputs["quality"])))
+	if err != nil {
+		return err
+	}
+	inputs["comic_project_id"] = publicID
+	inputs["comic_project_name"] = name
+	inputs["comic_project_description"] = description
+	return nil
+}
+
+func comicAutoProjectName(prompt string) string {
+	prompt = strings.Join(strings.Fields(strings.TrimSpace(prompt)), " ")
+	runes := []rune(prompt)
+	if len(runes) > 32 {
+		prompt = string(runes[:32]) + "…"
+	}
+	if prompt == "" {
+		prompt = "未命名漫剧"
+	}
+	return prompt
+}
+
+func firstAgentMediaURL(inputs map[string]interface{}) string {
+	for _, key := range []string{"image_url", "reference_image", "product_image"} {
+		if value := strings.TrimSpace(stringValue(inputs[key])); value != "" {
+			return value
+		}
+	}
+	for _, value := range agentStringSlice(inputs["reference_images"], nil) {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *AgentService) createBalanceFailedProject(ctx context.Context, userID, wfID int64, publicID string, inputsJSON []byte, estimated float64) (*WorkflowProjectDTO, error) {
@@ -812,6 +924,18 @@ func normalizeComicQuality(value string) string {
 	}
 }
 
+func normalizeComicAudioStrategy(value, narrationModelCode string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "video_native", "tts_only", "hybrid":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		if strings.TrimSpace(narrationModelCode) != "" {
+			return "hybrid"
+		}
+		return "video_native"
+	}
+}
+
 func mustAgentJSON(value interface{}) []byte {
 	raw, _ := json.Marshal(value)
 	if raw == nil {
@@ -828,6 +952,8 @@ func mergeComicDramaRuntimeDefaults(runtimeCfg map[string]interface{}, inputs ma
 		"style_reference_mode": "style_reference_mode",
 		"image_model_code":     "image_model_code",
 		"video_model_code":     "video_model_code",
+		"narration_model_code": "narration_model_code",
+		"audio_strategy":       "audio_strategy",
 		"orientation":          "orientation",
 		"quality":              "quality",
 	}
@@ -839,7 +965,7 @@ func mergeComicDramaRuntimeDefaults(runtimeCfg map[string]interface{}, inputs ma
 			inputs[inputKey] = value
 		}
 	}
-	if stringValue(inputs["dialogue_model_codes"]) == "" {
+	if len(agentStringSlice(inputs["dialogue_model_codes"], nil)) == 0 {
 		if value, ok := runtimeConfigValue(runtimeCfg, "dialogue_model_codes"); ok {
 			inputs["dialogue_model_codes"] = value
 		}
@@ -900,16 +1026,46 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 	}
 	total := 0.0
 	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
-		if code := stringValue(runtimeCfg["analysis_model_code"]); code != "" {
+		maxRetry := intFromAgentAny(firstAgentNonNil(inputs["max_retry"], runtimeCfg["max_retry"]))
+		if maxRetry < 0 {
+			maxRetry = 0
+		}
+		if maxRetry > 5 {
+			maxRetry = 5
+		}
+		mediaAttempts := float64(maxRetry + 1)
+		dialogueCodes := agentStringSlice(inputs["dialogue_model_codes"], nil)
+		analysisCode := stringValue(runtimeCfg["analysis_model_code"])
+		if len(dialogueCodes) > 0 {
+			analysisCode = firstAgentString(strings.TrimSpace(dialogueCodes[0]), analysisCode)
+		}
+		if code := analysisCode; code != "" {
 			total += s.estimateModelCostByCode(ctx, code, inputs, 1200, 2500)
 		}
-		if code := firstAgentString(stringValue(runtimeCfg["image_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+		if code := firstAgentString(stringValue(inputs["image_model_code"]), stringValue(runtimeCfg["image_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
 			grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
-			total += s.estimateModelCostByCode(ctx, code, map[string]interface{}{"n": grid}, 0, 0)
+			total += mediaAttempts * s.estimateModelCostByCode(ctx, code, map[string]interface{}{"n": grid}, 0, 0)
 		}
-		if code := firstAgentString(stringValue(runtimeCfg["video_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+		if code := firstAgentString(stringValue(inputs["video_model_code"]), stringValue(runtimeCfg["video_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
 			grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
-			total += s.estimateModelCostByCode(ctx, code, map[string]interface{}{"count": grid}, 0, 0)
+			duration := comicSegmentDurationSeconds(inputs, runtimeCfg)
+			params := map[string]interface{}{
+				"count":            1,
+				"n":                1,
+				"duration":         duration,
+				"duration_sec":     duration,
+				"resolution":       normalizeComicVideoResolution(firstAgentString(stringValue(inputs["quality"]), stringValue(runtimeCfg["quality"]))),
+				"generation_mode":  "image",
+				"reference_images": []string{"comic-keyframe"},
+			}
+			total += mediaAttempts * float64(grid) * s.estimateModelCostByCode(ctx, code, params, 0, 0)
+		}
+		if code := firstAgentString(stringValue(inputs["narration_model_code"]), stringValue(runtimeCfg["narration_model_code"])); code != "" {
+			audioStrategy := normalizeComicAudioStrategy(firstAgentString(stringValue(inputs["audio_strategy"]), stringValue(runtimeCfg["audio_strategy"])), code)
+			if audioStrategy != "video_native" {
+				grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
+				total += float64(grid) * s.estimateModelCostByCode(ctx, code, map[string]interface{}{"count": 1}, 0, 200)
+			}
 		}
 		return total
 	}
@@ -937,6 +1093,26 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		total += s.estimateModelCostByCode(ctx, code, generationInputs, 0, 0)
 	}
 	return total
+}
+
+func comicSegmentDurationSeconds(inputs, runtimeCfg map[string]interface{}) int {
+	switch firstAgentString(stringValue(inputs["duration_mode"]), stringValue(runtimeCfg["duration_mode"])) {
+	case "compact":
+		return 4
+	case "long":
+		return 8
+	default:
+		return 5
+	}
+}
+
+func normalizeComicVideoResolution(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "480p", "720p", "1080p", "4k":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return "480p"
+	}
 }
 
 func (s *AgentService) estimateModelCostByCode(ctx context.Context, code string, params map[string]interface{}, promptTokens, outputTokens int) float64 {
@@ -989,6 +1165,8 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 		return unit * duration * n
 	case "per_request":
 		return floatValue(rule["unit_price"])
+	case "dynamic":
+		return estimateDynamicCost(rule, params)
 	default:
 		return 0
 	}
@@ -1039,7 +1217,7 @@ func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID 
 
 func (s *AgentService) RetryProjectNode(ctx context.Context, userID int64, publicID, nodeID string) error {
 	nodeID = strings.TrimSpace(nodeID)
-	allowed := map[string]bool{"comic_plan": true, "keyframes": true, "video_segments": true, "compose": true, "generate": true}
+	allowed := map[string]bool{"comic_plan": true, "keyframes": true, "video_segments": true, "narrations": true, "compose": true, "generate": true}
 	if !allowed[nodeID] {
 		return errors.New("该节点不支持单独重试")
 	}
@@ -1147,19 +1325,30 @@ func (s *AgentService) CancelProject(ctx context.Context, userID int64, publicID
 func pruneWorkflowOutputsForRetry(outputs map[string]interface{}, nodeID string) {
 	switch nodeID {
 	case "comic_plan":
-		for _, key := range []string{"comic_drama", "analysis", "keyframes", "segments", "final_video_url", "thumbnail", "media_tasks", "current_step"} {
+		for _, key := range []string{"comic_drama", "analysis", "keyframes", "segments", "narrations", "final_video_url", "thumbnail", "media_tasks", "current_step"} {
 			delete(outputs, key)
 		}
 	case "keyframes":
-		for _, key := range []string{"keyframes", "segments", "final_video_url", "thumbnail", "media_tasks"} {
+		// 保留已经成功的关键帧。worker 会按分镜 ID 复用它们，只补失败或缺失项，
+		// 避免局部失败后重复生成成功内容和产生不必要费用。
+		outputs["keyframes"] = successfulComicStageItems(outputs["keyframes"], "image_url")
+		for _, key := range []string{"segments", "narrations", "final_video_url", "thumbnail", "media_tasks"} {
 			delete(outputs, key)
 		}
 		outputs["current_step"] = "keyframes"
 	case "video_segments":
-		for _, key := range []string{"segments", "final_video_url", "thumbnail", "media_tasks"} {
+		// 视频片段同样按分镜 ID 增量补齐。
+		outputs["segments"] = successfulComicStageItems(outputs["segments"], "video_url")
+		for _, key := range []string{"final_video_url", "thumbnail", "media_tasks"} {
 			delete(outputs, key)
 		}
 		outputs["current_step"] = "video_segments"
+	case "narrations":
+		outputs["narrations"] = successfulComicNarrationItems(outputs["narrations"])
+		for _, key := range []string{"final_video_url", "thumbnail", "media_tasks"} {
+			delete(outputs, key)
+		}
+		outputs["current_step"] = "narrations"
 	case "compose":
 		for _, key := range []string{"final_video_url", "thumbnail", "media_tasks"} {
 			delete(outputs, key)
@@ -1169,6 +1358,35 @@ func pruneWorkflowOutputsForRetry(outputs map[string]interface{}, nodeID string)
 		delete(outputs, "media_tasks")
 		outputs["current_step"] = "generate"
 	}
+}
+
+func successfulComicStageItems(raw interface{}, outputKey string) []interface{} {
+	items, _ := raw.([]interface{})
+	result := make([]interface{}, 0, len(items))
+	for _, value := range items {
+		item, ok := value.(map[string]interface{})
+		if !ok || stringValue(item[outputKey]) == "" || stringValue(item["status"]) == "failed" {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func successfulComicNarrationItems(raw interface{}) []interface{} {
+	items, _ := raw.([]interface{})
+	result := make([]interface{}, 0, len(items))
+	for _, value := range items {
+		item, ok := value.(map[string]interface{})
+		if !ok || stringValue(item["status"]) == "failed" {
+			continue
+		}
+		if stringValue(item["audio_url"]) == "" && stringValue(item["status"]) != "skipped" {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 // ---------- admin ----------
@@ -1234,6 +1452,9 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 	}
 	if mode, _ := in.RuntimeConfig["agent_mode"].(string); mode == "comic_drama" {
 		in = normalizeComicDramaAgentInput(in)
+		if err := s.validateComicDramaGenerationModels(ctx, in.RuntimeConfig); err != nil {
+			return err
+		}
 	} else if mode == "simple_pipeline" {
 		in = normalizeSimpleAgentInput(in)
 	}
@@ -1423,6 +1644,10 @@ func normalizeComicDramaAgentInput(in AgentUpsertInput) AgentUpsertInput {
 	if stringValue(in.RuntimeConfig["image_model_code"]) == "" {
 		in.RuntimeConfig["image_model_code"] = "image_fast_v1"
 	}
+	in.RuntimeConfig["audio_strategy"] = normalizeComicAudioStrategy(
+		stringValue(in.RuntimeConfig["audio_strategy"]),
+		stringValue(in.RuntimeConfig["narration_model_code"]),
+	)
 	if _, ok := in.RuntimeConfig["dialogue_model_codes"]; !ok {
 		in.RuntimeConfig["dialogue_model_codes"] = []string{firstAgentString(stringValue(in.RuntimeConfig["analysis_model_code"]), in.AnalysisModelCode, "chat_demo_v1")}
 	}
@@ -1467,12 +1692,33 @@ func normalizeComicDramaAgentInput(in AgentUpsertInput) AgentUpsertInput {
 			"allow_prompt_edit":   true,
 		}
 	}
+	dialogueCodes := agentStringSlice(in.RuntimeConfig["dialogue_model_codes"], nil)
+	planModelCode := stringValue(in.RuntimeConfig["analysis_model_code"])
+	if len(dialogueCodes) > 0 {
+		planModelCode = firstAgentString(dialogueCodes[0], planModelCode)
+	}
 	if len(in.Nodes) == 0 {
 		in.Nodes = []WorkflowNode{
-			{ID: "comic_plan", Type: "llm", Name: "AI漫剧规划", ModelCode: stringValue(in.RuntimeConfig["analysis_model_code"]), Cost: 0},
+			{ID: "comic_plan", Type: "llm", Name: "AI漫剧规划", ModelCode: planModelCode, Cost: 0},
 			{ID: "keyframes", Type: "image", Name: "关键帧生成", ModelCode: stringValue(in.RuntimeConfig["image_model_code"]), Cost: 0},
 			{ID: "video_segments", Type: "video", Name: "分段视频生成", ModelCode: stringValue(in.RuntimeConfig["video_model_code"]), Cost: 0},
+			{ID: "narrations", Type: "audio", Name: "对白与旁白配音", ModelCode: stringValue(in.RuntimeConfig["narration_model_code"]), Cost: 0},
 			{ID: "compose", Type: "video", Name: "视频合成", ModelCode: "", Cost: 0},
+		}
+	} else {
+		for index := range in.Nodes {
+			switch in.Nodes[index].ID {
+			case "comic_plan":
+				in.Nodes[index].ModelCode = planModelCode
+			case "keyframes":
+				in.Nodes[index].ModelCode = stringValue(in.RuntimeConfig["image_model_code"])
+			case "video_segments":
+				in.Nodes[index].ModelCode = stringValue(in.RuntimeConfig["video_model_code"])
+			case "narrations":
+				in.Nodes[index].ModelCode = stringValue(in.RuntimeConfig["narration_model_code"])
+			case "compose":
+				in.Nodes[index].ModelCode = ""
+			}
 		}
 	}
 	if len(in.InputSchema) == 0 {
@@ -1674,6 +1920,7 @@ func mediaTasksFromOutputs(outputs map[string]interface{}) []AgentMediaTaskDTO {
 		}
 		dto := AgentMediaTaskDTO{
 			TaskNo:   stringValue(m["task_no"]),
+			Type:     stringValue(m["type"]),
 			Status:   stringValue(m["status"]),
 			Progress: intFromAgentAny(m["progress"]),
 		}
@@ -1761,7 +2008,7 @@ func scanWorkflow(rows pgx.Rows) (*WorkflowDTO, error) {
 	var w WorkflowDTO
 	var desc, icon *string
 	var nodes, schema, price, display, runtime []byte
-	if err := rows.Scan(&w.Code, &w.Name, &desc, &icon, &w.Category, &nodes, &schema, &price, &display, &runtime, &w.IsEnabled); err != nil {
+	if err := rows.Scan(&w.Code, &w.Name, &desc, &icon, &w.Category, &nodes, &schema, &price, &display, &runtime, &w.IsEnabled, &w.SortOrder); err != nil {
 		return nil, err
 	}
 	w.Description = desc
@@ -1778,7 +2025,7 @@ func scanWorkflowRow(row pgx.Row) (*WorkflowDTO, error) {
 	var w WorkflowDTO
 	var desc, icon *string
 	var nodes, schema, price, display, runtime []byte
-	if err := row.Scan(&w.Code, &w.Name, &desc, &icon, &w.Category, &nodes, &schema, &price, &display, &runtime, &w.IsEnabled); err != nil {
+	if err := row.Scan(&w.Code, &w.Name, &desc, &icon, &w.Category, &nodes, &schema, &price, &display, &runtime, &w.IsEnabled, &w.SortOrder); err != nil {
 		return nil, err
 	}
 	w.Description = desc

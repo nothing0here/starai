@@ -11,11 +11,42 @@ import (
 
 // ValidateVideoParams checks upload slots + input_schema enums/required fields.
 func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error {
+	normalizeVideoSchemaParamTypes(model.InputSchema, params)
 	cfg := parseVideoRuntimeConfig(model.RuntimeRule)
 	if err := validateVideoUpload(cfg, params); err != nil {
 		return err
 	}
 	return validateSchemaParams(model.InputSchema, params)
+}
+
+// normalizeVideoSchemaParamTypes accepts semantically equivalent legacy
+// duration values while preserving the exact enum type required by the
+// selected provider. For example, Veo declares "4s" while Seedance declares 4.
+func normalizeVideoSchemaParamTypes(inputSchema map[string]interface{}, params map[string]interface{}) {
+	props, _ := inputSchema["properties"].(map[string]interface{})
+	durationProp, _ := props["duration"].(map[string]interface{})
+	enumValues, _ := durationProp["enum"].([]interface{})
+	current, exists := params["duration"]
+	if !exists || len(enumValues) == 0 || enumContains(enumValues, current) {
+		return
+	}
+	currentSeconds, ok := schemaDurationSeconds(current)
+	if !ok {
+		return
+	}
+	for _, candidate := range enumValues {
+		if seconds, valid := schemaDurationSeconds(candidate); valid && seconds == currentSeconds {
+			params["duration"] = candidate
+			return
+		}
+	}
+}
+
+func schemaDurationSeconds(value interface{}) (float64, bool) {
+	raw := strings.TrimSpace(fmt.Sprint(value))
+	raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(raw, "秒"), "s"), "S"))
+	seconds, err := strconv.ParseFloat(raw, 64)
+	return seconds, err == nil
 }
 
 // BuildUpstreamVideoPayload maps platform params to NEW API request body.
@@ -94,6 +125,11 @@ type videoRuntimeConfig struct {
 	LastFrameKey       string
 	ReferenceImagesKey string
 	RefSlotMax         int
+	ReferenceVideosKey string
+	MaxReferenceVideos int
+	ReferenceAudiosKey string
+	MaxReferenceAudios int
+	ModeParam          string
 	PromptRequired     bool
 }
 
@@ -114,6 +150,11 @@ func parseVideoRuntimeConfig(runtimeRule map[string]interface{}) videoRuntimeCon
 		LastFrameKey:       "last_frame",
 		ReferenceImagesKey: "reference_images",
 		RefSlotMax:         4,
+		ReferenceVideosKey: "reference_videos",
+		MaxReferenceVideos: 3,
+		ReferenceAudiosKey: "reference_audios",
+		MaxReferenceAudios: 3,
+		ModeParam:          "generation_mode",
 		PromptRequired:     true,
 	}
 	if runtimeRule == nil {
@@ -152,6 +193,21 @@ func parseVideoRuntimeConfig(runtimeRule map[string]interface{}) videoRuntimeCon
 			cfg.ReferenceImagesKey = k
 		}
 		cfg.RefSlotMax = intFromAny(ref["max"], cfg.RefSlotMax)
+	}
+	if ref, ok := video["reference_videos"].(map[string]interface{}); ok {
+		if k, ok := ref["key"].(string); ok && k != "" {
+			cfg.ReferenceVideosKey = k
+		}
+		cfg.MaxReferenceVideos = intFromAny(ref["max"], cfg.MaxReferenceVideos)
+	}
+	if ref, ok := video["reference_audios"].(map[string]interface{}); ok {
+		if k, ok := ref["key"].(string); ok && k != "" {
+			cfg.ReferenceAudiosKey = k
+		}
+		cfg.MaxReferenceAudios = intFromAny(ref["max"], cfg.MaxReferenceAudios)
+	}
+	if s, ok := video["mode_param"].(string); ok && strings.TrimSpace(s) != "" {
+		cfg.ModeParam = strings.TrimSpace(s)
 	}
 	if cfg.MaxReferenceImages < 0 {
 		cfg.MaxReferenceImages = 0
@@ -261,6 +317,79 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 		}
 		if cfg.MaxTotalImages > 0 && total > cfg.MaxTotalImages {
 			return errors.New("上传图片总数超过模型限制")
+		}
+	case "seedance_2":
+		videoCount := urlFieldCount(params[cfg.ReferenceVideosKey])
+		audioCount := urlFieldCount(params[cfg.ReferenceAudiosKey])
+		portraitAssetID := strings.TrimSpace(fmt.Sprint(params["portrait_asset_id"]))
+		if portraitAssetID == "<nil>" {
+			portraitAssetID = ""
+		}
+		portraitType := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["portrait_asset_type"])))
+		if portraitType == "<nil>" || portraitType == "" {
+			portraitType = "image"
+		}
+		if portraitAssetID != "" {
+			if !strings.HasPrefix(portraitAssetID, "asset://") {
+				return errors.New("人像形象必须填写火山方舟 asset:// 素材 ID")
+			}
+			switch portraitType {
+			case "image":
+				refCount++
+			case "video":
+				videoCount++
+			default:
+				return errors.New("人像形象类型仅支持图片或视频")
+			}
+		}
+		if refCount > cfg.MaxReferenceImages || videoCount > cfg.MaxReferenceVideos || audioCount > cfg.MaxReferenceAudios {
+			return errors.New("参考素材数量超过 Seedance 2.0 模型限制")
+		}
+		mode := strings.TrimSpace(fmt.Sprint(params[cfg.ModeParam]))
+		prompt := strings.TrimSpace(fmt.Sprint(params["prompt"]))
+		switch mode {
+		case "", "text":
+			if prompt == "" {
+				return errors.New("文生视频需要填写提示词")
+			}
+		case "first_frame":
+			if firstCount != 1 {
+				return errors.New("首帧生视频需要上传 1 张首帧图片")
+			}
+		case "first_last":
+			if firstCount != 1 || lastCount != 1 {
+				return errors.New("首尾帧生视频需要同时上传首帧和尾帧")
+			}
+		case "image":
+			if refCount < 1 {
+				return errors.New("当前组合至少需要 1 张参考图片")
+			}
+		case "video":
+			if videoCount < 1 {
+				return errors.New("当前组合至少需要 1 个参考视频")
+			}
+		case "image_audio":
+			if refCount < 1 || audioCount < 1 {
+				return errors.New("图片+音频组合需要同时上传图片和音频")
+			}
+		case "image_video":
+			if refCount < 1 || videoCount < 1 {
+				return errors.New("图片+视频组合需要同时上传图片和视频")
+			}
+		case "video_audio":
+			if videoCount < 1 || audioCount < 1 {
+				return errors.New("视频+音频组合需要同时上传视频和音频")
+			}
+		case "image_video_audio":
+			if refCount < 1 || videoCount < 1 || audioCount < 1 {
+				return errors.New("图片+视频+音频组合需要上传三类素材")
+			}
+		case "draft_task":
+			if strings.TrimSpace(fmt.Sprint(params["draft_task_id"])) == "" {
+				return errors.New("样片转正式视频需要填写样片任务 ID")
+			}
+		default:
+			return errors.New("不支持的 Seedance 2.0 素材组合")
 		}
 	default: // single_ref
 		if refCount > cfg.MaxReferenceImages {

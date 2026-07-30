@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,13 @@ type RequestConfig struct {
 	AuthType     string
 	APIKeyHeader string
 	Headers      map[string]string
+}
+
+type ConnectionTestResult struct {
+	OK         bool   `json:"ok"`
+	Message    string `json:"message"`
+	StatusCode int    `json:"status_code,omitempty"`
+	LatencyMS  int64  `json:"latency_ms"`
 }
 
 func NewClient(baseURL, token string, timeoutSec, streamTimeoutSec int) *Client {
@@ -305,6 +313,112 @@ func FormatSSE(event string, data interface{}) string {
 
 func (c *Client) ResolveConfig(extra map[string]interface{}) RequestConfig {
 	return c.resolveConfig(extra)
+}
+
+// TestModelConnection performs an intentionally incomplete request. A 400/422
+// response proves that the configured route and credentials were accepted
+// without starting a billable generation job.
+func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode, model string, extra map[string]interface{}) (result ConnectionTestResult) {
+	startedAt := time.Now()
+	defer func() {
+		result.LatencyMS = time.Since(startedAt).Milliseconds()
+	}()
+
+	cfg := c.resolveConfig(extra)
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		result.Message = "未配置上游 Base URL"
+		return result
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		switch requestMode {
+		case "responses":
+			endpoint = "/v1/responses"
+		case "images":
+			endpoint = "/v1/images/generations"
+		case "video":
+			endpoint = "/v1/videos"
+		case "audio":
+			endpoint = "/v1/audio/speech"
+		default:
+			endpoint = "/v1/chat/completions"
+		}
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		endpoint = "/" + endpoint
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"model":  model,
+		"stream": false,
+	})
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodPost, strings.TrimRight(cfg.BaseURL, "/")+endpoint, bytes.NewReader(body))
+	if err != nil {
+		result.Message = "测试请求创建失败：" + err.Error()
+		return result
+	}
+	applyAuthHeaders(req, cfg)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			result.Message = "连接超时，请检查上游地址或网络"
+		} else {
+			result.Message = "无法连接上游服务：" + err.Error()
+		}
+		return result
+	}
+	defer resp.Body.Close()
+	result.StatusCode = resp.StatusCode
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	upstreamMessage := connectionTestMessage(raw)
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		result.OK = true
+		result.Message = "连接、鉴权及模型路由正常"
+	case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity:
+		result.OK = true
+		result.Message = "连接与鉴权正常（上游参数校验已响应）"
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		result.Message = "鉴权失败，请检查 API Key、认证方式和请求头"
+	case resp.StatusCode == http.StatusNotFound:
+		result.Message = "上游接口不存在，请检查 Base URL 和 Endpoint"
+	case resp.StatusCode == http.StatusTooManyRequests:
+		result.Message = "已连接上游，但当前被限流或额度不足"
+	default:
+		result.Message = fmt.Sprintf("上游返回 HTTP %d", resp.StatusCode)
+	}
+	if !result.OK && upstreamMessage != "" {
+		result.Message += "：" + upstreamMessage
+	}
+	return result
+}
+
+func connectionTestMessage(raw []byte) string {
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return ""
+	}
+	var payload map[string]interface{}
+	if json.Unmarshal(raw, &payload) == nil {
+		if errObj, ok := payload["error"].(map[string]interface{}); ok {
+			if message, ok := errObj["message"].(string); ok {
+				text = message
+			}
+		} else if message, ok := payload["message"].(string); ok {
+			text = message
+		}
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len([]rune(text)) > 180 {
+		text = string([]rune(text)[:180]) + "…"
+	}
+	return text
 }
 
 // OpenAuthenticatedStream GETs an upstream media URL with channel credentials and transient retries.

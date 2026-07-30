@@ -110,6 +110,100 @@ function Start-StarAIServiceWindow([string]$Title, [string]$WorkingDir, [string]
   Info "Launched $Title"
 }
 
+function Enable-StarAILocalFFmpeg([string]$RepoRoot) {
+  $configured = [Environment]::GetEnvironmentVariable("FFMPEG_PATH", "Process")
+  if ($configured) {
+    $candidate = $configured
+    if (Test-Path -LiteralPath $candidate -PathType Container) {
+      $candidate = Join-Path $candidate "ffmpeg.exe"
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      $env:FFMPEG_PATH = (Resolve-Path -LiteralPath $candidate).Path
+      $env:PATH = (Split-Path -Parent $env:FFMPEG_PATH) + [IO.Path]::PathSeparator + $env:PATH
+      Info "FFmpeg ready: $env:FFMPEG_PATH"
+      return $true
+    }
+    Warn "FFMPEG_PATH points to a missing file: $configured"
+  }
+
+  $systemFFmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+  if ($systemFFmpeg -and $systemFFmpeg.Source) {
+    $env:FFMPEG_PATH = $systemFFmpeg.Source
+    Info "FFmpeg ready: $env:FFMPEG_PATH"
+    return $true
+  }
+
+  $toolDir = Join-Path $RepoRoot ".tools/ffmpeg"
+  $localFFmpeg = Join-Path $toolDir "ffmpeg.exe"
+  if (Test-Path -LiteralPath $localFFmpeg -PathType Leaf) {
+    $env:FFMPEG_PATH = $localFFmpeg
+    $env:PATH = $toolDir + [IO.Path]::PathSeparator + $env:PATH
+    Info "FFmpeg ready: $env:FFMPEG_PATH"
+    return $true
+  }
+
+  Info "FFmpeg not found; downloading the local media tool (first run only)"
+  $archive = Join-Path ([IO.Path]::GetTempPath()) ("starai-ffmpeg-" + [Guid]::NewGuid().ToString("N") + ".zip")
+  $checksumFile = $archive + ".sha256"
+  $extractDir = Join-Path ([IO.Path]::GetTempPath()) ("starai-ffmpeg-" + [Guid]::NewGuid().ToString("N"))
+  $archiveName = "ffmpeg-master-latest-win64-gpl.zip"
+  try {
+    New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+    Invoke-WebRequest `
+      -Uri ("https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/" + $archiveName) `
+      -OutFile $archive `
+      -UseBasicParsing `
+      -TimeoutSec 600
+    Invoke-WebRequest `
+      -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256" `
+      -OutFile $checksumFile `
+      -UseBasicParsing `
+      -TimeoutSec 60
+    $checksumLine = Get-Content -LiteralPath $checksumFile -Encoding UTF8 |
+      Where-Object { $_ -match [Regex]::Escape($archiveName) + '$' } |
+      Select-Object -First 1
+    if (-not $checksumLine) {
+      throw "FFmpeg release checksum is unavailable"
+    }
+    $expectedHash = ([string]$checksumLine -split '\s+')[0].Trim().ToLowerInvariant()
+    $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expectedHash -ne $actualHash) {
+      throw "FFmpeg archive checksum verification failed"
+    }
+    Expand-Archive -LiteralPath $archive -DestinationPath $extractDir -Force
+    $downloadedFFmpeg = Get-ChildItem -LiteralPath $extractDir -Filter "ffmpeg.exe" -Recurse -File |
+      Select-Object -First 1
+    if (-not $downloadedFFmpeg) {
+      throw "downloaded archive does not contain ffmpeg.exe"
+    }
+    Copy-Item -LiteralPath $downloadedFFmpeg.FullName -Destination $localFFmpeg -Force
+    $downloadedFFprobe = Get-ChildItem -LiteralPath $extractDir -Filter "ffprobe.exe" -Recurse -File |
+      Select-Object -First 1
+    if ($downloadedFFprobe) {
+      Copy-Item -LiteralPath $downloadedFFprobe.FullName -Destination (Join-Path $toolDir "ffprobe.exe") -Force
+    }
+    $env:FFMPEG_PATH = $localFFmpeg
+    $env:PATH = $toolDir + [IO.Path]::PathSeparator + $env:PATH
+    Info "FFmpeg installed for this project: $env:FFMPEG_PATH"
+    return $true
+  } catch {
+    Warn "FFmpeg automatic download failed: $($_.Exception.Message)"
+    Warn "Image/video generation remains available, but AI comic and canvas media composition will be unavailable."
+    Warn "You can set FFMPEG_PATH in .env.local and run this script again."
+    return $false
+  } finally {
+    if (Test-Path -LiteralPath $archive -PathType Leaf) {
+      Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $checksumFile -PathType Leaf) {
+      Remove-Item -LiteralPath $checksumFile -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $extractDir -PathType Container) {
+      Remove-Item -LiteralPath $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
 $BackendOnly = $false
 if ($args -contains "-BackendOnly") { $BackendOnly = $true }
 
@@ -146,6 +240,10 @@ if ($envFile) {
 } else {
   Warn "No .env.local or .env found; services will use development defaults"
 }
+
+# AI comic and infinite-canvas composition require FFmpeg. Keep it local to
+# this repository so local one-click startup does not require a system install.
+[void](Enable-StarAILocalFFmpeg -RepoRoot $Root)
 
 # 1) Start infra (Postgres/Redis/MinIO)
 Info "Starting Docker infrastructure"

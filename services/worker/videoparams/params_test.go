@@ -1,6 +1,35 @@
 package videoparams
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
+
+func TestBuildUpstreamPayloadPreservesConfiguredVideoDurations(t *testing.T) {
+	for _, seconds := range []int{5, 6, 8, 10, 12, 15} {
+		t.Run(strconv.Itoa(seconds)+"s", func(t *testing.T) {
+			got := BuildUpstreamVideoPayload(
+				"video-configured-duration",
+				"video-configured-duration",
+				map[string]interface{}{
+					"upstream": map[string]interface{}{
+						"include": []interface{}{"duration"},
+					},
+				},
+				nil,
+				map[string]interface{}{
+					"prompt":   "test",
+					"duration": strconv.Itoa(seconds) + "s",
+				},
+			)
+			got = SanitizeUpstreamPayload(got, "/v1/videos")
+			duration, ok := got["duration"].(float64)
+			if !ok || int(duration) != seconds {
+				t.Fatalf("duration = %#v, want %d", got["duration"], seconds)
+			}
+		})
+	}
+}
 
 func TestSanitizeUpstreamPayloadUsesImagesForVeo(t *testing.T) {
 	payload := map[string]interface{}{
@@ -200,5 +229,84 @@ func TestBuildUpstreamPayloadSupportsCompatibleSpeechMusicTemplate(t *testing.T)
 	metadata, ok := got["metadata"].(map[string]interface{})
 	if !ok || metadata["lyrics"] != "[Chorus] hello" || metadata["sample_rate"] != float64(44100) || metadata["bitrate"] != float64(256000) {
 		t.Fatalf("unexpected compatible music metadata: %#v", got)
+	}
+}
+
+func TestBuildUpstreamPayloadSupportsVolcengineSeedance2(t *testing.T) {
+	got := BuildUpstreamVideoPayload(
+		"doubao-seedance-2",
+		"doubao-seedance-2-0-260128",
+		map[string]interface{}{
+			"upstream": map[string]interface{}{
+				"adapter": "volcengine_seedance_2",
+				"include": []interface{}{"generation_mode", "duration", "ratio", "generate_audio", "portrait_asset_id", "portrait_asset_type", "reference_images", "reference_videos", "reference_audios"},
+			},
+		},
+		nil,
+		map[string]interface{}{
+			"prompt":              "使用图片1的主体和视频1的运镜",
+			"generation_mode":     "image_video_audio",
+			"duration":            "8s",
+			"ratio":               "16:9",
+			"generate_audio":      true,
+			"portrait_asset_id":   "asset://authorized-person",
+			"portrait_asset_type": "image",
+			"reference_images":    []interface{}{"https://example.com/a.jpg"},
+			"reference_videos":    []interface{}{"https://example.com/a.mp4"},
+			"reference_audios":    []interface{}{"https://example.com/a.mp3"},
+		},
+	)
+	if got["model"] != "doubao-seedance-2-0-260128" || got["duration"] != float64(8) || got["ratio"] != "16:9" {
+		t.Fatalf("unexpected Seedance payload: %#v", got)
+	}
+	content, ok := got["content"].([]interface{})
+	if !ok || len(content) != 5 {
+		t.Fatalf("content = %#v, want text + portrait + image + video + audio", got["content"])
+	}
+	portrait, _ := content[1].(map[string]interface{})
+	image, _ := content[2].(map[string]interface{})
+	video, _ := content[3].(map[string]interface{})
+	audio, _ := content[4].(map[string]interface{})
+	portraitURL, _ := portrait["image_url"].(map[string]interface{})
+	if portraitURL["url"] != "asset://authorized-person" {
+		t.Fatalf("unexpected portrait asset: %#v", portrait)
+	}
+	if image["role"] != "reference_image" || video["role"] != "reference_video" || audio["role"] != "reference_audio" {
+		t.Fatalf("unexpected Seedance roles: %#v", content)
+	}
+	if _, ok := got["generation_mode"]; ok {
+		t.Fatalf("generation_mode must not be sent upstream: %#v", got)
+	}
+}
+
+func TestBuildSeedancePayloadDropsRelativeAndDuplicateMediaReferences(t *testing.T) {
+	got := BuildUpstreamVideoPayload(
+		"doubao-seedance-2",
+		"doubao-seedance-2-0-260128",
+		map[string]interface{}{
+			"upstream": map[string]interface{}{
+				"adapter": "volcengine_seedance_2",
+				"include": []interface{}{"generation_mode", "reference_images"},
+			},
+		},
+		nil,
+		map[string]interface{}{
+			"prompt":          "test",
+			"generation_mode": "image",
+			"reference_images": []interface{}{
+				"https://cdn.example/keyframe.png",
+				"/assets/comic-styles/cn-ancient.svg",
+				"https://cdn.example/keyframe.png",
+			},
+		},
+	)
+	content, ok := got["content"].([]interface{})
+	if !ok || len(content) != 2 {
+		t.Fatalf("content=%#v, want text plus one valid image", got["content"])
+	}
+	image, _ := content[1].(map[string]interface{})
+	imageURL, _ := image["image_url"].(map[string]interface{})
+	if imageURL["url"] != "https://cdn.example/keyframe.png" {
+		t.Fatalf("unexpected Seedance image reference: %#v", image)
 	}
 }

@@ -1,6 +1,6 @@
 /** Video model runtime_rule.video + input_schema extensions (config-driven UI & API). */
 
-export type VideoUploadProfile = "single_ref" | "multi_ref" | "frame_pair" | "none";
+export type VideoUploadProfile = "single_ref" | "multi_ref" | "frame_pair" | "seedance_2" | "none";
 
 export interface VideoFrameSlotConfig {
   key?: string;
@@ -29,6 +29,9 @@ export interface VideoRuntimeConfig {
     last?: VideoFrameSlotConfig;
   };
   reference_images?: VideoFrameSlotConfig;
+  reference_videos?: VideoFrameSlotConfig;
+  reference_audios?: VideoFrameSlotConfig;
+  mode_param?: string;
 }
 
 export interface UpstreamRuntimeConfig {
@@ -64,10 +67,14 @@ export interface VideoMediaItem {
   url: string;
   name: string;
   public_id?: string;
+  /** Browser-detected media duration, used for dynamic video cost estimates. */
+  duration_seconds?: number;
 }
 
 export interface VideoMediaState {
   reference_images: VideoMediaItem[];
+  reference_videos: VideoMediaItem[];
+  reference_audios: VideoMediaItem[];
   first_frame: VideoMediaItem | null;
   last_frame: VideoMediaItem | null;
 }
@@ -76,6 +83,8 @@ export const DEFAULT_VIDEO_COUNT_OPTIONS = [1, 3, 5, 10, 30, 50];
 
 export const EMPTY_VIDEO_MEDIA: VideoMediaState = {
   reference_images: [],
+  reference_videos: [],
+  reference_audios: [],
   first_frame: null,
   last_frame: null,
 };
@@ -90,6 +99,8 @@ export function parseVideoRuntime(runtimeRule?: Record<string, unknown>): VideoR
   const first = asRecord(frames.first);
   const last = asRecord(frames.last);
   const ref = asRecord(video.reference_images);
+  const refVideos = asRecord(video.reference_videos);
+  const refAudios = asRecord(video.reference_audios);
   return {
     upload_profile: (video.upload_profile as VideoUploadProfile) || "single_ref",
     min_reference_images: numOr(video.min_reference_images, 0),
@@ -111,6 +122,15 @@ export function parseVideoRuntime(runtimeRule?: Record<string, unknown>): VideoR
       key: strOr(ref.key, "reference_images"),
       max: numOr(ref.max, 4),
     },
+    reference_videos: {
+      key: strOr(refVideos.key, "reference_videos"),
+      max: numOr(refVideos.max, 3),
+    },
+    reference_audios: {
+      key: strOr(refAudios.key, "reference_audios"),
+      max: numOr(refAudios.max, 3),
+    },
+    mode_param: strOr(video.mode_param, "generation_mode"),
   };
 }
 
@@ -160,10 +180,19 @@ export function buildVideoTaskParams(
   const firstKey = cfg.frames?.first?.key || "first_frame";
   const lastKey = cfg.frames?.last?.key || "last_frame";
   const refKey = cfg.reference_images?.key || "reference_images";
+  const refVideoKey = cfg.reference_videos?.key || "reference_videos";
+  const refAudioKey = cfg.reference_audios?.key || "reference_audios";
   const out: Record<string, unknown> = { ...params };
   if (media.first_frame?.url) out[firstKey] = media.first_frame.url;
   if (media.last_frame?.url) out[lastKey] = media.last_frame.url;
   if (media.reference_images.length) out[refKey] = media.reference_images.map((x) => x.url);
+  if (media.reference_videos.length) out[refVideoKey] = media.reference_videos.map((x) => x.url);
+  const referenceVideoDuration = media.reference_videos.reduce(
+    (total, item) => total + (Number.isFinite(item.duration_seconds) ? Math.max(0, item.duration_seconds || 0) : 0),
+    0
+  );
+  if (referenceVideoDuration > 0) out.reference_video_duration_seconds = referenceVideoDuration;
+  if (media.reference_audios.length) out[refAudioKey] = media.reference_audios.map((x) => x.url);
   return out;
 }
 

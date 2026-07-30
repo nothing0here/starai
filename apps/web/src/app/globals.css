@@ -1,3 +1,4 @@
+@import "@xyflow/react/dist/style.css";
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -6,6 +7,56 @@ body {
   @apply bg-[#EEF1F6] text-gray-900 antialiased;
   scrollbar-width: thin;
   scrollbar-color: rgb(209 213 219) transparent;
+}
+
+.infinite-canvas-flow .react-flow__node {
+  border: 0;
+  background: transparent;
+}
+
+.infinite-canvas-flow .react-flow__node.selected > div {
+  border-color: rgb(34 211 238 / 0.85);
+  box-shadow: 0 0 0 2px rgb(34 211 238 / 0.14), 0 16px 44px rgb(15 23 42 / 0.15);
+}
+
+.infinite-canvas-flow .react-flow__edge.selected path {
+  stroke-width: 3;
+}
+
+.infinite-canvas-flow .react-flow__selection {
+  border: 1px solid rgb(34 211 238 / 0.7);
+  background: rgb(34 211 238 / 0.08);
+}
+
+.infinite-canvas-flow select {
+  color-scheme: light;
+}
+
+.infinite-canvas-flow select option,
+.infinite-canvas-flow select optgroup {
+  background-color: rgb(255 255 255);
+  color: rgb(31 41 55);
+}
+
+.dark .infinite-canvas-flow select {
+  color-scheme: dark;
+  background-color: rgb(31 41 55);
+  color: rgb(243 244 246);
+}
+
+.dark .infinite-canvas-flow select option,
+.dark .infinite-canvas-flow select optgroup {
+  background-color: rgb(17 24 39);
+  color: rgb(243 244 246);
+}
+
+.dark .infinite-canvas-flow select option:disabled {
+  color: rgb(107 114 128);
+}
+
+.dark .infinite-canvas-flow .react-flow__attribution {
+  background: rgb(17 24 39 / 0.75);
+  color: rgb(156 163 175);
 }
 
 .dark body {
@@ -39,6 +90,33 @@ body {
   }
   .scroll-x-only::-webkit-scrollbar-thumb {
     @apply bg-gray-200 rounded-full;
+  }
+
+  @media (pointer: coarse) {
+    .infinite-canvas-flow,
+    .infinite-canvas-flow .react-flow__pane,
+    .infinite-canvas-flow .react-flow__node {
+      touch-action: none;
+    }
+
+    .infinite-canvas-flow .nodrag,
+    .infinite-canvas-flow button,
+    .infinite-canvas-flow details {
+      touch-action: manipulation;
+    }
+
+    .infinite-canvas-flow textarea.nodrag,
+    .infinite-canvas-flow input.nodrag,
+    .infinite-canvas-flow select.nodrag {
+      touch-action: auto;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    .infinite-canvas-flow .react-flow__handle {
+      min-width: 18px;
+      min-height: 18px;
+    }
   }
   .tech-card {
     position: relative;

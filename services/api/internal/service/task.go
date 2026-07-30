@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hibiken/asynq"
@@ -33,6 +34,7 @@ type TaskDTO struct {
 	UpstreamTaskID *string                `json:"upstream_task_id,omitempty"`
 	Type           string                 `json:"type"`
 	Status         string                 `json:"status"`
+	Progress       int                    `json:"progress"`
 	ModelCode      *string                `json:"model_code,omitempty"`
 	Input          map[string]interface{} `json:"input"`
 	Output         map[string]interface{} `json:"output"`
@@ -48,6 +50,98 @@ type CreateTaskInput struct {
 	ModelCode string                 `json:"model_code"`
 	Prompt    string                 `json:"prompt"`
 	Params    map[string]interface{} `json:"params"`
+}
+
+type CreateComposeTaskInput struct {
+	Sources    []map[string]interface{} `json:"sources"`
+	Mode       string                   `json:"mode"`
+	OutputSize string                   `json:"output_size"`
+}
+
+func validateComposeTaskInput(input *CreateComposeTaskInput) error {
+	input.Mode = strings.ToLower(strings.TrimSpace(input.Mode))
+	if input.Mode == "" {
+		input.Mode = "auto"
+	}
+	if input.Mode != "auto" && input.Mode != "concat" && input.Mode != "mux" {
+		return errors.New("不支持的合成方式")
+	}
+	input.OutputSize = strings.ToLower(strings.TrimSpace(input.OutputSize))
+	if input.OutputSize == "" {
+		input.OutputSize = "keep"
+	}
+	allowedSizes := map[string]bool{
+		"keep": true, "1920x1080": true, "1080x1920": true,
+		"1080x1080": true, "720x1280": true, "720x480": true,
+	}
+	if !allowedSizes[input.OutputSize] {
+		return errors.New("不支持的合成输出尺寸")
+	}
+	counts := map[string]int{}
+	for _, source := range input.Sources {
+		kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(source["kind"])))
+		if kind != "image" && kind != "video" && kind != "audio" {
+			return errors.New("合成素材类型无效")
+		}
+		counts[kind]++
+	}
+	switch input.Mode {
+	case "concat":
+		kindCount := 0
+		for _, kind := range []string{"image", "video", "audio"} {
+			if counts[kind] > 0 {
+				kindCount++
+			}
+		}
+		if kindCount != 1 || len(input.Sources) < 2 {
+			return errors.New("顺序拼接需要至少两个同类型素材")
+		}
+	case "mux":
+		if counts["video"] == 0 || counts["audio"] != 1 || counts["image"] > 0 {
+			return errors.New("音视频合成需要至少一个视频和一个音频，且仅支持一条音轨")
+		}
+	default:
+		if counts["image"] > 0 && (counts["video"] > 0 || counts["audio"] > 0) {
+			return errors.New("图片不能与视频或音频直接自动合成，请先将图片生成视频")
+		}
+	}
+	return nil
+}
+
+func (s *TaskService) CreateCompose(ctx context.Context, userID int64, input CreateComposeTaskInput) (*TaskDTO, error) {
+	if len(input.Sources) == 0 {
+		return nil, errors.New("请至少连接一个可合成的媒体节点")
+	}
+	if len(input.Sources) > 20 {
+		return nil, errors.New("单次最多合成 20 个媒体素材")
+	}
+	if err := validateComposeTaskInput(&input); err != nil {
+		return nil, err
+	}
+	taskNo := util.NewTaskNo()
+	params := map[string]interface{}{
+		"sources":     input.Sources,
+		"mode":        input.Mode,
+		"output_size": input.OutputSize,
+	}
+	inputJSON, _ := json.Marshal(params)
+	var taskID int64
+	if err := s.db.QueryRow(ctx, `
+		INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
+		VALUES ($1,$2,NULL,'compose','pending',$3,0) RETURNING id`,
+		taskNo, userID, inputJSON).Scan(&taskID); err != nil {
+		return nil, err
+	}
+	s.addEvent(ctx, taskID, "created", map[string]interface{}{"estimated_cost": 0, "type": "compose"})
+	if err := queue.EnqueueComposeTask(s.queue, queue.ComposeTaskPayload{TaskNo: taskNo, UserID: userID, Input: params}); err != nil {
+		s.FailTask(ctx, taskNo, "QUEUE_ERROR", "合成任务入队失败")
+		return nil, err
+	}
+	now := time.Now().Format(time.RFC3339)
+	return &TaskDTO{
+		TaskNo: taskNo, Type: "compose", Status: "pending", Input: params,
+		EstimatedCost: 0, CreatedAt: now,
+	}, nil
 }
 
 func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTaskInput) (*TaskDTO, error) {
@@ -232,7 +326,32 @@ func (s *TaskService) getTask(ctx context.Context, where string, args ...interfa
 		fs := finished.Format(time.RFC3339)
 		t.FinishedAt = &fs
 	}
+	t.Progress = s.latestProgress(ctx, t.TaskNo, t.Status)
 	return &t, nil
+}
+
+func (s *TaskService) latestProgress(ctx context.Context, taskNo, status string) int {
+	if status == "succeeded" || status == "failed" || status == "cancelled" {
+		return 100
+	}
+	var progress int
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE((payload->>'progress')::int, 0)
+		FROM task_events e
+		JOIN tasks t ON t.id=e.task_id
+		WHERE t.task_no=$1 AND e.event_type='progress'
+		ORDER BY e.created_at DESC, e.id DESC
+		LIMIT 1`, taskNo).Scan(&progress)
+	if err == nil && progress > 0 {
+		if progress > 99 {
+			return 99
+		}
+		return progress
+	}
+	if status == "running" || status == "processing" || status == "in_progress" {
+		return 25
+	}
+	return 8
 }
 
 func (s *TaskService) List(ctx context.Context, userID int64, page, pageSize int, modelCode, taskType string) ([]TaskDTO, int, error) {

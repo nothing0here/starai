@@ -8,7 +8,8 @@ import { AdminPagination } from "@/components/AdminPagination";
 type GenerationType = "image" | "video" | "comic_drama";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "infinite_canvas";
+  system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
   generation_type?: GenerationType;
@@ -23,6 +24,8 @@ type RuntimeConfig = {
   dialogue_model_codes?: string[];
   image_model_code?: string;
   video_model_code?: string;
+  narration_model_code?: string;
+  audio_strategy?: "video_native" | "tts_only" | "hybrid";
   style_reference_mode?: string;
   duration_mode?: string;
   storyboard_grid?: number;
@@ -45,10 +48,21 @@ type Workflow = {
   display_config?: Record<string, any>;
   runtime_config?: RuntimeConfig;
   is_enabled: boolean;
+  sort_order: number;
 };
-type AdminModel = { code: string; display_name: string; request_mode: string; category: string; is_enabled: boolean };
+type AdminModel = {
+  code: string;
+  display_name: string;
+  request_mode: string;
+  category: string;
+  is_enabled: boolean;
+  runtime_rule?: Record<string, any>;
+  input_schema?: Record<string, any>;
+};
+type CanvasTemplateAdmin = { id: string; name: string; description: string; template_id: string; document?: Record<string, unknown> };
 type FormState = {
   isEdit: boolean;
+  system_workspace: boolean;
   code: string;
   name: string;
   description: string;
@@ -60,6 +74,8 @@ type FormState = {
   generation_model_code: string;
   image_model_code: string;
   video_model_code: string;
+  narration_model_code: string;
+  audio_strategy: "video_native" | "tts_only" | "hybrid";
   dialogue_model_codes: string;
   style_reference_mode: string;
   duration_mode: string;
@@ -83,6 +99,7 @@ type FormState = {
   unit_price: number;
   placeholder: string;
   help: string;
+  canvas_templates: CanvasTemplateAdmin[];
   preset_override?: Partial<PresetBundle>;
 };
 
@@ -153,13 +170,28 @@ const TYPE_PRESETS = {
 const defaultScenes = (type: GenerationType) => (type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
 const sceneDefs = (type: GenerationType) => (type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
 const presetCode = (type: GenerationType) => (type === "comic_drama" ? "ai_comic_drama" : type === "video" ? "ecommerce_video" : "ecommerce_image");
+const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
+  { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
+  { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
+  { id: "text-image-mix", name: "文案与配图", description: "文字与参考图片共同生成新图片", template_id: "text-image-mix" },
+  { id: "multi-image", name: "多图对比", description: "多个参考素材连接双图片生成节点", template_id: "multi-image" },
+  { id: "text-video", name: "文字生视频", description: "文本提示词连接视频生成节点", template_id: "text-video" },
+  { id: "image-video", name: "图片生视频", description: "首帧或参考图片连接视频生成节点", template_id: "image-video" },
+  { id: "ecommerce-visual-pack", name: "电商视觉套图", description: "商品信息与参考图同时生成主图和详情海报", template_id: "ecommerce-visual-pack" },
+  { id: "social-campaign", name: "社媒图文视频", description: "一份营销文案同时生成社媒配图和短视频", template_id: "social-campaign" },
+  { id: "product-showcase-video", name: "商品展示视频", description: "商品图先生成关键视觉，再延展为展示视频", template_id: "product-showcase-video" },
+  { id: "brand-visual-kit", name: "品牌视觉套件", description: "品牌需求并行生成标志创意和视觉海报", template_id: "brand-visual-kit" },
+  { id: "photo-restoration", name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图", template_id: "photo-restoration" },
+  { id: "story-short-video", name: "故事短视频", description: "故事脚本先生成关键帧，再生成短视频", template_id: "story-short-video" },
+  { id: "viral-remake", name: "爆款复刻", description: "爆款参考与品牌素材生成复刻主视觉并延展为短视频", template_id: "viral-remake" },
+];
 
-const defaultNodes = (analysis = "", generation = "", type: GenerationType = "image"): WorkflowNode[] => {
+const defaultNodes = (analysis = "", generation = "", type: GenerationType = "image", imageModel = "", videoModel = ""): WorkflowNode[] => {
   if (type === "comic_drama") {
     return [
       { id: "comic_plan", type: "llm", name: "AI漫剧规划", model_code: analysis, prompt_template: "", cost: 0 },
-      { id: "keyframes", type: "image", name: "关键帧生成", model_code: "", prompt_template: "", cost: 0 },
-      { id: "video_segments", type: "video", name: "分段视频生成", model_code: generation, prompt_template: "", cost: 0 },
+      { id: "keyframes", type: "image", name: "关键帧生成", model_code: imageModel, prompt_template: "", cost: 0 },
+      { id: "video_segments", type: "video", name: "分段视频生成", model_code: videoModel || generation, prompt_template: "", cost: 0 },
       { id: "compose", type: "video", name: "视频合成", model_code: "", prompt_template: "", cost: 0 },
     ];
   }
@@ -179,15 +211,23 @@ const defaultSchema = (count = 1) => ({
 
 function displayConfig(form: FormState) {
   const preset = TYPE_PRESETS[form.generation_type];
+  const steps = form.generation_type === "comic_drama"
+    ? [
+        { icon: "📝", title: "剧本与资产规划", subtitle: "生成剧本、角色、道具、场景和分镜", tags: ["主备模型", "资产引用"] },
+        { icon: "🖼️", title: "关键帧生成", subtitle: "按分镜生成角色与画风一致的关键帧", tags: ["角色一致", "失败重试"] },
+        { icon: "🎬", title: "分段视频生成", subtitle: "关键帧驱动各分镜视频片段", tags: ["时长适配", "进度跟踪"] },
+        { icon: "🎞️", title: "视频合成", subtitle: "合并全部分镜并生成最终漫剧成片", tags: ["顺序合成", "作品入库"] },
+      ]
+    : [
+        { icon: "🔎", title: "需求智能分析", subtitle: "AI 根据输入和参考图理解目标效果", tags: ["需求识别", "素材分析"] },
+        { icon: "✅", title: "方案确认", subtitle: "确认或修改生成方案", tags: ["逐步确认", "可编辑"] },
+        { icon: form.generation_type === "video" ? "🎬" : "🖼️", title: form.generation_type === "video" ? "视频生成" : "图片生成", subtitle: "调用选择的生成模型输出结果", tags: ["异步生成", "进度跟踪"] },
+      ];
   return {
     theme: preset.theme,
     hero_tags: preset.heroTags,
     feature_tags: preset.featureTags,
-    steps: [
-      { icon: "🔎", title: "需求智能分析", subtitle: "AI 根据输入和参考图理解目标效果", tags: ["需求识别", "素材分析"] },
-      { icon: "✅", title: "方案确认", subtitle: "确认或修改生成方案", tags: ["逐步确认", "可编辑"] },
-      { icon: form.generation_type === "video" ? "🎬" : "🖼️", title: form.generation_type === "video" ? "视频生成" : "图片生成", subtitle: "调用选择的生成模型输出结果", tags: ["异步生成", "进度跟踪"] },
-    ],
+    steps,
     input: { image_label: preset.imageLabel, placeholder: form.placeholder || preset.placeholder, modes: ["逐步确认", "智能托管"] },
     help: form.help || preset.help,
   };
@@ -209,6 +249,8 @@ function runtimeConfig(form: FormState): RuntimeConfig {
       dialogue_model_codes: dialogue.length ? dialogue : [form.analysis_model_code].filter(Boolean),
       image_model_code: form.image_model_code,
       video_model_code: form.video_model_code || form.generation_model_code,
+      narration_model_code: form.narration_model_code,
+      audio_strategy: form.audio_strategy,
       style_reference_mode: form.style_reference_mode,
       duration_mode: form.duration_mode,
       storyboard_grid: form.storyboard_grid,
@@ -260,7 +302,13 @@ function presetBundle(form: FormState): PresetBundle {
     display_config: displayConfig(form),
     runtime_config: runtimeConfig(form),
     input_schema: defaultSchema(form.default_count),
-    nodes: defaultNodes(form.analysis_model_code, form.generation_model_code, form.generation_type),
+    nodes: defaultNodes(
+      form.analysis_model_code,
+      form.generation_model_code,
+      form.generation_type,
+      form.image_model_code,
+      form.video_model_code
+    ),
     price_rule: { billing_type: "per_request", unit_price: Number(form.unit_price) || 0 },
   };
 }
@@ -273,6 +321,7 @@ function makeEmptyForm(): FormState {
   const preset = TYPE_PRESETS.image;
   return {
     isEdit: false,
+    system_workspace: false,
     code: "",
     name: "",
     description: preset.description,
@@ -284,6 +333,8 @@ function makeEmptyForm(): FormState {
     generation_model_code: "",
     image_model_code: "image_fast_v1",
     video_model_code: "video_demo_v1",
+    narration_model_code: "",
+    audio_strategy: "video_native",
     dialogue_model_codes: "chat_demo_v1",
     style_reference_mode: "image_reference",
     duration_mode: "standard",
@@ -303,6 +354,7 @@ function makeEmptyForm(): FormState {
     unit_price: 0.1,
     placeholder: preset.placeholder,
     help: preset.help,
+    canvas_templates: DEFAULT_CANVAS_TEMPLATES.map((item) => ({ ...item })),
   };
 }
 
@@ -336,10 +388,30 @@ export default function AgentsAdminPage() {
   const [jsonErr, setJsonErr] = useState("");
   const [page, setPage] = useState(1);
 
-  const chatModels = useMemo(() => models.filter((m) => m.is_enabled && ["chat_completions", "responses"].includes(m.request_mode)), [models]);
-  const imageModels = useMemo(() => models.filter((m) => m.is_enabled && m.request_mode === "images"), [models]);
-  const videoModels = useMemo(() => models.filter((m) => m.is_enabled && m.request_mode === "video"), [models]);
-  const generationModels = form.generation_type === "video" || form.generation_type === "comic_drama" ? videoModels : imageModels;
+  const chatModels = useMemo(
+    () => models.filter((m) => m.is_enabled && m.category === "chat" && ["chat_completions", "responses"].includes(m.request_mode)),
+    [models]
+  );
+  const imageModels = useMemo(
+    () => models.filter((m) => m.is_enabled && m.category === "image"),
+    [models]
+  );
+  const videoModels = useMemo(
+    () => models.filter((m) => m.is_enabled && m.category === "video"),
+    [models]
+  );
+  const audioModels = useMemo(
+    () => models.filter((m) => {
+      if (!m.is_enabled || m.category !== "audio") return false;
+      const adapter = String(m.runtime_rule?.upstream?.adapter || "").toLowerCase();
+      const searchable = `${m.code} ${m.display_name} ${adapter}`.toLowerCase();
+      const properties = (m.input_schema?.properties || {}) as Record<string, unknown>;
+      if (searchable.includes("music") || searchable.includes("suno") || "lyrics" in properties) return false;
+      return true;
+    }),
+    [models]
+  );
+  const generationModels = form.generation_type === "video" ? videoModels : imageModels;
   const activePreset = TYPE_PRESETS[form.generation_type];
   const paginatedItems = useMemo(() => items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [items, page]);
 
@@ -365,6 +437,24 @@ export default function AgentsAdminPage() {
     }));
   };
 
+  const selectedDialogueModels = useMemo(
+    () => form.dialogue_model_codes.split(",").map((item) => item.trim()).filter(Boolean),
+    [form.dialogue_model_codes]
+  );
+  const setDialogueModels = (codes: string[]) => {
+    const available = new Set(chatModels.map((model) => model.code));
+    const normalized = Array.from(new Set(codes.map((code) => code.trim()).filter((code) => code && available.has(code))));
+    setForm((prev) => ({ ...prev, dialogue_model_codes: normalized.join(",") }));
+  };
+  const setDialoguePrimary = (code: string) => {
+    setDialogueModels(code ? [code, ...selectedDialogueModels.filter((item) => item !== code)] : []);
+  };
+  const toggleDialogueFallback = (code: string, checked: boolean) => {
+    const primary = selectedDialogueModels[0] || "";
+    const fallbacks = selectedDialogueModels.slice(1).filter((item) => item !== code);
+    setDialogueModels([primary, ...(checked ? [...fallbacks, code] : fallbacks)].filter(Boolean));
+  };
+
   const openCreate = () => {
     setForm(makeEmptyForm());
     setErr("");
@@ -382,16 +472,22 @@ export default function AgentsAdminPage() {
     setForm({
       ...makeEmptyForm(),
       isEdit: true,
+      system_workspace: runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas",
       code: w.code,
       name: w.name,
       description: w.description || preset.description,
       icon: w.icon || preset.icon,
+      sort_order: Number(w.sort_order || 0),
       is_enabled: w.is_enabled,
       generation_type: type,
       analysis_model_code: runtime.analysis_model_code || "",
       generation_model_code: runtime.generation_model_code || "",
       image_model_code: runtime.image_model_code || "image_fast_v1",
       video_model_code: runtime.video_model_code || runtime.generation_model_code || "video_demo_v1",
+      narration_model_code: runtime.narration_model_code || "",
+      audio_strategy: runtime.audio_strategy === "video_native" || runtime.audio_strategy === "tts_only" || runtime.audio_strategy === "hybrid"
+        ? runtime.audio_strategy
+        : runtime.narration_model_code ? "hybrid" : "video_native",
       dialogue_model_codes: Array.isArray(runtime.dialogue_model_codes) ? runtime.dialogue_model_codes.join(",") : runtime.analysis_model_code || "chat_demo_v1",
       style_reference_mode: runtime.style_reference_mode || "image_reference",
       duration_mode: runtime.duration_mode || "standard",
@@ -415,14 +511,35 @@ export default function AgentsAdminPage() {
       unit_price: Number(w.price_rule?.unit_price || 0),
       placeholder: String(input.placeholder || preset.placeholder),
       help: String(display.help || preset.help),
-      preset_override: undefined,
+      canvas_templates: Array.isArray(display.canvas_templates)
+        ? display.canvas_templates.map((item: any, index: number) => ({
+            id: String(item?.id || `template-${index + 1}`),
+            name: String(item?.name || `模板 ${index + 1}`),
+            description: String(item?.description || ""),
+            template_id: String(item?.template_id || item?.id || "text-image"),
+            ...(item?.document && typeof item.document === "object" ? { document: item.document } : {}),
+          }))
+        : DEFAULT_CANVAS_TEMPLATES.map((item) => ({ ...item })),
+      preset_override: runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas"
+        ? {
+            display_config: w.display_config || {},
+            runtime_config: runtime,
+            input_schema: w.input_schema || {},
+            nodes: w.nodes || [],
+            price_rule: w.price_rule || {},
+          }
+        : undefined,
     });
     setErr("");
     setShowForm(true);
   };
 
   const openJson = () => {
-    setJsonDraft(JSON.stringify(mergedPresetBundle(form), null, 2));
+    const bundle = mergedPresetBundle(form);
+    const value = form.system_workspace
+      ? { ...bundle, display_config: { ...bundle.display_config, canvas_templates: form.canvas_templates } }
+      : bundle;
+    setJsonDraft(JSON.stringify(value, null, 2));
     setJsonErr("");
     setJsonOpen(true);
   };
@@ -435,7 +552,21 @@ export default function AgentsAdminPage() {
       for (const key of allowed) {
         if (key in parsed) (override as any)[key] = (parsed as any)[key];
       }
-      setForm((prev) => ({ ...prev, preset_override: override }));
+      setForm((prev) => ({
+        ...prev,
+        preset_override: override,
+        ...(prev.system_workspace && Array.isArray((parsed.display_config as any)?.canvas_templates)
+          ? {
+              canvas_templates: (parsed.display_config as any).canvas_templates.map((item: any, index: number) => ({
+                id: String(item?.id || `template-${index + 1}`),
+                name: String(item?.name || `模板 ${index + 1}`),
+                description: String(item?.description || ""),
+                template_id: String(item?.template_id || item?.id || "text-image"),
+                ...(item?.document && typeof item.document === "object" ? { document: item.document } : {}),
+              })),
+            }
+          : {}),
+      }));
       setJsonOpen(false);
     } catch (e) {
       setJsonErr(e instanceof Error ? e.message : "JSON 格式错误");
@@ -445,15 +576,34 @@ export default function AgentsAdminPage() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr("");
-    if (form.generation_type === "comic_drama" && (!form.analysis_model_code || !form.image_model_code || !form.video_model_code)) {
+    if (!form.system_workspace && form.generation_type === "comic_drama" && (!form.analysis_model_code || !form.image_model_code || !form.video_model_code)) {
       setErr("请选择分析模型、图片模型和视频模型");
       return;
     }
-    if (form.generation_type !== "comic_drama" && (!form.analysis_model_code || !form.generation_model_code)) {
+    if (!form.system_workspace && form.generation_type === "comic_drama" && form.audio_strategy !== "video_native" && !form.narration_model_code) {
+      setErr("当前配音策略需要选择一个对白与旁白配音模型");
+      return;
+    }
+    if (!form.system_workspace && form.generation_type !== "comic_drama" && (!form.analysis_model_code || !form.generation_model_code)) {
       setErr("请选择分析模型和生成模型");
       return;
     }
-    const bundle = mergedPresetBundle(form);
+    const originalBundle = mergedPresetBundle(form);
+    const bundle = form.system_workspace
+      ? {
+          ...originalBundle,
+          display_config: {
+            ...originalBundle.display_config,
+            canvas_templates: form.canvas_templates.map((item) => ({
+              id: item.id.trim(),
+              name: item.name.trim(),
+              description: item.description.trim(),
+              template_id: item.template_id,
+              ...(item.document ? { document: item.document } : {}),
+            })).filter((item) => item.id && item.name),
+          },
+        }
+      : originalBundle;
     const payload = {
       code: form.code.trim(),
       name: form.name.trim(),
@@ -462,7 +612,7 @@ export default function AgentsAdminPage() {
       category: form.generation_type === "comic_drama" ? "video" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.generation_type === "comic_drama" ? "comic_drama" : "simple_pipeline",
+      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
       generation_type: form.generation_type === "comic_drama" ? "video" : form.generation_type,
@@ -482,7 +632,9 @@ export default function AgentsAdminPage() {
       input_schema: bundle.input_schema,
       price_rule: bundle.price_rule,
       display_config: bundle.display_config,
-      runtime_config: form.generation_type === "comic_drama"
+      runtime_config: form.system_workspace
+        ? { ...bundle.runtime_config, agent_mode: "infinite_canvas", system_workspace: true }
+        : form.generation_type === "comic_drama"
         ? bundle.runtime_config
         : { ...bundle.runtime_config, creative_scenes: normalizeScenes((bundle.runtime_config as any)?.creative_scenes || form.creative_scenes, form.generation_type), output_scenes: undefined },
     };
@@ -533,7 +685,7 @@ export default function AgentsAdminPage() {
 
           <div className="grid gap-6 p-6 xl:grid-cols-[1fr_360px]">
             <div className="space-y-6">
-              <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />选择智能体类型</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {(["image", "video", "comic_drama"] as GenerationType[]).map((type) => {
@@ -558,7 +710,7 @@ export default function AgentsAdminPage() {
                     );
                   })}
                 </div>
-              </section>
+              </section>}
 
               <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Bot size={16} />基础信息</div>
@@ -567,23 +719,91 @@ export default function AgentsAdminPage() {
                 <Field label="图标"><input className="admin-input" value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} /></Field>
                 <Field label="状态"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 px-3 text-sm"><input type="checkbox" checked={form.is_enabled} onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />启用智能体</label></Field>
                 <Field label="描述" wide><input className="admin-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+                <Field label="排序"><input type="number" className="admin-input" value={form.sort_order} onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) || 0 })} /></Field>
               </section>
 
-              <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
+              {form.system_workspace && (
+                <section className="rounded-2xl border border-cyan-100 bg-cyan-50/50 p-4">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-cyan-800"><Layers size={16} />无限画布模板管理</div>
+                  <p className="mt-2 text-xs leading-5 text-cyan-700">
+                    可直接管理前台“导入画布”中的模板。内置类型会由前端创建标准节点；完整自定义节点画布仍可通过下方高级 JSON 的 document 配置。
+                  </p>
+                  <div className="mt-4 space-y-3">
+                    {form.canvas_templates.map((template, index) => (
+                      <div key={`${template.id}-${index}`} className="grid gap-2 rounded-xl border border-cyan-100 bg-white p-3 md:grid-cols-[150px_1fr_170px_auto]">
+                        <input value={template.name} onChange={(e) => setForm((prev) => ({ ...prev, canvas_templates: prev.canvas_templates.map((item, itemIndex) => itemIndex === index ? { ...item, name: e.target.value } : item) }))} placeholder="模板名称" className="admin-input" />
+                        <input value={template.description} onChange={(e) => setForm((prev) => ({ ...prev, canvas_templates: prev.canvas_templates.map((item, itemIndex) => itemIndex === index ? { ...item, description: e.target.value } : item) }))} placeholder="模板说明" className="admin-input" />
+                        <select value={template.template_id} onChange={(e) => setForm((prev) => ({ ...prev, canvas_templates: prev.canvas_templates.map((item, itemIndex) => itemIndex === index ? { ...item, template_id: e.target.value } : item) }))} className="admin-input">
+                          {DEFAULT_CANVAS_TEMPLATES.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                        </select>
+                        <button type="button" onClick={() => setForm((prev) => ({ ...prev, canvas_templates: prev.canvas_templates.filter((_, itemIndex) => itemIndex !== index) }))} className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-100 text-red-500 hover:bg-red-50"><Trash2 size={15} /></button>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => setForm((prev) => ({
+                      ...prev,
+                      canvas_templates: [...prev.canvas_templates, {
+                        id: `template-${Date.now()}`,
+                        name: `新模板 ${prev.canvas_templates.length + 1}`,
+                        description: "",
+                        template_id: "text-image",
+                      }],
+                    }))} className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-cyan-200 bg-white px-3 text-xs font-medium text-cyan-700 hover:bg-cyan-50"><Plus size={14} />新增模板</button>
+                  </div>
+                </section>
+              )}
+
+              {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
                 <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
-                <Field label={form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}><select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}><option value="">请选择生成模型</option>{generationModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                {form.generation_type !== "comic_drama" && (
+                  <Field label={form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}><select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}><option value="">请选择生成模型</option>{generationModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                )}
                 {form.generation_type === "comic_drama" && (
                   <>
                     <Field label="关键帧图片模型"><select className="admin-input" value={form.image_model_code} onChange={(e) => setForm({ ...form, image_model_code: e.target.value })}><option value="">请选择图片模型</option>{imageModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
                     <Field label="分段视频模型"><select className="admin-input" value={form.video_model_code} onChange={(e) => setForm({ ...form, video_model_code: e.target.value, generation_model_code: e.target.value })}><option value="">请选择视频模型</option>{videoModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
-                    <Field label="对话主备模型" wide><input className="admin-input" value={form.dialogue_model_codes} onChange={(e) => setForm({ ...form, dialogue_model_codes: e.target.value })} placeholder="chat_demo_v1,backup_model_code" /></Field>
+                    <Field label="对白与旁白配音模型">
+                      <select className="admin-input" value={form.narration_model_code} onChange={(e) => setForm({ ...form, narration_model_code: e.target.value })}>
+                        <option value="">请选择语音合成模型</option>
+                        {audioModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}
+                      </select>
+                      <p className="mt-1.5 text-[11px] text-gray-400">只列出语音合成/克隆模型，不显示音乐生成模型。独立配音按每个分镜对白调用并计费。</p>
+                    </Field>
+                    <Field label="音频与对白策略">
+                      <select className="admin-input" value={form.audio_strategy} onChange={(e) => setForm({ ...form, audio_strategy: e.target.value as FormState["audio_strategy"] })}>
+                        <option value="hybrid">原生环境音 + 独立 TTS 配音（推荐）</option>
+                        <option value="video_native">仅视频模型原生对白/音效</option>
+                        <option value="tts_only">仅独立 TTS 配音</option>
+                      </select>
+                      <p className="mt-1.5 text-[11px] text-gray-400">Seedance 2.0 原生模式会把分镜对白写入视频提示词；混合模式只让视频模型生成环境音，再叠加所选 TTS，避免双重人声。</p>
+                    </Field>
+                    <Field label="剧本/对白主模型" wide>
+                      <select className="admin-input" value={selectedDialogueModels[0] || ""} onChange={(e) => setDialoguePrimary(e.target.value)}>
+                        <option value="">跟随分析大模型</option>
+                        {chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="备用对话模型（按勾选顺序切换）" wide>
+                      <div className="grid max-h-44 gap-2 overflow-y-auto rounded-xl border border-gray-100 bg-gray-50 p-3 md:grid-cols-2">
+                        {chatModels.filter((m) => m.code !== selectedDialogueModels[0]).map((m) => {
+                          const checked = selectedDialogueModels.slice(1).includes(m.code);
+                          return (
+                            <label key={m.code} className={`flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-xs ${checked ? "border-primary bg-white text-gray-900" : "border-transparent text-gray-500 hover:bg-white"}`}>
+                              <input type="checkbox" checked={checked} onChange={(e) => toggleDialogueFallback(m.code, e.target.checked)} />
+                              <span className="min-w-0 truncate">{m.display_name} / {m.code}</span>
+                            </label>
+                          );
+                        })}
+                        {chatModels.length <= 1 && <p className="text-xs text-gray-400">暂无其他可用对话模型</p>}
+                      </div>
+                      <p className="mt-1.5 text-[11px] text-gray-400">主模型异常、超时或返回无效内容时，将按这里的顺序自动尝试备用模型。</p>
+                    </Field>
                   </>
                 )}
                 <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>
                 <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>
                 <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
-              </section>
+              </section>}
 
               {form.generation_type === "comic_drama" && (
                 <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
@@ -627,7 +847,7 @@ export default function AgentsAdminPage() {
                 </section>
               )}
 
-              <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900">{form.generation_type === "video" ? <Video size={16} /> : <ImageIcon size={16} />}{form.generation_type === "video" ? "视频场景" : "出图场景"}</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {sceneDefs(form.generation_type).map((scene) => {
@@ -647,9 +867,9 @@ export default function AgentsAdminPage() {
                     );
                   })}
                 </div>
-              </section>
+              </section>}
 
-              <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Layers size={16} />输入能力与流程</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <CheckItem label="允许纯文字提交" checked={form.allow_text_only} onChange={(v) => setForm({ ...form, allow_text_only: v, require_image: v ? false : form.require_image })} />
@@ -661,13 +881,13 @@ export default function AgentsAdminPage() {
                   <CheckItem label="智能托管" checked={form.enable_autopilot} onChange={(v) => setForm({ ...form, enable_autopilot: v })} />
                   <CheckItem label="允许用户编辑提示词" checked={form.allow_prompt_edit} onChange={(v) => setForm({ ...form, allow_prompt_edit: v })} />
                 </div>
-              </section>
+              </section>}
 
-              <section className="grid gap-4 rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4">
                 <div className="flex items-center gap-2 text-sm font-semibold text-gray-900"><Pencil size={16} />前台文案</div>
                 <Field label="输入框提示" wide><input className="admin-input" value={form.placeholder} onChange={(e) => setForm({ ...form, placeholder: e.target.value })} /></Field>
                 <Field label="玩法说明" wide><textarea className="admin-input min-h-20 py-2" value={form.help} onChange={(e) => setForm({ ...form, help: e.target.value })} /></Field>
-              </section>
+              </section>}
 
               <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -717,6 +937,7 @@ export default function AgentsAdminPage() {
           const runtime = w.runtime_config || {};
           const type = typeFromRuntime(runtime, w.category);
           const preset = TYPE_PRESETS[type];
+          const isSystemWorkspace = runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas";
           return (
             <div key={w.code} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
               <div className="flex items-start justify-between gap-4">
@@ -726,15 +947,20 @@ export default function AgentsAdminPage() {
                     <h2 className="font-semibold text-gray-950">{w.name}</h2>
                     <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-mono text-gray-500">{w.code}</span>
                     <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-600">{preset.label}</span>
+                    {isSystemWorkspace && <span className="rounded-full bg-cyan-50 px-2 py-0.5 text-[10px] text-cyan-700">系统工作台</span>}
                     <span className={`rounded-full px-2 py-0.5 text-[10px] ${w.is_enabled ? "bg-green-50 text-green-600" : "bg-gray-100 text-gray-400"}`}>{w.is_enabled ? "已启用" : "已停用"}</span>
                   </div>
                   <p className="mt-2 text-sm text-gray-500">{w.description || preset.description}</p>
-                  <p className="mt-2 text-xs text-gray-400">分析模型：{runtime.analysis_model_code || "-"} · 生成模型：{runtime.generation_model_code || "-"} · 类型：{preset.label}</p>
+                  <p className="mt-2 text-xs text-gray-400">
+                    {isSystemWorkspace
+                      ? "节点内可选择后台已启用的图片、视频模型；画布历史独立保存。"
+                      : `分析模型：${runtime.analysis_model_code || "-"} · 生成模型：${runtime.generation_model_code || "-"} · 类型：${preset.label}`}
+                  </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  <button onClick={() => openEdit(w)} className="rounded-lg border border-gray-100 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">编辑</button>
+                  <button onClick={() => openEdit(w)} className="rounded-lg border border-gray-100 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">{isSystemWorkspace ? "管理配置" : "编辑"}</button>
                   <button onClick={() => toggle(w.code, !w.is_enabled)} className="rounded-lg border border-gray-100 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">{w.is_enabled ? "停用" : "启用"}</button>
-                  <button onClick={() => remove(w)} className="rounded-lg border border-red-100 px-3 py-2 text-sm text-red-500 hover:bg-red-50"><Trash2 size={15} /></button>
+                  {!isSystemWorkspace && <button onClick={() => remove(w)} className="rounded-lg border border-red-100 px-3 py-2 text-sm text-red-500 hover:bg-red-50"><Trash2 size={15} /></button>}
                 </div>
               </div>
             </div>

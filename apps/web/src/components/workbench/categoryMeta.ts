@@ -27,6 +27,7 @@ export const AGENT_CATEGORIES = [
   { code: "all", label: "\u5168\u90e8", labelKey: "nav.all" },
   { code: "image", label: "\u56fe\u7247", labelKey: "nav.image" },
   { code: "video", label: "\u89c6\u9891", labelKey: "nav.video" },
+  { code: "tool", label: "\u5de5\u5177", labelKey: "category.tool" },
   { code: "api", label: "API", labelKey: "category.api" },
   { code: "mine", label: "\u6211\u7684", labelKey: "nav.mine" },
 ] as const;
@@ -36,6 +37,7 @@ export const AGENT_CATEGORY_TAG: Record<string, { label: string; labelKey: strin
   video: { label: "\u89c6\u9891", labelKey: "nav.video", className: "bg-purple-50 text-purple-600" },
   multi_collab: { label: "\u591a\u6a21\u578b", labelKey: "category.multiCollab", className: "bg-indigo-50 text-indigo-600" },
   api: { label: "API", labelKey: "category.api", className: "bg-sky-50 text-sky-600" },
+  tool: { label: "\u5de5\u5177", labelKey: "category.tool", className: "bg-amber-50 text-amber-600" },
   workflow: { label: "\u901a\u7528", labelKey: "category.workflow", className: "bg-gray-100 text-gray-500" },
 };
 

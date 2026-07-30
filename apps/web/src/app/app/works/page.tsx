@@ -395,7 +395,16 @@ export default function WorksPage() {
             <div className="grid max-h-[calc(92vh-57px)] grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_300px]">
               <div className="flex min-h-[320px] items-center justify-center bg-gray-950 p-3 sm:min-h-[520px] sm:p-4">
                 {currentMedia.kind === "video" ? (
-                  <video src={currentMedia.url} poster={currentMedia.thumbnail} controls playsInline className="max-h-[76vh] w-full object-contain" />
+                  <video
+                    src={currentMedia.url}
+                    poster={currentMedia.thumbnail}
+                    controls
+                    controlsList="nodownload"
+                    playsInline
+                    preload="metadata"
+                    className="max-h-[76vh] w-full object-contain"
+                    onClick={(event) => event.stopPropagation()}
+                  />
                 ) : currentMedia.kind === "image" ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={currentMedia.url} alt={preview.work.prompt || ""} className="max-h-[76vh] max-w-full object-contain" />
@@ -426,7 +435,7 @@ export default function WorksPage() {
                 <div className="mt-4 flex flex-col gap-2">
                   <a href={currentMedia.url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5">
                     <ExternalLink size={16} />
-                    查看原图
+                    {currentMedia.kind === "video" ? "查看原视频" : currentMedia.kind === "audio" ? "打开原音频" : "查看原图"}
                   </a>
                   <a href={currentMedia.url} download className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-gray-950 text-sm font-medium text-white hover:bg-gray-800">
                     <Download size={16} />

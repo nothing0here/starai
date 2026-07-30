@@ -53,7 +53,10 @@ func New(endpoint, accessKey, secretKey, bucket, publicURL string, useSSL bool) 
 }
 
 func (c *Client) Upload(ctx context.Context, objectName, contentType string, r io.Reader, size int64) (string, error) {
-	_, err := c.mc.PutObject(ctx, c.bucket, objectName, r, size, minio.PutObjectOptions{ContentType: contentType})
+	_, err := c.mc.PutObject(ctx, c.bucket, objectName, r, size, minio.PutObjectOptions{
+		ContentType:        contentType,
+		ContentDisposition: "inline",
+	})
 	if err != nil {
 		return "", err
 	}

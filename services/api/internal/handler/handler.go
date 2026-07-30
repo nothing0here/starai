@@ -59,6 +59,7 @@ type Handler struct {
 	captcha      *service.CaptchaService
 	emailOTP     *service.EmailOTPService
 	contentI18n  *service.ContentI18nService
+	canvases     *service.CanvasService
 	i18nBackfill atomic.Bool
 	i18nUIWrite  sync.Mutex
 }
@@ -66,12 +67,12 @@ type Handler struct {
 func New(cfg *config.Config, auth *service.AuthService, wallet *service.WalletService, models *service.ModelService,
 	chat *service.ChatService, tasks *service.TaskService, works *service.WorksService, admin *service.AdminService,
 	billing *billing.Service, payment *service.PaymentService, ops *service.OpsService, gallery *service.GalleryService,
-	agents *service.AgentService, cacheClient *cache.Client, storageClient storage.Store, homeSvc *service.HomeService, presetSvc *service.PresetService, assetSvc *service.AssetService, roleTplSvc *service.RoleTemplateService, oauthSvc *service.OAuthService, captchaSvc *service.CaptchaService, emailOTPSvc *service.EmailOTPService, contentI18nSvc *service.ContentI18nService) *Handler {
+	agents *service.AgentService, cacheClient *cache.Client, storageClient storage.Store, homeSvc *service.HomeService, presetSvc *service.PresetService, assetSvc *service.AssetService, roleTplSvc *service.RoleTemplateService, oauthSvc *service.OAuthService, captchaSvc *service.CaptchaService, emailOTPSvc *service.EmailOTPService, contentI18nSvc *service.ContentI18nService, canvasSvc *service.CanvasService) *Handler {
 	return &Handler{
 		cfg: cfg, auth: auth, wallet: wallet, models: models, chat: chat, runtime: chat.RuntimeClient(),
 		tasks: tasks, works: works, admin: admin, billing: billing, payment: payment, ops: ops, gallery: gallery, agents: agents,
 		cache: cacheClient, storage: storageClient, home: homeSvc, presets: presetSvc, assets: assetSvc, roleTpl: roleTplSvc,
-		oauth: oauthSvc, captcha: captchaSvc, emailOTP: emailOTPSvc, contentI18n: contentI18nSvc,
+		oauth: oauthSvc, captcha: captchaSvc, emailOTP: emailOTPSvc, contentI18n: contentI18nSvc, canvases: canvasSvc,
 	}
 }
 
@@ -134,6 +135,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			auth.GET("/assets", h.ListAssets)
 			auth.GET("/assets/:id", h.GetAsset)
 			auth.DELETE("/assets/:id", h.DeleteAsset)
+			auth.POST("/canvases", h.CreateCanvas)
+			auth.GET("/canvases", h.ListCanvases)
+			auth.GET("/canvases/:id", h.GetCanvas)
+			auth.PUT("/canvases/:id", h.UpdateCanvas)
+			auth.DELETE("/canvases/:id", h.DeleteCanvas)
+			auth.POST("/canvases/compose", h.CreateCanvasCompose)
 			auth.PATCH("/me/profile", h.UpdateProfile)
 			auth.POST("/me/change-password", h.ChangePassword)
 			auth.POST("/auth/set-password", h.SetInitialPassword)
@@ -232,6 +239,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			adm.GET("/models", h.AdminListModels)
 			adm.POST("/models", superAdminOnly, h.AdminCreateModel)
 			adm.PATCH("/models/:id", superAdminOnly, h.AdminUpdateModel)
+			adm.POST("/models/:id/test-connection", superAdminOnly, h.AdminTestModelConnection)
 			adm.DELETE("/models/:id", superAdminOnly, h.AdminDeleteModel)
 			adm.GET("/api-docs", h.AdminListAPIDocs)
 			adm.POST("/api-docs", h.AdminCreateAPIDoc)
@@ -1741,6 +1749,93 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	util.Created(c, task)
 }
 
+func jsonContainsString(value interface{}, expected string) bool {
+	switch item := value.(type) {
+	case string:
+		return strings.TrimSpace(item) == expected
+	case []interface{}:
+		for _, child := range item {
+			if jsonContainsString(child, expected) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for _, child := range item {
+			if jsonContainsString(child, expected) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *Handler) CreateCanvasCompose(c *gin.Context) {
+	var req struct {
+		Sources []struct {
+			Kind    string `json:"kind"`
+			URL     string `json:"url"`
+			TaskNo  string `json:"task_no"`
+			AssetID string `json:"asset_id"`
+		} `json:"sources"`
+		Mode       string `json:"mode"`
+		OutputSize string `json:"output_size"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		util.BadRequest(c, "参数错误")
+		return
+	}
+	userID := c.GetInt64("user_id")
+	resolved := make([]map[string]interface{}, 0, len(req.Sources))
+	for _, source := range req.Sources {
+		kind := strings.ToLower(strings.TrimSpace(source.Kind))
+		if kind != "image" && kind != "video" && kind != "audio" {
+			util.BadRequest(c, "合成素材类型无效")
+			return
+		}
+		mediaURL := strings.TrimSpace(source.URL)
+		switch {
+		case strings.TrimSpace(source.AssetID) != "":
+			if h.storage == nil {
+				util.BadRequest(c, "对象存储未配置")
+				return
+			}
+			_, objectKey, _, err := h.assets.Get(c.Request.Context(), userID, strings.TrimSpace(source.AssetID))
+			if err != nil {
+				util.BadRequest(c, "合成素材不存在或无权访问")
+				return
+			}
+			trustedURL := h.storage.PublicURL(objectKey)
+			if mediaURL != "" && mediaURL != trustedURL {
+				util.BadRequest(c, "合成素材地址与资产不匹配")
+				return
+			}
+			mediaURL = trustedURL
+		case strings.TrimSpace(source.TaskNo) != "":
+			task, err := h.tasks.Get(c.Request.Context(), userID, strings.TrimSpace(source.TaskNo))
+			if err != nil || task.Status != "succeeded" {
+				util.BadRequest(c, "上游生成任务不存在或尚未完成")
+				return
+			}
+			if mediaURL == "" || !jsonContainsString(task.Output, mediaURL) {
+				util.BadRequest(c, "合成地址不属于当前用户的上游任务")
+				return
+			}
+		default:
+			util.BadRequest(c, "合成素材必须来自资产库或已完成的生成任务")
+			return
+		}
+		resolved = append(resolved, map[string]interface{}{"kind": kind, "url": mediaURL})
+	}
+	task, err := h.tasks.CreateCompose(c.Request.Context(), userID, service.CreateComposeTaskInput{
+		Sources: resolved, Mode: strings.TrimSpace(req.Mode), OutputSize: strings.TrimSpace(req.OutputSize),
+	})
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	util.Created(c, task)
+}
+
 func (h *Handler) OpenAPIImageGeneration(c *gin.Context) {
 	h.openAPICreateMediaTask(c, "images", "prompt")
 }
@@ -2354,6 +2449,39 @@ func (h *Handler) AdminDeleteModel(c *gin.Context) {
 	}
 	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "delete_model", "model", fmt.Sprintf("%d", id), nil)
 	util.OK(c, nil)
+}
+
+func (h *Handler) AdminTestModelConnection(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	model, err := h.models.GetFullByIDForAdmin(c.Request.Context(), id)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	if model.Category == "multi_collab" {
+		util.OK(c, runtime.ConnectionTestResult{
+			OK:      true,
+			Message: "多模型协作使用成员模型连接，无独立上游需要测试",
+		})
+		return
+	}
+	result := h.runtime.TestModelConnection(
+		c.Request.Context(),
+		model.NewAPIEndpoint,
+		model.RequestMode,
+		model.NewAPIModel,
+		model.NewAPIExtraParams,
+	)
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "test_model_connection", "model", model.Code, map[string]interface{}{
+		"ok":          result.OK,
+		"status_code": result.StatusCode,
+		"latency_ms":  result.LatencyMS,
+	})
+	util.OK(c, result)
 }
 
 func (h *Handler) ListAPIDocs(c *gin.Context) {

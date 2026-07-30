@@ -69,7 +69,7 @@ type Workflow = {
 type NodeRun = { node_id: string; name: string; type: string; status: string; output: Record<string, any>; error?: string };
 type DetailSection = { id?: string; type?: string; title?: string; objective?: string; copy_title?: string; copy_points?: string[]; image_url?: string; status?: string };
 type DetailPageOutput = { status?: string; compose_status?: string; compose_error?: string; long_image_url?: string; section_count?: number; completed_count?: number; sections?: DetailSection[] };
-type MediaTask = { task_no: string; status: string; progress: number; output?: Record<string, any>; error_message?: string; detail_section?: DetailSection };
+type MediaTask = { task_no: string; type?: "image" | "video" | "audio"; status: string; progress: number; output?: Record<string, any>; error_message?: string; detail_section?: DetailSection };
 type ReferenceImage = { url: string; name: string; public_id?: string };
 type AnalysisCandidate = { id: string; title?: string; reason?: string; prompt: string; negative_prompt?: string; params?: Record<string, unknown> };
 type Project = {
@@ -147,7 +147,26 @@ function textOf(v: unknown) {
 
 function mediaURL(task: MediaTask) {
   const out = task.output || {};
-  return textOf(out.video_url || out.image_url || (Array.isArray(out.images) && out.images[0]?.url) || (Array.isArray(out.videos) && out.videos[0]?.url));
+  return textOf(
+    out.video_url ||
+    out.image_url ||
+    out.audio_url ||
+    (Array.isArray(out.images) && out.images[0]?.url) ||
+    (Array.isArray(out.videos) && out.videos[0]?.url) ||
+    (Array.isArray(out.audios) && out.audios[0]?.url)
+  );
+}
+
+function mediaTaskType(task: MediaTask, fallback: string): "image" | "video" | "audio" {
+  if (task.type === "image" || task.type === "video" || task.type === "audio") return task.type;
+  const out = task.output || {};
+  if (out.audio_url || (Array.isArray(out.audios) && out.audios.length > 0)) return "audio";
+  if (out.video_url || (Array.isArray(out.videos) && out.videos.length > 0)) return "video";
+  if (out.image_url || (Array.isArray(out.images) && out.images.length > 0)) return "image";
+  const url = mediaURL(task);
+  if (/\.(mp3|wav|m4a|aac|ogg|flac)(?:[?#]|$)/i.test(url)) return "audio";
+  if (/\.(mp4|webm|mov|m4v|avi|mkv)(?:[?#]|$)/i.test(url)) return "video";
+  return fallback === "audio" ? "audio" : fallback === "video" ? "video" : "image";
 }
 
 function statusProgress(status: string, explicit = 0) {
@@ -229,6 +248,8 @@ export function AgentWorkspace({ code }: { code: string }) {
   const router = useRouter();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [generationModel, setGenerationModel] = useState<Model | null>(null);
+  const [comicImageModels, setComicImageModels] = useState<Model[]>([]);
+  const [comicVideoModels, setComicVideoModels] = useState<Model[]>([]);
   const [prompt, setPrompt] = useState("");
   const [count, setCount] = useState(1);
   const [imageRatio, setImageRatio] = useState("1:1");
@@ -343,6 +364,31 @@ export function AgentWorkspace({ code }: { code: string }) {
   const selectedSceneMeta = IMAGE_SCENES.find((item) => item.code === selectedScene) || IMAGE_SCENES[0];
   const isDetailPageScene = selectedSceneMeta.code === "detail_image" && generationType === "image";
   const videoConfig = parseVideoRuntime(generationModel?.runtime_rule);
+
+  useEffect(() => {
+    if (!isComicDrama) {
+      setComicImageModels([]);
+      setComicVideoModels([]);
+      return;
+    }
+    const controller = new AbortController();
+    Promise.all([
+      apiForLocale<Model[]>("/api/models?category=image", locale, { signal: controller.signal }),
+      apiForLocale<Model[]>("/api/models?category=video", locale, { signal: controller.signal }),
+    ])
+      .then(([images, videos]) => {
+        if (controller.signal.aborted) return;
+        setComicImageModels((images || []).filter((item) => item.is_enabled !== false));
+        setComicVideoModels((videos || []).filter((item) => item.is_enabled !== false));
+      })
+      .catch((error) => {
+        if (error?.name !== "AbortError") {
+          setComicImageModels([]);
+          setComicVideoModels([]);
+        }
+      });
+    return () => controller.abort();
+  }, [isComicDrama, locale]);
   const [comicSettings, setComicSettings] = useState({
     style_reference_mode: "image_reference",
     duration_mode: "standard",
@@ -445,12 +491,22 @@ export function AgentWorkspace({ code }: { code: string }) {
   const loadComicProjects = async (includeArchived = showArchivedProjects) => {
     try {
       const res = await api<{ items: ComicProject[] }>(`/api/comic-drama/projects${includeArchived ? "?include_archived=true" : ""}`);
-      setComicProjects(res.items || []);
-      setActiveComicProject((prev) => (prev && res.items?.some((item) => item.public_id === prev.public_id) ? prev : res.items?.[0] || null));
+      const items = res.items || [];
+      const storedID = typeof window !== "undefined" ? window.localStorage.getItem(`starai:comic:active:${code}`) : "";
+      setComicProjects(items);
+      setActiveComicProject((prev) => {
+        const preferredID = prev?.public_id || storedID;
+        return items.find((item) => item.public_id === preferredID) || items[0] || null;
+      });
     } catch {
       setComicProjects([]);
     }
   };
+
+  useEffect(() => {
+    if (!isComicDrama || !activeComicProject?.public_id || typeof window === "undefined") return;
+    window.localStorage.setItem(`starai:comic:active:${code}`, activeComicProject.public_id);
+  }, [activeComicProject?.public_id, code, isComicDrama]);
 
   useEffect(() => {
     if (!isComicDrama || !activeComicProject?.last_workflow_project_id) return;
@@ -970,6 +1026,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                     </div>
                   </div>
                 )}
+                {finalVideoURL ? <div className="mb-2"><FinalComicVideo url={finalVideoURL} /></div> : null}
                 {project && (project.status === "succeeded" || project.status === "failed") ? <ComicProjectPanel project={project} /> : null}
                 <div className="rounded-3xl border border-gray-200 bg-white/90 shadow-xl shadow-cyan-950/10 backdrop-blur dark:border-white/10 dark:bg-[#1b1d22]/95 dark:shadow-black/30">
                   <div className="flex min-h-[92px] gap-3 p-3 sm:min-h-[104px] sm:p-4">
@@ -1050,7 +1107,13 @@ export function AgentWorkspace({ code }: { code: string }) {
           />
         )}
         {settingsOpen && (
-          <ComicPreferenceModal settings={comicSettings} onChange={setComicSettings} onClose={() => setSettingsOpen(false)} />
+          <ComicPreferenceModal
+            settings={comicSettings}
+            imageModels={comicImageModels}
+            videoModels={comicVideoModels}
+            onChange={setComicSettings}
+            onClose={() => setSettingsOpen(false)}
+          />
         )}
         {assetModalOpen && activeComicProject && (
           <ComicAssetModal
@@ -1357,11 +1420,11 @@ export function AgentWorkspace({ code }: { code: string }) {
                 <NumberRow label="画面逻辑合格分" value={comicSettings.logic_score} min={0} max={100} onChange={(v) => setComicSettings((prev) => ({ ...prev, logic_score: v }))} />
               </ComicSettingCard>
               <ComicSettingCard title="图片模型">
-                <input className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-white" value={comicSettings.image_model_code} onChange={(e) => setComicSettings((prev) => ({ ...prev, image_model_code: e.target.value }))} placeholder="image_fast_v1" />
+                <ComicModelSelect models={comicImageModels} value={comicSettings.image_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, image_model_code: value }))} emptyLabel="请选择图片模型" />
               </ComicSettingCard>
               <ComicSettingCard title="视频模型">
-                <input className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-white" value={comicSettings.video_model_code} onChange={(e) => setComicSettings((prev) => ({ ...prev, video_model_code: e.target.value }))} placeholder="video_demo_v1" />
-                <div className="mt-2 inline-flex rounded-full bg-cyan-500/10 px-2 py-1 text-[11px] font-medium text-cyan-700 dark:text-cyan-200">系统推荐</div>
+                <ComicModelSelect models={comicVideoModels} value={comicSettings.video_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, video_model_code: value }))} emptyLabel="请选择视频模型" />
+                <div className="mt-2 text-[11px] text-gray-400">支持选择 Seedance 2.0 等已启用视频模型；每个分镜按所选模型生成并统一计费。</div>
               </ComicSettingCard>
               <ComicSettingCard title="对话模型">
                 <input className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-white" value={comicSettings.dialogue_model_codes.join(",")} onChange={(e) => setComicSettings((prev) => ({ ...prev, dialogue_model_codes: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) }))} placeholder="chat_demo_v1" />
@@ -1796,7 +1859,19 @@ function ComicAssetModal({ projectId, items, onClose, onChanged }: { projectId: 
   );
 }
 
-function ComicPreferenceModal({ settings, onChange, onClose }: { settings: any; onChange: (next: any) => void; onClose: () => void }) {
+function ComicPreferenceModal({
+  settings,
+  imageModels,
+  videoModels,
+  onChange,
+  onClose,
+}: {
+  settings: any;
+  imageModels: Model[];
+  videoModels: Model[];
+  onChange: (next: any) => void;
+  onClose: () => void;
+}) {
   const set = (patch: Record<string, unknown>) => onChange((prev: any) => ({ ...prev, ...patch }));
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onClick={onClose}>
@@ -1807,12 +1882,44 @@ function ComicPreferenceModal({ settings, onChange, onClose }: { settings: any; 
           <ComicSettingCard title="分镜时长模式"><Segmented value={settings.duration_mode} options={[["compact", "紧凑"], ["standard", "常规"], ["long", "超长"]]} onChange={(v) => set({ duration_mode: v })} /></ComicSettingCard>
           <ComicSettingCard title="分镜画宫格数"><Segmented value={String(settings.storyboard_grid)} options={[["4", "4宫格"], ["6", "6宫格"], ["9", "9宫格"]]} onChange={(v) => set({ storyboard_grid: Number(v) })} /></ComicSettingCard>
           <ComicSettingCard title="自动重试"><NumberRow label="最大重试次数" value={settings.max_retry} min={0} max={5} onChange={(v) => set({ max_retry: v })} /><NumberRow label="资产一致性合格分" value={settings.asset_consistency_score} min={0} max={100} onChange={(v) => set({ asset_consistency_score: v })} /><NumberRow label="画面逻辑合格分" value={settings.logic_score} min={0} max={100} onChange={(v) => set({ logic_score: v })} /></ComicSettingCard>
-          <ComicSettingCard title="图片模型"><input value={settings.image_model_code} onChange={(e) => set({ image_model_code: e.target.value })} className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm dark:border-white/10 dark:bg-white/5 dark:text-white" /></ComicSettingCard>
-          <ComicSettingCard title="视频模型"><input value={settings.video_model_code} onChange={(e) => set({ video_model_code: e.target.value })} className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm dark:border-white/10 dark:bg-white/5 dark:text-white" /></ComicSettingCard>
+          <ComicSettingCard title="图片模型"><ComicModelSelect models={imageModels} value={settings.image_model_code} onChange={(value) => set({ image_model_code: value })} emptyLabel="请选择图片模型" /></ComicSettingCard>
+          <ComicSettingCard title="视频模型">
+            <ComicModelSelect models={videoModels} value={settings.video_model_code} onChange={(value) => set({ video_model_code: value })} emptyLabel="请选择视频模型" />
+            <div className="mt-2 text-[11px] text-gray-400">Seedance 2.0 会自动使用分镜关键帧执行图生视频。</div>
+          </ComicSettingCard>
         </div>
         <button onClick={onClose} className="mt-4 h-11 w-full rounded-xl bg-cyan-500 text-sm font-semibold text-white">保存设置</button>
       </div>
     </div>
+  );
+}
+
+function ComicModelSelect({
+  models,
+  value,
+  onChange,
+  emptyLabel,
+}: {
+  models: Model[];
+  value: string;
+  onChange: (value: string) => void;
+  emptyLabel: string;
+}) {
+  const currentExists = models.some((item) => item.code === value);
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/10 dark:bg-gray-950 dark:text-white"
+    >
+      <option value="">{emptyLabel}</option>
+      {value && !currentExists && <option value={value}>{value}（当前配置）</option>}
+      {models.map((model) => (
+        <option key={model.code} value={model.code}>
+          {model.display_name || model.code}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -1838,6 +1945,10 @@ function ComicSettingsSummary({ settings, onOpen }: { settings: { duration_mode:
 }
 
 function ComicProjectPanel({ project }: { project: Project }) {
+  const { t } = useI18n();
+  const [showAllStoryboards, setShowAllStoryboards] = useState(false);
+  const [showAllKeyframes, setShowAllKeyframes] = useState(false);
+  const [showAllSegments, setShowAllSegments] = useState(false);
   const comic = (project.outputs?.comic_drama || {}) as Record<string, any>;
   const characters = Array.isArray(comic.characters) ? comic.characters : [];
   const props = Array.isArray(comic.props) ? comic.props : [];
@@ -1845,19 +1956,54 @@ function ComicProjectPanel({ project }: { project: Project }) {
   const storyboards = Array.isArray(comic.storyboards) ? comic.storyboards : [];
   const keyframes = Array.isArray(project.outputs?.keyframes) ? project.outputs?.keyframes : Array.isArray(comic.keyframes) ? comic.keyframes : [];
   const segments = Array.isArray(project.outputs?.segments) ? project.outputs?.segments : Array.isArray(comic.segments) ? comic.segments : [];
+  const total = Math.max(storyboards.length, keyframes.length, segments.length);
+  const completedKeyframes = keyframes.filter((item: any) => textOf(item.image_url)).length;
+  const completedSegments = segments.filter((item: any) => textOf(item.video_url)).length;
+  const failedItems = [...keyframes, ...segments].filter((item: any) => item.status === "failed" || textOf(item.error_message));
+  const currentStep = textOf(project.outputs?.current_step || project.status);
+  const stepLabels: Record<string, string> = {
+    storyboard_confirm: t("comic.stepStoryboard"),
+    keyframes: t("comic.stepKeyframes"),
+    video_segments: t("comic.stepSegments"),
+    compose: t("comic.stepCompose"),
+    result: t("comic.stepCompleted"),
+    running: t("workspace.generating"),
+    failed: t("workspace.generationFailed"),
+  };
+  const visibleStoryboards = showAllStoryboards ? storyboards : storyboards.slice(0, 6);
+  const visibleKeyframes = showAllKeyframes ? keyframes : keyframes.slice(0, 6);
+  const visibleSegments = showAllSegments ? segments : segments.slice(0, 6);
   if (!storyboards.length && !keyframes.length && !segments.length) return null;
   return (
     <div className="space-y-3 rounded-2xl border border-cyan-100 bg-cyan-50/40 p-4 dark:border-cyan-400/15 dark:bg-cyan-400/5">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold text-gray-900 dark:text-white">AI漫剧工作流资产</div>
-          <div className="mt-0.5 text-xs text-gray-400">分镜、关键帧和分段视频会随流程逐步补齐</div>
+          <div className="text-sm font-semibold text-gray-900 dark:text-white">{t("comic.workflowAssets")}</div>
+          <div className="mt-0.5 text-xs text-gray-400">{t("comic.workflowAssetsHint")}</div>
         </div>
-        <span className="rounded-full bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-700 dark:text-cyan-200">{textOf(project.outputs?.current_step || project.status)}</span>
+        <span className="rounded-full bg-cyan-500/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-700 dark:text-cyan-200">{stepLabels[currentStep] || currentStep}</span>
       </div>
+      <div className="grid grid-cols-3 gap-2">
+        {[
+          [t("comic.storyboards"), storyboards.length, total],
+          [t("comic.keyframes"), completedKeyframes, total],
+          [t("comic.videoSegments"), completedSegments, total],
+        ].map(([label, value, maximum]) => (
+          <div key={String(label)} className="rounded-xl border border-white bg-white/80 px-3 py-2 dark:border-white/10 dark:bg-white/5">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-300"><span className="truncate">{String(label)}</span><b className="text-gray-800 dark:text-white">{Number(value)}/{Number(maximum)}</b></div>
+            <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-white/10"><div className="h-full rounded-full bg-cyan-500 transition-all" style={{ width: `${Number(maximum) ? Math.min(100, Number(value) / Number(maximum) * 100) : 0}%` }} /></div>
+          </div>
+        ))}
+      </div>
+      {failedItems.length > 0 && (
+        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600 dark:border-red-400/20 dark:bg-red-500/10 dark:text-red-200">
+          <div className="font-semibold">{t("comic.partialFailure", { count: failedItems.length })}</div>
+          <div className="mt-1 line-clamp-2">{textOf(failedItems[0]?.error_message || project.error_message)}</div>
+        </div>
+      )}
       {(characters.length > 0 || props.length > 0 || locations.length > 0) && (
         <div className="grid gap-2 sm:grid-cols-3">
-          {[["角色", characters], ["道具", props], ["场景", locations]].map(([label, items]) => (
+          {[[t("comic.characters"), characters], [t("comic.props"), props], [t("comic.locations"), locations]].map(([label, items]) => (
             <div key={String(label)} className="rounded-xl border border-white bg-white/80 p-3 dark:border-white/10 dark:bg-white/5">
               <div className="mb-2 text-xs font-semibold text-gray-800 dark:text-gray-100">{String(label)} · {(items as any[]).length}</div>
               <div className="flex flex-wrap gap-1.5">
@@ -1868,53 +2014,66 @@ function ComicProjectPanel({ project }: { project: Project }) {
         </div>
       )}
       {storyboards.length > 0 && (
-        <div className="grid gap-2 md:grid-cols-2">
-          {storyboards.slice(0, 6).map((item: any, idx: number) => (
+        <section>
+          <div className="mb-2 flex items-center justify-between"><h4 className="text-xs font-semibold text-gray-700 dark:text-gray-200">{t("comic.storyboards")} · {storyboards.length}</h4>{storyboards.length > 6 && <button type="button" onClick={() => setShowAllStoryboards((value) => !value)} className="text-[11px] font-medium text-cyan-600 dark:text-cyan-300">{showAllStoryboards ? t("comic.collapse") : t("comic.showAll")}</button>}</div>
+          <div className="grid gap-2 md:grid-cols-2">
+          {visibleStoryboards.map((item: any, idx: number) => (
             <div key={textOf(item.id || idx)} className="rounded-xl border border-white bg-white/80 p-3 dark:border-white/10 dark:bg-white/5">
               <div className="mb-1 flex items-center gap-2">
                 <span className="rounded-lg bg-violet-500/10 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-200">{textOf(item.id || `S${idx + 1}`)}</span>
-                <span className="truncate text-xs font-semibold text-gray-800 dark:text-gray-100">{textOf(item.title || `分镜 ${idx + 1}`)}</span>
+                <span className="truncate text-xs font-semibold text-gray-800 dark:text-gray-100">{textOf(item.title || `${t("comic.storyboard")} ${idx + 1}`)}</span>
               </div>
               <p className="line-clamp-2 text-xs leading-5 text-gray-500 dark:text-gray-300">{textOf(item.scene || item.video_prompt || item.keyframe_prompt)}</p>
             </div>
           ))}
-        </div>
+          </div>
+        </section>
       )}
       {keyframes.length > 0 && (
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {keyframes.slice(0, 6).map((item: any, idx: number) => (
-            <div key={textOf(item.id || idx)} className="overflow-hidden rounded-xl border border-white bg-white dark:border-white/10 dark:bg-white/5">
+        <section>
+          <div className="mb-2 flex items-center justify-between"><h4 className="text-xs font-semibold text-gray-700 dark:text-gray-200">{t("comic.keyframes")} · {completedKeyframes}/{total}</h4>{keyframes.length > 6 && <button type="button" onClick={() => setShowAllKeyframes((value) => !value)} className="text-[11px] font-medium text-cyan-600 dark:text-cyan-300">{showAllKeyframes ? t("comic.collapse") : t("comic.showAll")}</button>}</div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {visibleKeyframes.map((item: any, idx: number) => {
+            const failed = item.status === "failed" || !!textOf(item.error_message);
+            return (
+            <div key={textOf(item.id || idx)} className={`overflow-hidden rounded-xl border bg-white dark:bg-white/5 ${failed ? "border-red-200 dark:border-red-400/30" : "border-white dark:border-white/10"}`}>
               <div className="aspect-video bg-gray-100 dark:bg-gray-950">
                 {textOf(item.image_url) ? (
                   // eslint-disable-next-line @next/next/no-img-element
-                  <Image src={textOf(item.image_url)} alt="" width={640} height={360} sizes="(max-width: 768px) 100vw, 50vw" className="h-full w-full object-cover" />
+                  <img src={textOf(item.image_url)} alt={textOf(item.title || item.id || `${t("comic.keyframe")} ${idx + 1}`)} className="h-full w-full object-contain" loading="lazy" decoding="async" />
                 ) : (
-                  <div className="flex h-full items-center justify-center text-xs text-gray-400">关键帧生成中</div>
+                  <div className={`flex h-full items-center justify-center px-3 text-center text-xs ${failed ? "text-red-500" : "text-gray-400"}`}>{failed ? textOf(item.error_message || t("workspace.generationFailed")) : t("comic.keyframeGenerating")}</div>
                 )}
               </div>
               <div className="flex items-center justify-between gap-2 px-3 py-2">
-                <span className="truncate text-xs font-medium text-gray-700 dark:text-gray-200">{textOf(item.title || item.id || `关键帧 ${idx + 1}`)}</span>
-                {Number(item.retry_count || 0) > 0 && <span className="text-[10px] text-amber-600">重试 {Number(item.retry_count)}</span>}
+                <span className="truncate text-xs font-medium text-gray-700 dark:text-gray-200">{textOf(item.title || item.id || `${t("comic.keyframe")} ${idx + 1}`)}</span>
+                {Number(item.retry_count || 0) > 0 && <span className="shrink-0 text-[10px] text-amber-600">{t("comic.retryCount", { count: Number(item.retry_count) })}</span>}
               </div>
             </div>
-          ))}
-        </div>
+          )})}
+          </div>
+        </section>
       )}
       {segments.length > 0 && (
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {segments.slice(0, 6).map((item: any, idx: number) => (
-            <div key={textOf(item.id || idx)} className="overflow-hidden rounded-xl border border-white bg-white dark:border-white/10 dark:bg-white/5">
+        <section>
+          <div className="mb-2 flex items-center justify-between"><h4 className="text-xs font-semibold text-gray-700 dark:text-gray-200">{t("comic.videoSegments")} · {completedSegments}/{total}</h4>{segments.length > 6 && <button type="button" onClick={() => setShowAllSegments((value) => !value)} className="text-[11px] font-medium text-cyan-600 dark:text-cyan-300">{showAllSegments ? t("comic.collapse") : t("comic.showAll")}</button>}</div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {visibleSegments.map((item: any, idx: number) => {
+            const failed = item.status === "failed" || !!textOf(item.error_message);
+            return (
+            <div key={textOf(item.id || idx)} className={`overflow-hidden rounded-xl border bg-white dark:bg-white/5 ${failed ? "border-red-200 dark:border-red-400/30" : "border-white dark:border-white/10"}`}>
               <div className="aspect-video bg-black">
                 {textOf(item.video_url) ? (
                   <video src={textOf(item.video_url)} controls className="h-full w-full object-contain" />
                 ) : (
-                  <div className="flex h-full items-center justify-center text-xs text-gray-400">视频生成中</div>
+                  <div className={`flex h-full items-center justify-center px-3 text-center text-xs ${failed ? "text-red-400" : "text-gray-400"}`}>{failed ? textOf(item.error_message || t("workspace.generationFailed")) : t("comic.segmentGenerating")}</div>
                 )}
               </div>
-              <div className="px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200">{textOf(item.title || item.id || `视频段 ${idx + 1}`)}</div>
+              <div className="flex items-center justify-between gap-2 px-3 py-2"><span className="truncate text-xs font-medium text-gray-700 dark:text-gray-200">{textOf(item.title || item.id || `${t("comic.videoSegment")} ${idx + 1}`)}</span>{Number(item.retry_count || 0) > 0 && <span className="shrink-0 text-[10px] text-amber-600">{t("comic.retryCount", { count: Number(item.retry_count) })}</span>}</div>
             </div>
-          ))}
-        </div>
+          )})}
+          </div>
+        </section>
       )}
     </div>
   );
@@ -1956,13 +2115,14 @@ function NumberRow({ label, value, min, max, onChange }: { label: string; value:
 }
 
 function FinalComicVideo({ url }: { url: string }) {
+  const { t } = useI18n();
   return (
     <div className="rounded-2xl border border-cyan-100 bg-white p-3 dark:border-cyan-400/20 dark:bg-white/5">
       <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="text-sm font-semibold text-gray-900 dark:text-white">最终合成视频</div>
-        <a href={url} target="_blank" rel="noreferrer" className="text-xs font-medium text-secondary">打开</a>
+        <div className="text-sm font-semibold text-gray-900 dark:text-white">{t("comic.finalVideo")}</div>
+        <a href={url} target="_blank" rel="noreferrer" className="text-xs font-medium text-secondary">{t("comic.openVideo")}</a>
       </div>
-      <video src={url} controls className="max-h-[420px] w-full rounded-xl bg-black object-contain" />
+      <video src={url} controls playsInline preload="metadata" className="max-h-[420px] w-full rounded-xl bg-black object-contain" />
     </div>
   );
 }
@@ -2060,7 +2220,7 @@ function MediaTaskGrid({ tasks, generationType, onMore }: { tasks: MediaTask[]; 
             key={task.task_no || idx}
             task={task}
             index={idx}
-            generationType={generationType}
+            generationType={mediaTaskType(task, generationType)}
             mediaHeight={mediaHeight}
             onPreview={(url, type) => setPreview({ url, type })}
           />
@@ -2071,7 +2231,11 @@ function MediaTaskGrid({ tasks, generationType, onMore }: { tasks: MediaTask[]; 
           <div className={`relative flex max-h-[calc(100dvh-2rem)] w-full items-center justify-center overflow-hidden rounded-2xl bg-black shadow-2xl ${preview.type === "video" ? "max-w-6xl" : "max-w-4xl"}`} onClick={(e) => e.stopPropagation()}>
             <button type="button" onClick={() => setPreview(null)} className="absolute right-3 top-3 z-20 flex h-9 w-9 items-center justify-center rounded-xl border border-gray-200 bg-white/90 text-gray-900 shadow dark:border-white/10 dark:bg-gray-900/90 dark:text-white" aria-label={t("common.close")}><X size={16} /></button>
             {preview.type === "video" ? (
-              <video src={preview.url} controls autoPlay className="h-auto max-h-[82dvh] w-full object-contain" />
+              <video src={preview.url} controls controlsList="nodownload" playsInline autoPlay className="h-auto max-h-[82dvh] w-full object-contain" />
+            ) : preview.type === "audio" ? (
+              <div className="flex min-h-52 w-full items-center justify-center p-8">
+                <audio src={preview.url} controls autoPlay className="w-full max-w-xl" />
+              </div>
             ) : (
               <div className="relative flex max-h-[82dvh] w-full items-center justify-center">
                 <a
@@ -2135,10 +2299,17 @@ function MediaResultCard({
       <div className={`rounded-xl border border-gray-100 ${mediaHeight} flex items-center justify-center overflow-hidden bg-gray-50 dark:bg-gray-950 dark:border-white/10`}>
         {url && generationType === "video" && succeeded ? (
           <div className="relative h-full w-full bg-black flex items-center justify-center">
-            <video src={url} controls className="h-full w-full object-contain" />
+            <video src={url} controls controlsList="nodownload" playsInline preload="metadata" className="h-full w-full object-contain" />
             <button type="button" onClick={() => onPreview(url, "video")} className="absolute right-2 top-2 z-20 rounded-lg border border-white/20 bg-gray-950/85 px-2.5 py-1 text-xs font-medium text-white shadow-lg backdrop-blur hover:bg-gray-900 dark:bg-gray-900/90 dark:text-white dark:border-white/10 dark:hover:bg-gray-800">{t("common.preview")}</button>
           </div>
-        ) : url && generationType !== "video" && succeeded && !imageFailed ? (
+        ) : url && generationType === "audio" && succeeded ? (
+          <div className="flex h-full w-full flex-col items-center justify-center gap-4 px-4">
+            <audio src={url} controls preload="metadata" className="w-full" />
+            <button type="button" onClick={() => onPreview(url, "audio")} className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200">
+              {t("common.preview")}
+            </button>
+          </div>
+        ) : url && generationType === "image" && succeeded && !imageFailed ? (
           <div className="relative h-full w-full">
             <button type="button" onClick={() => onPreview(url, "image")} className="h-full w-full">
               {/* eslint-disable-next-line @next/next/no-img-element */}

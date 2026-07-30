@@ -854,6 +854,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   );
   const videoConfig = parseVideoRuntime(model.runtime_rule);
   const audioConfig = parseAudioRuntime(model.runtime_rule);
+  const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
+  const seedanceMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
       ? videoConfig.reference_images?.max ?? 4
@@ -872,8 +874,17 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         videoMedia.first_frame?.public_id,
         videoMedia.last_frame?.public_id,
         ...videoMedia.reference_images.map((x) => x.public_id),
+        ...videoMedia.reference_videos.map((x) => x.public_id),
+        ...videoMedia.reference_audios.map((x) => x.public_id),
       ].filter((x): x is string => !!x),
-    [refImages, videoMedia.first_frame, videoMedia.last_frame, videoMedia.reference_images]
+    [
+      refImages,
+      videoMedia.first_frame,
+      videoMedia.last_frame,
+      videoMedia.reference_images,
+      videoMedia.reference_videos,
+      videoMedia.reference_audios,
+    ]
   );
 
   useEffect(() => {
@@ -1811,8 +1822,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       {/* Scrollable main */}
       <div className={`flex-1 px-3 sm:px-5 w-full ${hasConversation ? "overflow-y-auto pb-5 sm:pb-6" : "overflow-y-auto max-lg:overflow-y-auto pb-2 sm:pb-3"} min-h-0`}>
         {messages.length === 0 && !taskOutput && !taskStatus ? (
-          <div className="min-h-full flex flex-col justify-center max-lg:justify-start max-lg:py-3">
-            <div className="w-full max-lg:pt-0">
+          <div className="flex min-h-full flex-col">
+            <div className="my-auto w-full py-3 max-lg:py-0">
               {/* Hero banner */}
               <div className={clsx("soft-card w-full max-w-[980px] mx-auto p-4 sm:p-10 text-center mb-3 max-lg:mb-3", (isImage || isVideo) && "tech-card")}>
                 <div className="tech-icon w-10 h-10 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl bg-white border border-gray-100 flex items-center justify-center text-xl sm:text-2xl mx-auto mb-3 sm:mb-4 overflow-hidden shadow-sm dark:bg-white/10 dark:border-white/10">
@@ -2219,7 +2230,14 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                         costHint={estimatedCost != null ? `Est. ${estimatedCost.toFixed(2)}/run` : null}
                       />
                     </div>
-                    <VideoUploadArea config={videoConfig} media={videoMedia} onChange={setVideoMedia} />
+                    {!isSeedance2 && (
+                      <VideoUploadArea
+                        config={videoConfig}
+                        media={videoMedia}
+                        onChange={setVideoMedia}
+                        mode={seedanceMode}
+                      />
+                    )}
                   </div>
                 ) : isAudio ? (
                   <div className="flex items-center gap-2 sm:gap-3">
@@ -2292,7 +2310,46 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 )}
               </div>
             )}
-            {isAudio && audioConfig.input_layout === "dual" ? (
+            {isSeedance2 && seedanceMode === "draft_task" ? (
+              <div className="px-3 py-3 sm:px-4">
+                <VideoUploadArea
+                  config={videoConfig}
+                  media={videoMedia}
+                  onChange={setVideoMedia}
+                  mode={seedanceMode}
+                  draftTaskId={String(params.draft_task_id || "")}
+                  onDraftTaskIdChange={(value) => setParams({ ...params, draft_task_id: value })}
+                />
+              </div>
+            ) : isSeedance2 && seedanceMode !== "text" ? (
+              <div className="flex flex-col md:flex-row md:items-stretch">
+                <div className="w-full min-w-0 px-3 py-3 sm:px-4 md:w-auto md:max-w-[62%] md:flex-none md:pr-1">
+                  <VideoUploadArea
+                    config={videoConfig}
+                    media={videoMedia}
+                    onChange={setVideoMedia}
+                    mode={seedanceMode}
+                    portraitAssetId={String(params.portrait_asset_id || "")}
+                    portraitAssetType={params.portrait_asset_type === "video" ? "video" : "image"}
+                    onPortraitAssetIdChange={(value) => setParams({ ...params, portrait_asset_id: value })}
+                    onPortraitAssetTypeChange={(value) => setParams({ ...params, portrait_asset_type: value })}
+                  />
+                </div>
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder={promptPlaceholder}
+                  rows={5}
+                  className="min-h-28 min-w-0 flex-1 resize-none bg-transparent px-4 py-3 text-sm placeholder:text-gray-400 focus:outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      submit();
+                    }
+                  }}
+                />
+              </div>
+            ) : isAudio && audioConfig.input_layout === "dual" ? (
               <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-50">
                 <textarea
                   value={prompt}

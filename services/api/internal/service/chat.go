@@ -95,6 +95,7 @@ type CompletionInput struct {
 	Messages       []runtime.ChatMessage  `json:"messages"`
 	Params         map[string]interface{} `json:"params"`
 	Stream         bool                   `json:"stream"`
+	Ephemeral      bool                   `json:"ephemeral"`
 }
 
 type CompletionResult struct {
@@ -176,13 +177,15 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	s.logCall(ctx, requestID, userID, model.ID, nil, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, actualCost, "success", nil, duration)
 
 	convID := input.ConversationID
-	if convID == "" {
-		conv, _ := s.CreateConversation(ctx, userID, input.ModelCode, truncate(input.Messages[len(input.Messages)-1].Content, 30))
-		if conv != nil {
-			convID = conv.PublicID
+	if !input.Ephemeral {
+		if convID == "" {
+			conv, _ := s.CreateConversation(ctx, userID, input.ModelCode, truncate(input.Messages[len(input.Messages)-1].Content, 30))
+			if conv != nil {
+				convID = conv.PublicID
+			}
 		}
+		s.saveMessages(ctx, convID, userID, input.Messages, content)
 	}
-	s.saveMessages(ctx, convID, userID, input.Messages, content)
 
 	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, Cost: actualCost}, nil
 }

@@ -6,6 +6,7 @@ export interface SchemaProp {
   placeholder?: string;
   enum?: (string | number)[];
   "x-enum-labels"?: string[];
+  enumLabels?: Record<string, string>;
   default?: unknown;
   minimum?: number;
   maximum?: number;
@@ -67,8 +68,8 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
   const stacked = layout === "stacked";
 
   const controlCls = stacked
-    ? "w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-700 text-sm focus:outline-none focus:border-primary"
-    : "px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-gray-700 text-xs focus:outline-none focus:border-primary";
+    ? "w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-gray-700 text-sm focus:outline-none focus:border-primary dark:border-white/10 dark:bg-gray-800 dark:text-gray-100"
+    : "px-2.5 py-1 rounded-lg border border-gray-200 bg-white text-gray-700 text-xs focus:outline-none focus:border-primary dark:border-white/10 dark:bg-gray-800 dark:text-gray-100";
 
   const renderControl = (key: string, prop: SchemaProp) => {
     const value = values[key] ?? prop.default ?? "";
@@ -77,7 +78,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
         <select value={String(value)} onChange={(e) => set(key, coerce(prop, e.target.value))} className={controlCls}>
           {prop.enum.map((opt, index) => (
             <option key={String(opt)} value={String(opt)}>
-              {prop["x-enum-labels"]?.[index] || String(opt)}
+              {prop["x-enum-labels"]?.[index] || prop.enumLabels?.[String(opt)] || String(opt)}
             </option>
           ))}
         </select>
@@ -132,7 +133,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       <div className="space-y-4">
         {entries.map(([key, prop]) => (
           <div key={key}>
-            <label className="block text-sm text-gray-600 mb-1">{prop.title || key}</label>
+            <label className="mb-1 block text-sm text-gray-600 dark:text-gray-300">{prop.title || key}</label>
             {renderControl(key, prop)}
           </div>
         ))}
@@ -143,7 +144,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
   return (
     <div className="flex flex-wrap items-center gap-2">
       {entries.map(([key, prop]) => (
-        <label key={key} className="flex items-center gap-1.5 text-xs text-gray-500">
+        <label key={key} className="flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-gray-300">
           <span className="shrink-0">{prop.title || key}</span>
           {renderControl(key, prop)}
         </label>
