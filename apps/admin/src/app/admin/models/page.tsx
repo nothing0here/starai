@@ -49,6 +49,7 @@ const PAGE_SIZE = 10;
 const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
 type SeedanceVariant = "standard" | "fast" | "mini";
 const MINIMAX_H3_TEMPLATE_KEY = "minimax_h3_v2";
+const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
 
 const buildMiniMaxH3PriceRule = () => ({
   billing_type: "dynamic",
@@ -581,6 +582,8 @@ export default function ModelsPage() {
       setVideoTemplateKey(getSeedanceVariantConfig(variant).templateKey);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "minimax_h3_v2") {
       setVideoTemplateKey(MINIMAX_H3_TEMPLATE_KEY);
+    } else if ((m.runtime_rule as any)?.upstream?.adapter === "veo_reference_v1") {
+      setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
     } else {
       setVideoTemplateKey("");
     }
@@ -816,6 +819,7 @@ export default function ModelsPage() {
     { value: "single_ref", label: "单参考图 (Sora 类)" },
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
     { value: "frame_pair", label: "首尾帧 + 参考图 (VEO 类)" },
+    { value: "veo_reference", label: "参考图 1~3 张 (VEO 类，文生 / 参考图)" },
     { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
     { value: "minimax_h3", label: "MiniMax-H3 V2 多模态组合" },
     { value: "none", label: "不上传图片" },
@@ -906,9 +910,9 @@ export default function ModelsPage() {
           prompt_required: true,
           show_channel: next.show_channel,
           show_web_search: next.show_web_search,
-          count_options: [1],
-          count_allow_custom: false,
-          count_max: 1,
+          count_options: next.count_options?.length ? next.count_options : [1, 3, 5, 10, 30, 50],
+          count_allow_custom: next.count_allow_custom,
+          count_max: Math.max(1, next.count_max || 50),
           frames: {
             first: { key: "first_frame", label: "首帧", max: 1 },
             last: { key: "last_frame", label: "尾帧", max: 1 },
@@ -1610,6 +1614,109 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_second", unit_price: 0.08 }, null, 2),
   });
 
+  const applyVeoReferenceV1 = (prev: FormState): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    new_api_model: String(prev.new_api_model || "").toLowerCase().includes("veo")
+      ? prev.new_api_model
+      : "veo_3_1-fast",
+    new_api_endpoint: "/v1/videos",
+    new_api_extra_params: setConnection(prev.new_api_extra_params, {
+      protocol: "openai_compatible",
+      auth_type: "bearer",
+      base_url: "https://zexapi.com",
+      api_key_header: "Authorization",
+    }),
+    input_schema: JSON.stringify(
+      {
+        type: "object",
+        properties: {
+          generation_mode: {
+            type: "string",
+            title: "生成模式",
+            enum: ["text", "reference"],
+            enumLabels: { text: "文生视频", reference: "参考图生视频" },
+            default: "text",
+            "x-order": 1,
+            "x-widget": "option_menu",
+            "x-icon": "sparkles",
+            "x-highlight": true,
+          },
+          duration: {
+            type: "integer",
+            title: "视频时长",
+            enum: [8],
+            enumLabels: { "8": "8s" },
+            default: 8,
+            "x-order": 2,
+            "x-widget": "option_menu",
+            "x-icon": "clock",
+          },
+          size: {
+            type: "string",
+            title: "视频尺寸",
+            enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+            enumLabels: {
+              "1280x720": "横屏 720P",
+              "720x1280": "竖屏 720P",
+              "1920x1080": "横屏 1080P",
+              "1080x1920": "竖屏 1080P",
+            },
+            default: "1280x720",
+            "x-order": 3,
+            "x-widget": "option_menu",
+            "x-icon": "ratio",
+          },
+        },
+      },
+      null,
+      2
+    ),
+    default_params: JSON.stringify(
+      {
+        generation_mode: "text",
+        duration: 8,
+        size: "1280x720",
+      },
+      null,
+      2
+    ),
+    runtime_rule: JSON.stringify(
+      {
+        video: {
+          upload_profile: "veo_reference",
+          min_reference_images: 0,
+          max_reference_images: 3,
+          max_total_images: 3,
+          count_toward_total: true,
+          prompt_required: true,
+          prompt_hint: "描述目标视频；参考图模式支持上传或从资产库引入 1～3 张图片",
+          show_channel: false,
+          show_web_search: false,
+          count_options: [1],
+          count_allow_custom: false,
+          count_max: 1,
+          mode_param: "generation_mode",
+          reference_images: { key: "reference_images", max: 3 },
+        },
+        upstream: {
+          adapter: "veo_reference_v1",
+          include: ["generation_mode", "size", "reference_images"],
+          map: {},
+          poll_path: "/v1/videos/{id}",
+          poll_interval_sec: 10,
+          poll_timeout_sec: 7200,
+          request_timeout_sec: 120,
+        },
+        capabilities: { web_search: false, deep_think: false },
+      },
+      null,
+      2
+    ),
+    price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
+  });
+
   const applyVolcengineSeedance2 = (prev: FormState, variant: SeedanceVariant): FormState => {
     const config = getSeedanceVariantConfig(variant);
     const generationModes = [
@@ -1973,6 +2080,7 @@ export default function ModelsPage() {
     const parsedRuntimeRule = runtimeRule as Record<string, any>;
     const parsedPriceRule = priceRule as Record<string, any>;
     const parsedInputSchema = inputSchema as Record<string, any>;
+    let effectiveVideoEndpoint = form.new_api_endpoint;
     const isSeedance2 =
       form.category === "video" &&
       (parsedRuntimeRule?.upstream?.adapter === "volcengine_seedance_2" ||
@@ -2052,7 +2160,96 @@ export default function ModelsPage() {
         return;
       }
     }
-    if (isSeedance2 || isMiniMaxH3) {
+    const isVeoReference =
+      form.category === "video" &&
+      (parsedRuntimeRule?.upstream?.adapter === "veo_reference_v1" ||
+        parsedRuntimeRule?.video?.upload_profile === "veo_reference");
+    if (isVeoReference) {
+      const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      const currentMode = (props.generation_mode ?? {}) as Record<string, any>;
+      const currentModeDefault = ["text", "reference"].includes(String(currentMode.default))
+        ? String(currentMode.default)
+        : "text";
+      props.generation_mode = {
+        ...currentMode,
+        type: "string",
+        title: "生成模式",
+        enum: ["text", "reference"],
+        enumLabels: { ...(currentMode.enumLabels || {}), text: "文生视频", reference: "参考图生视频" },
+        default: currentModeDefault,
+        "x-order": Number(currentMode["x-order"] ?? 1),
+        "x-widget": "option_menu",
+        "x-icon": "sparkles",
+        "x-highlight": true,
+      };
+      if (!props.size) {
+        props.size = {
+          type: "string",
+          title: "视频尺寸",
+          enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+          enumLabels: {
+            "1280x720": "横屏 720P",
+            "720x1280": "竖屏 720P",
+            "1920x1080": "横屏 1080P",
+            "1080x1920": "竖屏 1080P",
+          },
+          default: "1280x720",
+          "x-order": 3,
+          "x-widget": "option_menu",
+          "x-icon": "ratio",
+        };
+      }
+      props.duration = {
+        ...(props.duration || {}),
+        type: "integer",
+        title: "视频时长",
+        enum: [8],
+        enumLabels: { ...((props.duration || {}).enumLabels || {}), "8": "8s" },
+        default: 8,
+        "x-order": 2,
+        "x-widget": "option_menu",
+        "x-icon": "clock",
+      };
+      parsedInputSchema.properties = props;
+      inputSchema = parsedInputSchema;
+      defaultParams = {
+        ...((defaultParams as Record<string, unknown>) || {}),
+        generation_mode: currentModeDefault,
+        duration: 8,
+        size: String((defaultParams as Record<string, unknown>)?.size || props.size.default || "1280x720"),
+      };
+      const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
+      const currentUpstream = (parsedRuntimeRule.upstream ?? {}) as Record<string, any>;
+      const include = Array.from(
+        new Set([
+          ...(Array.isArray(currentUpstream.include) ? currentUpstream.include.map(String) : []),
+          "generation_mode",
+          "size",
+          "reference_images",
+        ])
+      );
+      parsedRuntimeRule.video = {
+        ...currentVideo,
+        upload_profile: "veo_reference",
+        min_reference_images: 0,
+        max_reference_images: 3,
+        max_total_images: 3,
+        mode_param: "generation_mode",
+        reference_images: { ...(currentVideo.reference_images || {}), key: "reference_images", max: 3 },
+      };
+      parsedRuntimeRule.upstream = {
+        ...currentUpstream,
+        adapter: "veo_reference_v1",
+        include,
+        poll_path: "/v1/videos/{id}",
+        poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
+        poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),
+        request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
+      };
+      runtimeRule = parsedRuntimeRule;
+      effectiveVideoEndpoint = "/v1/videos";
+    }
+    if (isSeedance2 || isMiniMaxH3 || isVeoReference) {
       const modeParam = String(parsedRuntimeRule?.video?.mode_param || "generation_mode");
       const modeSchema = parsedInputSchema?.properties?.[modeParam] as Record<string, any> | undefined;
       const schemaDefault = modeSchema?.default;
@@ -2088,7 +2285,7 @@ export default function ModelsPage() {
       display_name: form.display_name,
       icon_url: form.icon_url,
       new_api_model: isMultiCollabForm ? form.code || "multi_collab" : form.new_api_model,
-      new_api_endpoint: isMultiCollabForm ? "" : form.new_api_endpoint,
+      new_api_endpoint: isMultiCollabForm ? "" : effectiveVideoEndpoint,
       request_mode: isMultiCollabForm ? "chat_completions" : form.request_mode,
       category: form.category,
       description: form.description,
@@ -2120,7 +2317,12 @@ export default function ModelsPage() {
               },
             }
           : form.category === "video"
-            ? JSON.parse(setVideoRule(form.runtime_rule, getVideoRule(form.runtime_rule)))
+            ? JSON.parse(
+                setVideoRule(
+                  JSON.stringify(runtimeRule),
+                  getVideoRule(JSON.stringify(runtimeRule))
+                )
+              )
             : form.category === "audio"
               ? JSON.parse(setAudioRule(form.runtime_rule, getAudioRule(form.runtime_rule)))
               : runtimeRule,
@@ -3189,16 +3391,21 @@ export default function ModelsPage() {
                           setForm((prev) => applyVolcengineSeedance2(prev, variant));
                         } else if (value === MINIMAX_H3_TEMPLATE_KEY) {
                           setForm((prev) => applyMiniMaxH3V2(prev));
+                        } else if (value === VEO_REFERENCE_TEMPLATE_KEY) {
+                          setForm((prev) => applyVeoReferenceV1(prev));
                         }
                       }}
                     >
                       <option value="">通用视频接口 / 自定义配置</option>
+                      <option value={VEO_REFERENCE_TEMPLATE_KEY}>第三方 OpenAI 兼容 · 参考图（VEO 类）</option>
                       <option value={SEEDANCE_VARIANTS.standard.templateKey}>火山方舟 · Doubao Seedance 2.0 Standard</option>
                       <option value={SEEDANCE_VARIANTS.fast.templateKey}>火山方舟 · Doubao Seedance 2.0 Fast</option>
                       <option value={SEEDANCE_VARIANTS.mini.templateKey}>火山方舟 · Doubao Seedance 2.0 Mini</option>
                       <option value={MINIMAX_H3_TEMPLATE_KEY}>MiniMax 官方 · MiniMax-H3 V2</option>
                     </select>
-                    {(getSeedanceVariantByTemplateKey(videoTemplateKey) || videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY) && (
+                    {(getSeedanceVariantByTemplateKey(videoTemplateKey) ||
+                      videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
+                      videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY) && (
                       <button
                         type="button"
                         className="shrink-0 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-xs font-medium text-cyan-700 hover:bg-cyan-50"
@@ -3208,6 +3415,8 @@ export default function ModelsPage() {
                             setForm((prev) => applyVolcengineSeedance2(prev, variant));
                           } else if (videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY) {
                             setForm((prev) => applyMiniMaxH3V2(prev));
+                          } else if (videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY) {
+                            setForm((prev) => applyVeoReferenceV1(prev));
                           }
                         }}
                       >
@@ -3216,7 +3425,7 @@ export default function ModelsPage() {
                     )}
                   </div>
                   <div className="mt-2 text-[11px] leading-5 text-gray-500">
-                    Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
+                    VEO 参考图模板固定显示 8 秒，支持文生和 1～3 张参考图，JSON 请求自动映射到 images；时长由上游固定，不额外发送 duration。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
                   </div>
                 </div>
                 {isSeedanceVideoForm && (
@@ -3339,12 +3548,18 @@ export default function ModelsPage() {
                     <select
                       className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
                       value={getVideoRule(form.runtime_rule).upload_profile}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const profile = e.target.value;
+                        if (profile === "veo_reference") {
+                          setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
+                          setForm((prev) => applyVeoReferenceV1(prev));
+                          return;
+                        }
                         setForm((prev) => ({
                           ...prev,
-                          runtime_rule: setVideoRule(prev.runtime_rule, { upload_profile: e.target.value }),
-                        }))
-                      }
+                          runtime_rule: setVideoRule(prev.runtime_rule, { upload_profile: profile }),
+                        }));
+                      }}
                     >
                       {VIDEO_PROFILES.map((p) => (
                         <option key={p.value} value={p.value}>
@@ -3470,9 +3685,10 @@ export default function ModelsPage() {
                   <div>
                     <label className="text-xs text-gray-500">生成数量选项（逗号分隔，如 1,3,5,10,30,50）</label>
                     <input
+                      key={`video-count-options-${getVideoRule(form.runtime_rule).count_options.join(",")}`}
                       className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                      value={getVideoRule(form.runtime_rule).count_options.join(",")}
-                      onChange={(e) => {
+                      defaultValue={getVideoRule(form.runtime_rule).count_options.join(",")}
+                      onBlur={(e) => {
                         const opts = e.target.value
                           .split(/[,，\s]+/)
                           .map((s) => parseInt(s.trim(), 10))
@@ -3490,17 +3706,21 @@ export default function ModelsPage() {
                           ),
                         }));
                       }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
                     />
                   </div>
                   <div>
                     <label className="text-xs text-gray-500">自定义数量上限</label>
                     <input
+                      key={`video-count-max-${getVideoRule(form.runtime_rule).count_max}`}
                       type="number"
                       min={1}
                       max={200}
                       className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                      value={getVideoRule(form.runtime_rule).count_max}
-                      onChange={(e) => {
+                      defaultValue={getVideoRule(form.runtime_rule).count_max}
+                      onBlur={(e) => {
                         const max = Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 50));
                         const rule = getVideoRule(form.runtime_rule);
                         setForm((prev) => ({
@@ -3513,6 +3733,9 @@ export default function ModelsPage() {
                             max
                           ),
                         }));
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
                       }}
                     />
                   </div>

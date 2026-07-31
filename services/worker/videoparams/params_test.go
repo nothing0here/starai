@@ -63,6 +63,62 @@ func TestSanitizeUpstreamPayloadUsesImagesForVeo(t *testing.T) {
 	}
 }
 
+func TestBuildVeoReferencePayloadSupportsTextAndReferenceModes(t *testing.T) {
+	runtimeRule := map[string]interface{}{
+		"upstream": map[string]interface{}{
+			"adapter": "veo_reference_v1",
+			"include": []interface{}{"generation_mode", "size", "reference_images"},
+		},
+	}
+	references := []interface{}{
+		"https://example.com/1.jpg",
+		"https://example.com/2.jpg",
+		"https://example.com/3.jpg",
+		"https://example.com/ignored.jpg",
+	}
+
+	referencePayload := BuildUpstreamVideoPayload(
+		"veo-reference",
+		"veo_3_1-fast",
+		runtimeRule,
+		nil,
+		map[string]interface{}{
+			"prompt":           "product video",
+			"generation_mode":  "reference",
+			"size":             "1280x720",
+			"reference_images": references,
+		},
+	)
+	referencePayload = SanitizeUpstreamPayload(referencePayload, "/v1/videos")
+	images, ok := referencePayload["images"].([]string)
+	if !ok || len(images) != 3 {
+		t.Fatalf("reference images = %#v, want exactly 3", referencePayload["images"])
+	}
+	if _, exists := referencePayload["generation_mode"]; exists {
+		t.Fatalf("generation_mode must not be sent upstream: %#v", referencePayload)
+	}
+	if referencePayload["size"] != "1280x720" {
+		t.Fatalf("size = %#v", referencePayload["size"])
+	}
+
+	textPayload := BuildUpstreamVideoPayload(
+		"veo-reference",
+		"veo_3_1-fast",
+		runtimeRule,
+		nil,
+		map[string]interface{}{
+			"prompt":           "text only",
+			"generation_mode":  "text",
+			"size":             "720x1280",
+			"reference_images": references,
+		},
+	)
+	textPayload = SanitizeUpstreamPayload(textPayload, "/v1/videos")
+	if _, exists := textPayload["images"]; exists {
+		t.Fatalf("text mode must not send stale images: %#v", textPayload)
+	}
+}
+
 func TestSanitizeUpstreamPayloadUsesImageURLForSora(t *testing.T) {
 	payload := map[string]interface{}{
 		"model":            "sora-2-12s",

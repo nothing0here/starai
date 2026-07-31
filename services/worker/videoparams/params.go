@@ -73,6 +73,9 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "minimax_h3_v2") {
 		out = buildMiniMaxH3Payload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "veo_reference_v1") {
+		out = buildVeoReferencePayload(out, params)
+	}
 	return SanitizeUpstreamPayload(out, "")
 }
 
@@ -494,6 +497,33 @@ func buildMiniMaxH3Payload(out, params map[string]interface{}) map[string]interf
 	}
 	out["content"] = content
 	out["_preserve_video_params"] = true
+	return out
+}
+
+func buildVeoReferencePayload(out, params map[string]interface{}) map[string]interface{} {
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
+	delete(out, "generation_mode")
+	delete(out, "first_frame")
+	delete(out, "last_frame")
+	delete(out, "image")
+	delete(out, "image_url")
+
+	if mode == "reference" {
+		images := mediaURLList(params["reference_images"])
+		if len(images) > 3 {
+			images = images[:3]
+		}
+		if len(images) > 0 {
+			out["images"] = images
+		} else {
+			delete(out, "images")
+		}
+	} else {
+		// 文生模式不能携带用户先前在参考图模式上传后残留的图片。
+		delete(out, "images")
+		delete(out, "reference_images")
+	}
+	delete(out, "reference_images")
 	return out
 }
 

@@ -316,6 +316,22 @@ export function VideoUploadArea({
     onChange({ ...media, reference_images: media.reference_images.filter((_, idx) => idx !== index) });
   };
 
+  if (profile === "veo_reference") {
+    const activeMode = mode || "text";
+    if (activeMode === "text") return null;
+    const max = Math.min(3, config.reference_images?.max ?? config.max_reference_images ?? 3);
+    return (
+      <ReferenceImageStack
+        images={media.reference_images}
+        max={max}
+        uploading={uploading}
+        onUpload={(files) => uploadMany(files, max)}
+        onRemove={removeRef}
+        compact
+      />
+    );
+  }
+
   if (profile === "minimax_h3") {
     const activeMode = mode || "text";
     if (activeMode === "text") return null;

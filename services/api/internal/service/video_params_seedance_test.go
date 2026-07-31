@@ -106,3 +106,64 @@ func TestValidateVideoParamsPreservesProviderDurationEnumType(t *testing.T) {
 		t.Fatalf("Seedance duration=%#v, want numeric 8", got)
 	}
 }
+
+func TestValidateVeoReferenceModes(t *testing.T) {
+	cfg := videoRuntimeConfig{
+		UploadProfile:      "veo_reference",
+		MaxReferenceImages: 3,
+		ReferenceImagesKey: "reference_images",
+		ModeParam:          "generation_mode",
+	}
+	tests := []struct {
+		name    string
+		params  map[string]interface{}
+		wantErr string
+	}{
+		{
+			name:   "text",
+			params: map[string]interface{}{"generation_mode": "text", "prompt": "海边日落"},
+		},
+		{
+			name: "reference",
+			params: map[string]interface{}{
+				"generation_mode":  "reference",
+				"prompt":           "让画面产生自然运动",
+				"reference_images": []interface{}{"https://example.com/a.jpg"},
+			},
+		},
+		{
+			name:    "reference requires image",
+			params:  map[string]interface{}{"generation_mode": "reference", "prompt": "animate"},
+			wantErr: "至少需要 1 张",
+		},
+		{
+			name: "reference max three",
+			params: map[string]interface{}{
+				"generation_mode": "reference",
+				"reference_images": []interface{}{
+					"https://example.com/1.jpg",
+					"https://example.com/2.jpg",
+					"https://example.com/3.jpg",
+					"https://example.com/4.jpg",
+				},
+			},
+			wantErr: "最多支持 3 张",
+		},
+		{
+			name:    "unsupported mode",
+			params:  map[string]interface{}{"generation_mode": "first_last", "prompt": "animate"},
+			wantErr: "仅支持文生或参考图",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateVideoUpload(cfg, tt.params)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}

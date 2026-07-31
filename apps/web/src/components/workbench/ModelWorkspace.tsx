@@ -855,7 +855,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const audioConfig = parseAudioRuntime(model.runtime_rule);
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
-  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3;
+  const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
+  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference;
   const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
@@ -1560,6 +1561,14 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         alert(t("canvas.node.referenceVisualRequired"));
         return;
       }
+    }
+    if (
+      isVeoReference &&
+      videoMaterialMode === "reference" &&
+      videoMedia.reference_images.length === 0
+    ) {
+      alert(t("canvas.node.referenceVisualRequired"));
+      return;
     }
     setTaskStatus("pending");
     setTaskError("");
