@@ -48,6 +48,7 @@ const FIELD_TITLE_KEY: Record<string, string> = {
   ratio: "video.ratio",
   resolution: "video.resolution",
   watermark: "video.watermark",
+  aigc_watermark: "video.watermark",
   return_last_frame: "video.returnLastFrame",
   priority: "video.priority",
 };
@@ -61,6 +62,7 @@ const FIELD_DESC_KEY: Record<string, string> = {
   ratio: "video.ratioDesc",
   resolution: "video.resolutionDesc",
   watermark: "video.watermarkDesc",
+  aigc_watermark: "video.watermarkDesc",
   return_last_frame: "video.returnLastFrameDesc",
   priority: "video.priorityDesc",
 };

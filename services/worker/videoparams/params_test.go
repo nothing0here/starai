@@ -1,6 +1,7 @@
 package videoparams
 
 import (
+	"encoding/json"
 	"strconv"
 	"testing"
 )
@@ -308,5 +309,118 @@ func TestBuildSeedancePayloadDropsRelativeAndDuplicateMediaReferences(t *testing
 	imageURL, _ := image["image_url"].(map[string]interface{})
 	if imageURL["url"] != "https://cdn.example/keyframe.png" {
 		t.Fatalf("unexpected Seedance image reference: %#v", image)
+	}
+}
+
+func TestBuildUpstreamPayloadSupportsMiniMaxH3ReferenceMode(t *testing.T) {
+	got := BuildUpstreamVideoPayload(
+		"minimax-h3",
+		"MiniMax-H3",
+		map[string]interface{}{
+			"upstream": map[string]interface{}{
+				"adapter": "minimax_h3_v2",
+				"include": []interface{}{"generation_mode", "duration", "resolution", "ratio", "aigc_watermark", "reference_images", "reference_videos", "reference_audios"},
+			},
+		},
+		nil,
+		map[string]interface{}{
+			"prompt":           "保持人物一致并参考视频运镜",
+			"generation_mode":  "reference",
+			"duration":         "8s",
+			"resolution":       "2K",
+			"ratio":            "adaptive",
+			"aigc_watermark":   false,
+			"reference_images": []interface{}{"https://example.com/ref.png"},
+			"reference_videos": []interface{}{"https://example.com/ref.mp4"},
+			"reference_audios": []interface{}{"https://example.com/ref.mp3"},
+		},
+	)
+	if got["model"] != "MiniMax-H3" || got["duration"] != float64(8) || got["resolution"] != "2K" {
+		t.Fatalf("unexpected MiniMax-H3 payload: %#v", got)
+	}
+	content, ok := got["content"].([]interface{})
+	if !ok || len(content) != 4 {
+		t.Fatalf("content = %#v, want text + image + video + audio", got["content"])
+	}
+	for index, role := range []string{"reference_image", "reference_video", "reference_audio"} {
+		item, _ := content[index+1].(map[string]interface{})
+		if item["role"] != role {
+			t.Fatalf("content[%d] role = %#v, want %s", index+1, item["role"], role)
+		}
+	}
+	for _, key := range []string{"prompt", "generation_mode", "reference_images", "reference_videos", "reference_audios"} {
+		if _, exists := got[key]; exists {
+			t.Fatalf("%s must not be sent upstream: %#v", key, got)
+		}
+	}
+}
+
+func TestBuildUpstreamPayloadSupportsMiniMaxH3FirstLastFrames(t *testing.T) {
+	got := BuildUpstreamVideoPayload(
+		"minimax-h3",
+		"MiniMax-H3",
+		map[string]interface{}{"upstream": map[string]interface{}{
+			"adapter": "minimax_h3_v2",
+			"include": []interface{}{"generation_mode", "duration", "resolution", "ratio", "first_frame", "last_frame"},
+		}},
+		nil,
+		map[string]interface{}{
+			"prompt":          "从白天过渡到夜晚",
+			"generation_mode": "first_last",
+			"duration":        float64(5),
+			"resolution":      "2K",
+			"ratio":           "16:9",
+			"first_frame":     "https://example.com/first.png",
+			"last_frame":      "https://example.com/last.png",
+		},
+	)
+	if got["ratio"] != "adaptive" {
+		t.Fatalf("ratio = %#v, want adaptive for frame mode", got["ratio"])
+	}
+	content, ok := got["content"].([]interface{})
+	if !ok || len(content) != 3 {
+		t.Fatalf("content = %#v, want text + first + last", got["content"])
+	}
+	first, _ := content[1].(map[string]interface{})
+	last, _ := content[2].(map[string]interface{})
+	if first["role"] != "first_frame" || last["role"] != "last_frame" {
+		t.Fatalf("unexpected frame roles: %#v", content)
+	}
+}
+
+func TestMiniMaxH3DurationSurvivesWorkerJSONRoundTrip(t *testing.T) {
+	payload := BuildUpstreamVideoPayload(
+		"minimax-h3",
+		"MiniMax-H3",
+		map[string]interface{}{"upstream": map[string]interface{}{
+			"adapter": "minimax_h3_v2",
+			"include": []interface{}{"generation_mode", "duration", "resolution", "ratio"},
+		}},
+		nil,
+		map[string]interface{}{
+			"prompt":          "a cinematic ocean sunrise",
+			"generation_mode": "text",
+			"duration":        float64(8),
+			"resolution":      "2K",
+			"ratio":           "16:9",
+		},
+	)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finalPayload map[string]interface{}
+	if err := json.Unmarshal(body, &finalPayload); err != nil {
+		t.Fatal(err)
+	}
+	finalPayload = SanitizeUpstreamPayload(finalPayload, "/v2/video_generation")
+	// The sanitizer is intentionally idempotent for native-duration endpoints,
+	// so a future refactor cannot silently remove duration on a second pass.
+	finalPayload = SanitizeUpstreamPayload(finalPayload, "/v2/video_generation")
+	if got := finalPayload["duration"]; got != float64(8) {
+		t.Fatalf("duration = %#v, want 8 after worker JSON round trip; payload=%#v", got, finalPayload)
+	}
+	if _, exists := finalPayload["_preserve_video_params"]; exists {
+		t.Fatalf("internal preservation marker leaked upstream: %#v", finalPayload)
 	}
 }

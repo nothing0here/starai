@@ -70,6 +70,9 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "volcengine_seedance_2") {
 		out = buildVolcengineSeedancePayload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "minimax_h3_v2") {
+		out = buildMiniMaxH3Payload(out, params)
+	}
 	return SanitizeUpstreamPayload(out, "")
 }
 
@@ -78,6 +81,11 @@ func BuildUpstreamVideoPayload(
 func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[string]interface{} {
 	delete(out, "connection")
 	preserveVideoParams, _ := out["_preserve_video_params"].(bool)
+	normalizedEndpoint := strings.ToLower(strings.TrimSpace(endpoint))
+	if strings.Contains(normalizedEndpoint, "/v2/video_generation") ||
+		strings.Contains(normalizedEndpoint, "/contents/generations/tasks") {
+		preserveVideoParams = true
+	}
 	if endpoint != "" {
 		delete(out, "_preserve_video_params")
 	}
@@ -421,6 +429,80 @@ func isValidSeedanceMediaReference(value string) bool {
 		strings.HasPrefix(value, "https://") ||
 		strings.HasPrefix(value, "data:") ||
 		strings.HasPrefix(value, "asset://")
+}
+
+func buildMiniMaxH3Payload(out, params map[string]interface{}) map[string]interface{} {
+	prompt := strings.TrimSpace(fmt.Sprint(params["prompt"]))
+	if prompt == "<nil>" {
+		prompt = ""
+	}
+	content := []interface{}{
+		map[string]interface{}{"type": "text", "text": prompt},
+	}
+	seen := map[string]bool{}
+	addMedia := func(kind, role string, raw interface{}, max int) {
+		count := 0
+		for _, mediaURL := range mediaURLList(raw) {
+			if count >= max || !isValidMiniMaxH3MediaReference(mediaURL) || seen[mediaURL] {
+				continue
+			}
+			seen[mediaURL] = true
+			item := map[string]interface{}{
+				"type":        kind + "_url",
+				kind + "_url": map[string]interface{}{"url": mediaURL},
+				"role":        role,
+			}
+			content = append(content, item)
+			count++
+		}
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
+	switch mode {
+	case "first_frame":
+		addMedia("image", "first_frame", params["first_frame"], 1)
+		out["ratio"] = "adaptive"
+	case "last_frame":
+		addMedia("image", "last_frame", params["last_frame"], 1)
+		out["ratio"] = "adaptive"
+	case "first_last":
+		addMedia("image", "first_frame", params["first_frame"], 1)
+		addMedia("image", "last_frame", params["last_frame"], 1)
+		out["ratio"] = "adaptive"
+	case "reference":
+		addMedia("image", "reference_image", params["reference_images"], 9)
+		addMedia("video", "reference_video", params["reference_videos"], 3)
+		addMedia("audio", "reference_audio", params["reference_audios"], 3)
+	default:
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(out["ratio"])), "adaptive") || strings.TrimSpace(fmt.Sprint(out["ratio"])) == "" {
+			out["ratio"] = "16:9"
+		}
+	}
+
+	if strings.TrimSpace(fmt.Sprint(out["resolution"])) == "" || fmt.Sprint(out["resolution"]) == "<nil>" {
+		out["resolution"] = "2K"
+	}
+	if _, ok := out["duration"]; !ok {
+		out["duration"] = float64(5)
+	}
+	for _, key := range []string{
+		"prompt", "generation_mode", "first_frame", "last_frame",
+		"reference_images", "reference_videos", "reference_audios",
+		"reference_video_duration_seconds",
+	} {
+		delete(out, key)
+	}
+	out["content"] = content
+	out["_preserve_video_params"] = true
+	return out
+}
+
+func isValidMiniMaxH3MediaReference(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "http://") ||
+		strings.HasPrefix(value, "https://") ||
+		strings.HasPrefix(value, "data:") ||
+		strings.HasPrefix(value, "mm_file://")
 }
 
 func normalizeVideoDuration(raw interface{}) interface{} {

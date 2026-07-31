@@ -334,9 +334,62 @@ func estimateDynamicCost(rule map[string]interface{}, params map[string]interfac
 	switch strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"]))) {
 	case "seedance_2_tokens":
 		return estimateSeedance2TokenCost(rule, params)
+	case "minimax_h3_seconds":
+		return estimateMiniMaxH3Cost(rule, params)
 	default:
 		return floatValue(rule["fallback_cost"])
 	}
+}
+
+func estimateMiniMaxH3Cost(rule map[string]interface{}, params map[string]interface{}) float64 {
+	resolution := strings.ToLower(strings.TrimSpace(stringValue(params["resolution"])))
+	if resolution == "" {
+		resolution = strings.ToLower(strings.TrimSpace(stringValue(rule["default_resolution"])))
+	}
+	if resolution == "" {
+		resolution = "2k"
+	}
+	rate := mapFloatValue(rule["rates_per_second"], resolution)
+	if rate <= 0 {
+		rate = map[string]float64{"2k": 0.8, "768p": 0.5}[resolution]
+	}
+	if rate <= 0 {
+		return floatValue(rule["fallback_cost"])
+	}
+
+	outputSeconds := parseDurationSeconds(params)
+	videoCount := urlFieldCount(params["reference_videos"])
+	inputSeconds := floatValue(params["reference_video_duration_seconds"])
+	if videoCount > 0 && inputSeconds <= 0 {
+		inputSeconds = float64(videoCount) * floatValue(rule["default_input_video_seconds"])
+		if inputSeconds <= 0 {
+			inputSeconds = float64(videoCount) * 4
+		}
+	}
+	imageCount := urlFieldCount(params["reference_images"])
+	imageCount += urlFieldCount(params["first_frame"])
+	imageCount += urlFieldCount(params["last_frame"])
+	freeImages := int(floatValue(rule["free_reference_images"]))
+	if freeImages < 0 {
+		freeImages = 0
+	}
+	excessImages := imageCount - freeImages
+	if excessImages < 0 {
+		excessImages = 0
+	}
+	imagePrice := floatValue(rule["excess_image_price"])
+	if imagePrice <= 0 {
+		imagePrice = 0.2
+	}
+	pointsPerCNY := floatValue(rule["points_per_cny"])
+	if pointsPerCNY <= 0 {
+		pointsPerCNY = 1
+	}
+	multiplier := floatValue(rule["platform_multiplier"])
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	return ((outputSeconds+inputSeconds)*rate + float64(excessImages)*imagePrice) * pointsPerCNY * multiplier
 }
 
 func estimateSeedance2TokenCost(rule map[string]interface{}, params map[string]interface{}) float64 {

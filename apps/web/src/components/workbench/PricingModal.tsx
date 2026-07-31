@@ -99,6 +99,10 @@ export function PricingModal({
   const currency = typeof price?.currency === "string" && price.currency ? price.currency : "";
   const surchargePerM = num(price?.surcharge_per_m);
   const isSeedanceDynamic = billingType === "dynamic" && price?.strategy === "seedance_2_tokens";
+  const isMiniMaxH3Dynamic = billingType === "dynamic" && price?.strategy === "minimax_h3_seconds";
+  const minimaxH3Rate = num(price?.rates_per_second?.["2k"]);
+  const minimaxH3FreeImages = num(price?.free_reference_images);
+  const minimaxH3ExcessImagePrice = num(price?.excess_image_price);
   const seedanceRates = ["480p", "720p", "1080p", "4k"].map((resolution) => ({
     resolution,
     withoutVideo: num(price?.rates_per_m_tokens?.[resolution]?.without_video),
@@ -120,6 +124,8 @@ export function PricingModal({
           ? "按张计费"
           : billingType === "per_second"
             ? "按秒计费"
+            : isMiniMaxH3Dynamic
+              ? "按输出与参考素材动态计费"
             : isSeedanceDynamic
               ? "按 Seedance 输出 Token 动态计费"
             : billingType || "未知";
@@ -129,6 +135,8 @@ export function PricingModal({
       ? "按 Token 计费，页面统一换算为每 1M Tokens 展示。"
       : billingType === "per_second"
         ? "按秒计费，通常会受到视频时长与生成数量共同影响。"
+        : isMiniMaxH3Dynamic
+          ? "按输出视频时长、参考视频时长和超额参考图片动态计费。"
         : isSeedanceDynamic
           ? "按输出 Token 动态计费，分辨率、输出时长和是否包含参考视频都会影响费用。"
         : billingType === "per_request"
@@ -277,7 +285,9 @@ export function PricingModal({
                     <div className="text-xs text-gray-400">计费方式</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{billingLabel}</div>
                     <div className="mt-2 text-xs text-gray-400">
-                      {isSeedanceDynamic
+                      {isMiniMaxH3Dynamic
+                        ? "费用按输出视频时长、参考视频时长及超出免费额度的参考图片数动态计算。"
+                        : isSeedanceDynamic
                         ? "预估费用会根据输出时长、分辨率、参考视频时长和官方 Token 单价动态计算。"
                         : billingType === "per_second"
                         ? "费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。"
@@ -289,7 +299,9 @@ export function PricingModal({
                   <div className="soft-card p-4">
                     <div className="text-xs text-gray-400">展示口径</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
-                      {isSeedanceDynamic
+                      {isMiniMaxH3Dynamic
+                        ? "动态估算"
+                        : isSeedanceDynamic
                         ? "动态估算"
                         : billingType === "per_token"
                         ? "每 1M Tokens"
@@ -311,7 +323,31 @@ export function PricingModal({
 
                 <div className="soft-card p-5">
                   <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">价格</div>
-                  {isSeedanceDynamic ? (
+                  {isMiniMaxH3Dynamic ? (
+                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                      <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                        <div className="text-xs text-gray-400">2K 输出与参考视频</div>
+                        <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
+                          {minimaxH3Rate === null ? "--" : `${minimaxH3Rate.toFixed(2)} 元`}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-400">/ 秒</div>
+                      </div>
+                      <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                        <div className="text-xs text-gray-400">免费参考图片</div>
+                        <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
+                          {minimaxH3FreeImages === null ? "--" : `${minimaxH3FreeImages} 张`}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-400">每次任务</div>
+                      </div>
+                      <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">
+                        <div className="text-xs text-gray-400">超额参考图片</div>
+                        <div className="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100">
+                          {minimaxH3ExcessImagePrice === null ? "--" : `${minimaxH3ExcessImagePrice.toFixed(2)} 元`}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-400">/ 张</div>
+                      </div>
+                    </div>
+                  ) : isSeedanceDynamic ? (
                     <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
                       {seedanceRates.map((row) => (
                         <div key={row.resolution} className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">

@@ -754,9 +754,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const [taskProgress, setTaskProgress] = useState(0);
   const [params, setParams] = useState<Record<string, unknown>>(() => ({
     ...(model.category === "video" || model.category === "audio"
-      ? schemaDefaultsFromFields(model.input_schema)
-      : schemaDefaults(model.input_schema)),
-    ...(model.default_params || {}),
+      ? { ...(model.default_params || {}), ...schemaDefaultsFromFields(model.input_schema) }
+      : { ...schemaDefaults(model.input_schema), ...(model.default_params || {}) }),
   }));
   const [refImages, setRefImages] = useState<RefImage[]>([]);
   const [videoMedia, setVideoMedia] = useState<VideoMediaState>(EMPTY_VIDEO_MEDIA);
@@ -855,7 +854,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const videoConfig = parseVideoRuntime(model.runtime_rule);
   const audioConfig = parseAudioRuntime(model.runtime_rule);
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
-  const seedanceMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
+  const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
+  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3;
+  const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
       ? videoConfig.reference_images?.max ?? 4
@@ -891,8 +892,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     const secondaryKey = parseAudioRuntime(model.runtime_rule).secondary_prompt_key || "style_prompt";
     const defaults = model.default_params || {};
     setParams({
-      ...(isVideo || isAudio ? schemaDefaultsFromFields(workbenchInputSchema) : schemaDefaults(workbenchInputSchema)),
-      ...defaults,
+      ...(isVideo || isAudio
+        ? { ...defaults, ...schemaDefaultsFromFields(workbenchInputSchema) }
+        : { ...schemaDefaults(workbenchInputSchema), ...defaults }),
       ...(isAudio ? { count: undefined, n: undefined } : {}),
     });
     setRefImages([]);
@@ -1537,6 +1539,28 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       return;
     }
     if (!isVideo && !isAudio && !prompt.trim()) return;
+    if (isMiniMaxH3) {
+      if (videoMaterialMode === "first_frame" && !videoMedia.first_frame?.url) {
+        alert(t("canvas.node.firstFrameRequired"));
+        return;
+      }
+      if (videoMaterialMode === "last_frame" && !videoMedia.last_frame?.url) {
+        alert(t("canvas.node.lastFrameRequired"));
+        return;
+      }
+      if (videoMaterialMode === "first_last" && (!videoMedia.first_frame?.url || !videoMedia.last_frame?.url)) {
+        alert(t("canvas.node.firstLastFramesRequired"));
+        return;
+      }
+      if (
+        videoMaterialMode === "reference" &&
+        videoMedia.reference_images.length === 0 &&
+        videoMedia.reference_videos.length === 0
+      ) {
+        alert(t("canvas.node.referenceVisualRequired"));
+        return;
+      }
+    }
     setTaskStatus("pending");
     setTaskError("");
     setTaskOutput(null);
@@ -2230,12 +2254,12 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                         costHint={estimatedCost != null ? `Est. ${estimatedCost.toFixed(2)}/run` : null}
                       />
                     </div>
-                    {!isSeedance2 && (
+                    {!isEnhancedVideoMaterial && (
                       <VideoUploadArea
                         config={videoConfig}
                         media={videoMedia}
                         onChange={setVideoMedia}
-                        mode={seedanceMode}
+                        mode={videoMaterialMode}
                       />
                     )}
                   </div>
@@ -2310,25 +2334,25 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 )}
               </div>
             )}
-            {isSeedance2 && seedanceMode === "draft_task" ? (
+            {isSeedance2 && videoMaterialMode === "draft_task" ? (
               <div className="px-3 py-3 sm:px-4">
                 <VideoUploadArea
                   config={videoConfig}
                   media={videoMedia}
                   onChange={setVideoMedia}
-                  mode={seedanceMode}
+                  mode={videoMaterialMode}
                   draftTaskId={String(params.draft_task_id || "")}
                   onDraftTaskIdChange={(value) => setParams({ ...params, draft_task_id: value })}
                 />
               </div>
-            ) : isSeedance2 && seedanceMode !== "text" ? (
+            ) : isEnhancedVideoMaterial && videoMaterialMode !== "text" ? (
               <div className="flex flex-col md:flex-row md:items-stretch">
                 <div className="w-full min-w-0 px-3 py-3 sm:px-4 md:w-auto md:max-w-[62%] md:flex-none md:pr-1">
                   <VideoUploadArea
                     config={videoConfig}
                     media={videoMedia}
                     onChange={setVideoMedia}
-                    mode={seedanceMode}
+                    mode={videoMaterialMode}
                     portraitAssetId={String(params.portrait_asset_id || "")}
                     portraitAssetType={params.portrait_asset_type === "video" ? "video" : "image"}
                     onPortraitAssetIdChange={(value) => setParams({ ...params, portrait_asset_id: value })}

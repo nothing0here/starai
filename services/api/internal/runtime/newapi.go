@@ -56,10 +56,10 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	Temperature float64       `json:"temperature,omitempty"`
+	Model       string      `json:"model"`
+	Messages    interface{} `json:"messages"`
+	Stream      bool        `json:"stream"`
+	Temperature float64     `json:"temperature,omitempty"`
 }
 
 type ChatUsage struct {

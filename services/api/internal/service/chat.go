@@ -157,7 +157,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	}
 	req := runtime.ChatRequest{
 		Model:       model.NewAPIModel,
-		Messages:    input.Messages,
+		Messages:    chatRequestMessages(input.Messages, input.Params),
 		Temperature: temp,
 	}
 	start := time.Now()
@@ -207,7 +207,7 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 	if v, ok := input.Params["temperature"].(float64); ok {
 		temp = v
 	}
-	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: input.Messages, Temperature: temp}
+	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: chatRequestMessages(input.Messages, input.Params), Temperature: temp}
 	// per-request timeout override (seconds)
 	if v, ok := input.Params["timeout_sec"].(float64); ok && v > 0 && v <= 600 {
 		var cancel context.CancelFunc
@@ -220,6 +220,61 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 		return "", nil, err
 	}
 	return requestID, ch, nil
+}
+
+func chatRequestMessages(messages []runtime.ChatMessage, params map[string]interface{}) interface{} {
+	images := stringSliceParam(params["reference_images"])
+	videos := stringSliceParam(params["reference_videos"])
+	if len(images) == 0 && len(videos) == 0 {
+		return messages
+	}
+	out := make([]map[string]interface{}, 0, len(messages))
+	lastUser := -1
+	for index, message := range messages {
+		if message.Role == "user" {
+			lastUser = index
+		}
+	}
+	for index, message := range messages {
+		if index != lastUser {
+			out = append(out, map[string]interface{}{"role": message.Role, "content": message.Content})
+			continue
+		}
+		content := []map[string]interface{}{
+			{"type": "text", "text": message.Content},
+		}
+		for _, url := range images {
+			content = append(content, map[string]interface{}{
+				"type":      "image_url",
+				"image_url": map[string]interface{}{"url": url},
+			})
+		}
+		for _, url := range videos {
+			content = append(content, map[string]interface{}{
+				"type":      "video_url",
+				"video_url": map[string]interface{}{"url": url},
+			})
+		}
+		out = append(out, map[string]interface{}{"role": message.Role, "content": content})
+	}
+	return out
+}
+
+func stringSliceParam(value interface{}) []string {
+	raw, ok := value.([]interface{})
+	if !ok {
+		if typed, typedOK := value.([]string); typedOK {
+			return typed
+		}
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if text, textOK := item.(string); textOK && strings.TrimSpace(text) != "" {
+			out = append(out, strings.TrimSpace(text))
+		}
+	}
+	return out
 }
 
 func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent string, usage *runtime.ChatUsage, estimated float64) (string, error) {

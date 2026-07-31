@@ -219,7 +219,6 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 			endpoint = "/v1/video/generations"
 		}
 		payload := videoparams.BuildUpstreamVideoPayload(p.ModelCode, newAPIModel, runtimeRule, extraParams, p.Input)
-		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 		body, _ = json.Marshal(payload)
 	} else if isAudio {
 		if endpoint == "" {
@@ -1510,12 +1509,16 @@ func detectRawAudioContentType(body []byte) string {
 }
 
 func unwrapUpstreamBody(raw map[string]interface{}) map[string]interface{} {
-	if data, ok := raw["data"].(map[string]interface{}); ok {
-		merged := make(map[string]interface{}, len(raw)+len(data))
+	for _, rootKey := range []string{"data", "task"} {
+		nested, ok := raw[rootKey].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		merged := make(map[string]interface{}, len(raw)+len(nested))
 		for k, v := range raw {
 			merged[k] = v
 		}
-		for k, v := range data {
+		for k, v := range nested {
 			if _, exists := merged[k]; !exists {
 				merged[k] = v
 			}
@@ -1722,8 +1725,11 @@ func upstreamContentFailure(raw map[string]interface{}) string {
 func humanizeUpstreamFailure(msg string) string {
 	msg = strings.TrimSpace(msg)
 	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "unsafe") {
-		return "生成内容未通过安全审核，请修改提示词或参考图后重试"
+	if strings.Contains(lower, "unsafe") ||
+		strings.Contains(lower, "blocked by moderation") ||
+		strings.Contains(lower, "content moderation") ||
+		strings.Contains(lower, "content policy") {
+		return "生成内容未通过上游安全审核，请修改提示词或参考素材后重试（避免武器、暴力、敏感人物、侵权或受限内容）"
 	}
 	if strings.Contains(lower, "insufficient balance") || strings.Contains(lower, "insufficient_balance") {
 		return "上游模型账户余额不足，请检查或更换可用渠道"
@@ -2193,8 +2199,13 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			lastStatus = status
 		}
 		switch status {
-		case "failed", "error", "cancelled", "canceled", "failure":
+		case "failed", "error", "cancelled", "canceled", "failure", "expired":
 			msg := firstString(raw, "error_message", "message", "error")
+			if errorDetail, ok := raw["error"].(map[string]interface{}); ok {
+				if detail := firstString(errorDetail, "message", "code"); detail != "" {
+					msg = detail
+				}
+			}
 			if msg == "" {
 				if fr := firstString(raw, "fail_reason"); fr != "" && !isHTTPURL(fr) {
 					msg = fr
@@ -2206,7 +2217,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			if msg == "" || msg == "模型服务异常" {
 				msg = "上游任务失败"
 			}
-			return nil, fmt.Errorf("%s", msg)
+			return nil, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
 		case "succeeded", "success", "completed", "done", "finished":
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
 				return nil, fmt.Errorf("%s", failMsg)

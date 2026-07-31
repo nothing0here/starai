@@ -113,6 +113,18 @@ type CanvasNodeData = Record<string, unknown> & {
   referenceImageLabel?: string;
   referenceVideoLabel?: string;
   referenceAudioLabel?: string;
+  storyGroupID?: string;
+  storyRole?: "input" | "script" | "keyframe" | "video" | "narrationText" | "narration" | "final";
+  storySegmentIndex?: number;
+  storySegmentCount?: number;
+  storySegmentDuration?: number;
+  storyDurationOptions?: number[];
+  viralGroupID?: string;
+  viralRole?: "brief" | "reference" | "brand" | "analysis" | "keyframe" | "video" | "final";
+  viralSegmentIndex?: number;
+  viralSegmentCount?: number;
+  viralSegmentDuration?: number;
+  viralDurationOptions?: number[];
 };
 type CanvasNode = Node<CanvasNodeData, CanvasNodeKind>;
 type CanvasEdge = Edge;
@@ -126,6 +138,7 @@ type CanvasDocument = {
 
 type CanvasSummary = {
   public_id: string;
+  workflow_code?: string;
   title: string;
   created_at: string;
   updated_at: string;
@@ -146,6 +159,11 @@ type CanvasTemplate = {
 type CanvasWorkflow = {
   display_config?: {
     canvas_templates?: CanvasTemplate[];
+  };
+  runtime_config?: {
+    default_template_id?: string;
+    default_segment_count?: number;
+    default_segment_duration?: number;
   };
 };
 
@@ -204,6 +222,8 @@ type NodeActions = {
   openAssetLibrary: (id: string, kind: GeneratorKind) => void;
   openOutputMenu: (id: string, point: { x: number; y: number }) => void;
   openResultPreview: (preview: CanvasResultPreview) => void;
+  configureStory: (id: string, segmentCount: number, segmentDuration: number) => void;
+  configureViral: (id: string, segmentCount: number, segmentDuration: number) => void;
 };
 
 const CanvasNodeActions = createContext<NodeActions | null>(null);
@@ -252,8 +272,8 @@ const DEFAULT_TEMPLATE_ZH: Record<string, { name: string; description: string }>
   "product-showcase-video": { name: "商品展示视频", description: "商品图先生成关键视觉，再延展为展示视频" },
   "brand-visual-kit": { name: "品牌视觉套件", description: "品牌需求并行生成标志创意和视觉海报" },
   "photo-restoration": { name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图" },
-  "story-short-video": { name: "故事短视频", description: "故事脚本先生成关键帧，再生成短视频" },
-  "viral-remake": { name: "爆款复刻", description: "分析复刻需求，生成主视觉并延展为短视频" },
+  "story-short-video": { name: "故事短视频", description: "故事拆分为多关键帧、多视频片段并合成为完整成片" },
+  "viral-remake": { name: "爆款复刻", description: "多模态拆解爆款参考，生成多关键帧、多片段并合成为原创短视频" },
 };
 
 const TEMPLATE_TONES: Record<string, string> = {
@@ -563,10 +583,10 @@ function canvasInputSchema(kind: GeneratorKind, schema: Model["input_schema"]) {
 
 function canvasModelDefaults(kind: GeneratorKind, model?: Model) {
   if (!model) return {};
-  const defaults = {
-    ...schemaDefaults(canvasInputSchema(kind, model.input_schema)),
-    ...(model.default_params || {}),
-  };
+  const schemaValues = schemaDefaults(canvasInputSchema(kind, model.input_schema));
+  const defaults = kind === "video"
+    ? { ...(model.default_params || {}), ...schemaValues }
+    : { ...schemaValues, ...(model.default_params || {}) };
   if (kind === "audio") {
     delete defaults.count;
     delete defaults.n;
@@ -627,6 +647,96 @@ function numericDuration(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+const STORY_SEGMENT_COUNT_OPTIONS = [3, 4, 6, 8] as const;
+const VIRAL_SEGMENT_COUNT_OPTIONS = [3, 4, 6] as const;
+
+function storyDurationOptions(model?: Model) {
+  const durationProperty = schemaProperties(canvasInputSchema("video", model?.input_schema || {})).duration as
+    | Record<string, unknown>
+    | undefined;
+  const candidates = [
+    ...(Array.isArray(durationProperty?.enum) ? durationProperty.enum : []),
+    model?.default_params?.duration,
+    durationProperty?.default,
+  ];
+  const values = candidates
+    .map(numericDuration)
+    .filter((value): value is number => value !== null && value >= 2 && value <= 30);
+  return Array.from(new Set(values)).sort((left, right) => left - right);
+}
+
+function preferredStoryDuration(model?: Model) {
+  const options = storyDurationOptions(model);
+  const configured = numericDuration(model?.default_params?.duration);
+  if (configured && options.includes(configured)) return configured;
+  if (options.includes(8)) return 8;
+  return options[0] || configured || 8;
+}
+
+function preferredNarrationAudioModel(models: Model[]) {
+  const speechHint = /(speech|tts|voice|语音|配音|朗读|音声|음성)/i;
+  return models.find((model) =>
+    parseAudioRuntime(model.runtime_rule).input_layout !== "dual"
+    && speechHint.test(`${model.code} ${model.display_name || ""}`)
+  ) || models.find((model) => parseAudioRuntime(model.runtime_rule).input_layout !== "dual") || models[0];
+}
+
+function preferredMultimodalChatModel(models: Model[]) {
+  const explicit = models.find((model) => {
+    const capabilities = (model.runtime_rule?.capabilities || {}) as Record<string, unknown>;
+    return capabilities.vision === true || capabilities.multimodal === true || capabilities.image_input === true || capabilities.video_input === true;
+  });
+  const modelHint = /(vision|multimodal|(?:^|[-_\s])vl(?:[-_\s]|$)|gpt[-_\s]?(?:4o|5)|gemini|claude)/i;
+  return explicit || models.find((model) => modelHint.test(`${model.code} ${model.display_name}`)) || models[0];
+}
+
+function aspectRatioParams(model: Model | undefined, params: Record<string, unknown>, ratio = "9:16") {
+  if (!model) return params;
+  const properties = schemaProperties(canvasInputSchema(model.category as GeneratorKind, model.input_schema || {}));
+  const next = { ...params };
+  for (const key of ["aspect_ratio", "ratio"]) {
+    const property = properties[key] as Record<string, unknown> | undefined;
+    if (!property) continue;
+    const options = Array.isArray(property.enum) ? property.enum : [];
+    const match = options.find((item) => String(item).replace(/\s/g, "") === ratio);
+    if (match !== undefined || options.length === 0) next[key] = match ?? ratio;
+  }
+  const orientation = properties.orientation as Record<string, unknown> | undefined;
+  if (orientation) {
+    const options = Array.isArray(orientation.enum) ? orientation.enum : [];
+    const portrait = options.find((item) => /^(portrait|vertical|9:16)$/i.test(String(item)));
+    if (portrait !== undefined) next.orientation = portrait;
+  }
+  return normalizeCanvasParamsForModel(next, model.input_schema, model.default_params);
+}
+
+function storyNodeNeedsReset(node: CanvasNode, patch: Partial<CanvasNodeData>): CanvasNode {
+  const executable = node.type === "generator" || node.type === "compositor";
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      ...patch,
+      ...(executable
+        ? {
+            status: node.data.status === "succeeded" ? "stale" : "idle",
+            dirty: true,
+            progress: 0,
+            progressStage: "",
+            error: "",
+            outputUrl: "",
+            outputText: "",
+            outputKind: undefined,
+            taskNo: "",
+            estimatedCost: 0,
+            actualCost: 0,
+            lastRunSignature: "",
+          }
+        : {}),
+    },
+  };
+}
+
 function normalizeCanvasParamsForModel(
   params: Record<string, unknown>,
   inputSchema?: Model["input_schema"],
@@ -656,7 +766,7 @@ function normalizeCanvasParamsForModel(
       normalized[key] = equivalent;
       continue;
     }
-    const fallback = defaultParams?.[key] ?? property.default ?? enumValues[0];
+    const fallback = property.default ?? defaultParams?.[key] ?? enumValues[0];
     const validFallback = enumValues.find((item) => Object.is(item, fallback) || String(item) === String(fallback));
     normalized[key] = validFallback ?? enumValues[0];
   }
@@ -871,6 +981,104 @@ function TextInputNode({ id, data, selected }: NodeProps<CanvasNode>) {
           value={data.prompt || ""}
           onChange={(event) => actions?.update(id, { prompt: event.target.value })}
         />
+        {data.storyRole === "input" && (
+          <div className="nodrag grid grid-cols-2 gap-2 rounded-xl border border-blue-200/70 bg-blue-50/70 p-2 dark:border-blue-400/15 dark:bg-blue-500/[0.06]">
+            <label className="min-w-0 text-[9px] text-gray-500 dark:text-gray-300">
+              <span className="mb-1 block">{t("canvas.story.segmentCount")}</span>
+              <select
+                value={Number(data.storySegmentCount || 4)}
+                onChange={(event) => actions?.configureStory(
+                  id,
+                  Number(event.target.value),
+                  Number(data.storySegmentDuration || 8)
+                )}
+                className="h-8 w-full rounded-lg border border-blue-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-blue-400/20 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {STORY_SEGMENT_COUNT_OPTIONS.map((count) => (
+                  <option key={count} value={count}>{t("canvas.story.segmentCountValue", { count })}</option>
+                ))}
+              </select>
+            </label>
+            <label className="min-w-0 text-[9px] text-gray-500 dark:text-gray-300">
+              <span className="mb-1 block">{t("canvas.story.segmentDuration")}</span>
+              <select
+                value={Number(data.storySegmentDuration || 8)}
+                onChange={(event) => actions?.configureStory(
+                  id,
+                  Number(data.storySegmentCount || 4),
+                  Number(event.target.value)
+                )}
+                className="h-8 w-full rounded-lg border border-blue-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-blue-400/20 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {(Array.isArray(data.storyDurationOptions) && data.storyDurationOptions.length
+                  ? data.storyDurationOptions
+                  : [Number(data.storySegmentDuration || 8)]
+                ).map((duration) => (
+                  <option key={duration} value={duration}>{t("canvas.story.secondsValue", { seconds: duration })}</option>
+                ))}
+              </select>
+            </label>
+            <div className="col-span-2 flex items-center justify-between gap-2 text-[9px] text-blue-600 dark:text-blue-300">
+              <span>{t("canvas.story.estimatedDuration")}</span>
+              <span className="font-semibold">
+                {t("canvas.story.estimatedDurationValue", {
+                  count: Number(data.storySegmentCount || 4),
+                  duration: Number(data.storySegmentDuration || 8),
+                  total: Number(data.storySegmentCount || 4) * Number(data.storySegmentDuration || 8),
+                })}
+              </span>
+            </div>
+          </div>
+        )}
+        {data.viralRole === "brief" && (
+          <div className="nodrag grid grid-cols-2 gap-2 rounded-xl border border-orange-200/70 bg-orange-50/70 p-2 dark:border-orange-400/15 dark:bg-orange-500/[0.06]">
+            <label className="min-w-0 text-[9px] text-gray-500 dark:text-gray-300">
+              <span className="mb-1 block">{t("canvas.viral.segmentCount")}</span>
+              <select
+                value={Number(data.viralSegmentCount || 3)}
+                onChange={(event) => actions?.configureViral(
+                  id,
+                  Number(event.target.value),
+                  Number(data.viralSegmentDuration || 5)
+                )}
+                className="h-8 w-full rounded-lg border border-orange-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-orange-400/20 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {VIRAL_SEGMENT_COUNT_OPTIONS.map((count) => (
+                  <option key={count} value={count}>{t("canvas.story.segmentCountValue", { count })}</option>
+                ))}
+              </select>
+            </label>
+            <label className="min-w-0 text-[9px] text-gray-500 dark:text-gray-300">
+              <span className="mb-1 block">{t("canvas.story.segmentDuration")}</span>
+              <select
+                value={Number(data.viralSegmentDuration || 5)}
+                onChange={(event) => actions?.configureViral(
+                  id,
+                  Number(data.viralSegmentCount || 3),
+                  Number(event.target.value)
+                )}
+                className="h-8 w-full rounded-lg border border-orange-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-orange-400/20 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {(Array.isArray(data.viralDurationOptions) && data.viralDurationOptions.length
+                  ? data.viralDurationOptions
+                  : [Number(data.viralSegmentDuration || 5)]
+                ).map((duration) => (
+                  <option key={duration} value={duration}>{t("canvas.story.secondsValue", { seconds: duration })}</option>
+                ))}
+              </select>
+            </label>
+            <div className="col-span-2 flex items-center justify-between gap-2 text-[9px] text-orange-600 dark:text-orange-300">
+              <span>{t("canvas.story.estimatedDuration")}</span>
+              <span className="font-semibold">
+                {t("canvas.story.estimatedDurationValue", {
+                  count: Number(data.viralSegmentCount || 3),
+                  duration: Number(data.viralSegmentDuration || 5),
+                  total: Number(data.viralSegmentCount || 3) * Number(data.viralSegmentDuration || 5),
+                })}
+              </span>
+            </div>
+          </div>
+        )}
         {(imageURLs.length > 0 || videoURLs.length > 0) && <div className="text-[9px] text-gray-400">{t("canvas.node.linkedAssets", { count: imageURLs.length + videoURLs.length })}</div>}
         {(imageURLs.length > 0 || videoURLs.length > 0 || audioURLs.length > 0) && (
           <div className="flex gap-1.5 overflow-x-auto pb-0.5">
@@ -1107,7 +1315,20 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
           value={data.modelCode || ""}
           onChange={(event) => {
             const model = models.find((item) => item.code === event.target.value);
-            const nextParams = canvasModelDefaults(kind, model);
+            let nextParams = canvasModelDefaults(kind, model);
+            if (kind === "video" && (data.storyRole === "video" || data.viralRole === "video")) {
+              const wantedDuration = Number(data.storySegmentDuration || data.viralSegmentDuration || 0);
+              if (wantedDuration > 0) {
+                nextParams = normalizeCanvasParamsForModel(
+                  { ...nextParams, duration: wantedDuration },
+                  model?.input_schema,
+                  model?.default_params
+                );
+              }
+            }
+            if (data.viralRole === "keyframe" || data.viralRole === "video") {
+              nextParams = aspectRatioParams(model, nextParams, "9:16");
+            }
             actions?.update(id, {
               modelCode: event.target.value,
               params: nextParams,
@@ -1433,7 +1654,15 @@ const nodeTypes = {
   compositor: CompositorNode,
 };
 
-function CanvasEditor({ authenticated }: { authenticated: boolean }) {
+function CanvasEditor({
+  authenticated,
+  workflowCode = "infinite_canvas",
+  initialTemplateID = "",
+}: {
+  authenticated: boolean;
+  workflowCode?: string;
+  initialTemplateID?: string;
+}) {
   const { locale, formatDate, t } = useI18n();
   const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<CanvasEdge>([]);
@@ -1441,6 +1670,8 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
   const [imageModels, setImageModels] = useState<Model[]>([]);
   const [videoModels, setVideoModels] = useState<Model[]>([]);
   const [audioModels, setAudioModels] = useState<Model[]>([]);
+  const [modelCatalogReady, setModelCatalogReady] = useState(false);
+  const [workspaceConfigReady, setWorkspaceConfigReady] = useState(false);
   const [canvasID, setCanvasID] = useState("");
   const [title, setTitle] = useState(() => t("canvas.untitled"));
   const [history, setHistory] = useState<CanvasSummary[]>([]);
@@ -1456,6 +1687,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
   const [importTab, setImportTab] = useState<"templates" | "history" | "code">("templates");
   const [importCode, setImportCode] = useState("");
   const [managedTemplates, setManagedTemplates] = useState<CanvasTemplate[]>([]);
+  const [workspaceRuntime, setWorkspaceRuntime] = useState<NonNullable<CanvasWorkflow["runtime_config"]>>({});
   const [showEmptyWelcome, setShowEmptyWelcome] = useState(true);
   const [nodePaletteOpen, setNodePaletteOpen] = useState(false);
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false);
@@ -1485,6 +1717,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
   const executionActiveRef = useRef(false);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoSaveFingerprintRef = useRef("");
+  const initialTemplateAppliedRef = useRef(false);
   const { fitView, getViewport, screenToFlowPosition, setViewport } = useReactFlow<CanvasNode, CanvasEdge>();
 
   useEffect(() => {
@@ -1512,26 +1745,39 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
 
   const refreshHistory = useCallback(() => {
     if (!authenticated) {
-      setHistory(readLocalCanvases().sort((a, b) => b.updated_at.localeCompare(a.updated_at)));
+      setHistory(readLocalCanvases()
+        .filter((item) => (item.workflow_code || "infinite_canvas") === workflowCode)
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at)));
       return;
     }
-    api<{ items: CanvasSummary[] }>("/api/canvases?page_size=50")
+    api<{ items: CanvasSummary[] }>(`/api/canvases?page_size=50&workflow_code=${encodeURIComponent(workflowCode)}`)
       .then((result) => setHistory(result.items || []))
       .catch(() => setHistory([]));
-  }, [authenticated]);
+  }, [authenticated, workflowCode]);
 
   useEffect(() => {
+    let active = true;
     const chatController = new AbortController();
     const imageController = new AbortController();
     const videoController = new AbortController();
     const audioController = new AbortController();
-    apiForLocale<Model[]>("/api/models?category=chat", locale, { signal: chatController.signal })
-      .then((items) => setChatModels((items || []).filter((model) => model.is_enabled !== false && !isMultiCollabModel(model))))
-      .catch(() => setChatModels([]));
-    apiForLocale<Model[]>("/api/models?category=image", locale, { signal: imageController.signal }).then(setImageModels).catch(() => setImageModels([]));
-    apiForLocale<Model[]>("/api/models?category=video", locale, { signal: videoController.signal }).then(setVideoModels).catch(() => setVideoModels([]));
-    apiForLocale<Model[]>("/api/models?category=audio", locale, { signal: audioController.signal }).then(setAudioModels).catch(() => setAudioModels([]));
+    setModelCatalogReady(false);
+    Promise.allSettled([
+      apiForLocale<Model[]>("/api/models?category=chat", locale, { signal: chatController.signal }),
+      apiForLocale<Model[]>("/api/models?category=image", locale, { signal: imageController.signal }),
+      apiForLocale<Model[]>("/api/models?category=video", locale, { signal: videoController.signal }),
+      apiForLocale<Model[]>("/api/models?category=audio", locale, { signal: audioController.signal }),
+    ]).then(([chat, image, video, audio]) => {
+      if (!active) return;
+      if (chat.status === "fulfilled") setChatModels((chat.value || []).filter((model) => model.is_enabled !== false && !isMultiCollabModel(model)));
+      else setChatModels([]);
+      setImageModels(image.status === "fulfilled" ? image.value || [] : []);
+      setVideoModels(video.status === "fulfilled" ? video.value || [] : []);
+      setAudioModels(audio.status === "fulfilled" ? audio.value || [] : []);
+      setModelCatalogReady(true);
+    });
     return () => {
+      active = false;
       chatController.abort();
       imageController.abort();
       videoController.abort();
@@ -1541,16 +1787,23 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    apiForLocale<CanvasWorkflow>("/api/agents/infinite_canvas", locale, { signal: controller.signal })
+    setWorkspaceConfigReady(false);
+    apiForLocale<CanvasWorkflow>(`/api/agents/${encodeURIComponent(workflowCode)}`, locale, { signal: controller.signal })
       .then((workflow) => {
         const items = workflow.display_config?.canvas_templates;
         setManagedTemplates(Array.isArray(items) ? items.filter((item) => item && item.id && item.name) : []);
+        setWorkspaceRuntime(workflow.runtime_config || {});
+        setWorkspaceConfigReady(true);
       })
       .catch((error) => {
-        if (error?.name !== "AbortError") setManagedTemplates([]);
+        if (error?.name !== "AbortError") {
+          setManagedTemplates([]);
+          setWorkspaceRuntime({});
+          setWorkspaceConfigReady(true);
+        }
       });
     return () => controller.abort();
-  }, [locale]);
+  }, [locale, workflowCode]);
 
   useEffect(() => {
     refreshHistory();
@@ -1912,10 +2165,38 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       return;
     }
     const incoming = collectUpstreamNodes(id, nodesRef.current, edgesRef.current);
-    const textInputs = incoming
-      .flatMap((item) => [String(item.data.outputText || ""), String(item.data.prompt || "")])
-      .filter(Boolean);
-    const imageInputs = incoming
+    const directIncoming = edgesRef.current
+      .filter((edge) => edge.target === id)
+      .map((edge) => nodesRef.current.find((item) => item.id === edge.source))
+      .filter((item): item is CanvasNode => Boolean(item));
+    // 故事视频片段只使用自己直接连接的关键帧作为视觉输入，避免后续片段
+    // 因关键帧一致性链路而把前面所有关键帧重复提交给视频模型。
+    const mediaIncoming =
+      node.data.storyRole === "video" || node.data.viralRole === "keyframe" || node.data.viralRole === "video"
+        ? directIncoming
+        : incoming;
+    const storyRole = node.data.storyRole;
+    const viralRole = node.data.viralRole;
+    const textInputs =
+      storyRole === "keyframe" || storyRole === "video" || storyRole === "narrationText"
+        ? incoming
+            .filter((item) => item.data.storyRole === "script")
+            .map((item) => String(item.data.outputText || "").trim())
+            .filter(Boolean)
+        : storyRole === "narration"
+          ? directIncoming
+              .filter((item) => item.data.storyRole === "narrationText")
+              .map((item) => String(item.data.outputText || "").trim())
+              .filter(Boolean)
+          : viralRole === "keyframe" || viralRole === "video"
+            ? incoming
+                .filter((item) => item.data.viralRole === "analysis")
+                .map((item) => String(item.data.outputText || "").trim())
+                .filter(Boolean)
+          : incoming
+              .flatMap((item) => [String(item.data.outputText || ""), String(item.data.prompt || "")])
+              .filter(Boolean);
+    const imageInputs = mediaIncoming
       .flatMap((item) => [
         ...(Array.isArray(item.data.referenceImageUrls) ? item.data.referenceImageUrls.map(String) : []),
         ...(item.data.mediaKind === "image" && Array.isArray(item.data.assetUrls) ? item.data.assetUrls.map(String) : []),
@@ -1924,7 +2205,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       ])
       .filter(Boolean)
       .concat(Array.isArray(node.data.referenceImageUrls) ? node.data.referenceImageUrls.map(String) : []);
-    const videoInputs = incoming
+    const videoInputs = mediaIncoming
       .flatMap((item) => [
         ...(Array.isArray(item.data.referenceVideoUrls) ? item.data.referenceVideoUrls.map(String) : []),
         ...(item.data.mediaKind === "video" && Array.isArray(item.data.assetUrls) ? item.data.assetUrls.map(String) : []),
@@ -1933,7 +2214,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       ])
       .filter(Boolean)
       .concat(Array.isArray(node.data.referenceVideoUrls) ? node.data.referenceVideoUrls.map(String) : []);
-    const audioInputs = incoming
+    const audioInputs = mediaIncoming
       .flatMap((item) => [
         ...(Array.isArray(item.data.referenceAudioUrls) ? item.data.referenceAudioUrls.map(String) : []),
         ...(item.data.mediaKind === "audio" && Array.isArray(item.data.assetUrls) ? item.data.assetUrls.map(String) : []),
@@ -1946,6 +2227,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     const videoRuntime = parseVideoRuntime(selectedModel?.runtime_rule);
     const audioRuntime = parseAudioRuntime(selectedModel?.runtime_rule);
     const isSeedance2 = node.data.mediaKind === "video" && videoRuntime.upload_profile === "seedance_2";
+    const isMiniMaxH3 = node.data.mediaKind === "video" && videoRuntime.upload_profile === "minimax_h3";
     const promptRequired =
       node.data.mediaKind === "video"
         ? videoRuntime.prompt_required !== false
@@ -1972,7 +2254,11 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
           body: JSON.stringify({
             model_code: modelCode,
             messages: [{ role: "user", content: prompt }],
-            params: node.data.params || {},
+            params: {
+              ...(node.data.params || {}),
+              ...(imageInputs.length ? { reference_images: imageInputs } : {}),
+              ...(videoInputs.length ? { reference_videos: videoInputs } : {}),
+            },
             stream: false,
             ephemeral: true,
           }),
@@ -1991,8 +2277,11 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
         });
         return;
       }
-      if (isSeedance2 && audioInputs.length > 0 && imageInputs.length === 0 && videoInputs.length === 0) {
-        update(id, { status: "failed", error: t("canvas.node.seedanceAudioNeedsVisual") });
+      if ((isSeedance2 || isMiniMaxH3) && audioInputs.length > 0 && imageInputs.length === 0 && videoInputs.length === 0) {
+        update(id, {
+          status: "failed",
+          error: t(isMiniMaxH3 ? "canvas.node.referenceVisualRequired" : "canvas.node.seedanceAudioNeedsVisual"),
+        });
         return;
       }
       const inferredSeedanceMode = inferSeedanceMaterialMode(imageInputs.length, videoInputs.length, audioInputs.length);
@@ -2006,17 +2295,47 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
         delete baseParams.n;
       }
       if (isSeedance2) baseParams[videoRuntime.mode_param || "generation_mode"] = inferredSeedanceMode;
+      const h3Mode = String(baseParams[videoRuntime.mode_param || "generation_mode"] || "text");
+      if (isMiniMaxH3) {
+        if (h3Mode === "first_frame" && imageInputs.length < 1) {
+          update(id, { status: "failed", error: t("canvas.node.firstFrameRequired") });
+          return;
+        }
+        if (h3Mode === "last_frame" && imageInputs.length < 1) {
+          update(id, { status: "failed", error: t("canvas.node.lastFrameRequired") });
+          return;
+        }
+        if (h3Mode === "first_last" && imageInputs.length < 2) {
+          update(id, { status: "failed", error: t("canvas.node.firstLastFramesRequired") });
+          return;
+        }
+        if (h3Mode === "reference" && imageInputs.length === 0 && videoInputs.length === 0) {
+          update(id, { status: "failed", error: t("canvas.node.referenceVisualRequired") });
+          return;
+        }
+        baseParams[videoRuntime.mode_param || "generation_mode"] = h3Mode;
+      }
+      const h3FirstFrame = isMiniMaxH3 && (h3Mode === "first_frame" || h3Mode === "first_last")
+        ? { url: imageInputs[0], name: imageInputs[0] }
+        : null;
+      const h3LastFrame = isMiniMaxH3 && h3Mode === "last_frame"
+        ? { url: imageInputs[0], name: imageInputs[0] }
+        : isMiniMaxH3 && h3Mode === "first_last"
+          ? { url: imageInputs[1], name: imageInputs[1] }
+          : null;
       const taskParams =
         node.data.mediaKind === "video"
           ? {
               ...buildVideoTaskParams(
                 baseParams,
                 {
-                  reference_images: imageInputs.map((url) => ({ url, name: url })),
+                  reference_images: isMiniMaxH3 && h3Mode !== "reference"
+                    ? []
+                    : imageInputs.map((url) => ({ url, name: url })),
                   reference_videos: videoInputs.map((url) => ({ url, name: url })),
                   reference_audios: audioInputs.map((url) => ({ url, name: url })),
-                  first_frame: null,
-                  last_frame: null,
+                  first_frame: h3FirstFrame,
+                  last_frame: h3LastFrame,
                 },
                 selectedModel.runtime_rule
               ),
@@ -2182,10 +2501,38 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       setNotice(t("canvas.nodeInvalid", { name: missingPrompt.data.label || missingPrompt.id, reason: t("canvas.enterOrConnectPrompt") }));
       return;
     }
-    const invalidSeedanceAudio = ordered.find((node) => {
-      if (node.type !== "generator" || node.data.mediaKind !== "video") return false;
+    const invalidViralAnalysis = ordered
+      .filter((node) => node.data.viralRole === "analysis")
+      .map((node) => {
+        const groupID = String(node.data.viralGroupID || "");
+        const group = nodesRef.current.filter((item) => item.data.viralGroupID === groupID);
+        const reference = group.find((item) => item.data.viralRole === "reference");
+        const brand = group.find((item) => item.data.viralRole === "brand");
+        const hasAssets = (item?: CanvasNode) => Boolean(
+          item?.data.assetUrl
+          || (Array.isArray(item?.data.assetUrls) && item.data.assetUrls.length > 0)
+        );
+        return !hasAssets(reference)
+          ? { node, reason: t("canvas.viral.referenceRequired") }
+          : !hasAssets(brand)
+            ? { node, reason: t("canvas.viral.brandRequired") }
+            : null;
+      })
+      .find((item): item is { node: CanvasNode; reason: string } => Boolean(item));
+    if (invalidViralAnalysis) {
+      update(invalidViralAnalysis.node.id, { status: "failed", dirty: true, error: invalidViralAnalysis.reason });
+      setNotice(t("canvas.nodeInvalid", {
+        name: invalidViralAnalysis.node.data.label || invalidViralAnalysis.node.id,
+        reason: invalidViralAnalysis.reason,
+      }));
+      return;
+    }
+    const invalidReferenceAudio = ordered.map((node) => {
+      if (node.type !== "generator" || node.data.mediaKind !== "video") return null;
       const model = modelsByCode.get(String(node.data.modelCode || ""));
-      if (!model || parseVideoRuntime(model.runtime_rule).upload_profile !== "seedance_2") return false;
+      if (!model) return null;
+      const profile = String(parseVideoRuntime(model.runtime_rule).upload_profile || "");
+      if (!["seedance_2", "minimax_h3"].includes(profile)) return null;
       const upstream = collectUpstreamNodes(node.id, nodesRef.current, edgesRef.current);
       const imageAvailable = Boolean(
         (node.data.referenceImageUrls as unknown[] | undefined)?.length
@@ -2211,13 +2558,20 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
           || Boolean((item.data.referenceAudioUrls as unknown[] | undefined)?.length)
         )
       );
-      return audioAvailable && !imageAvailable && !videoAvailable;
-    });
-    if (invalidSeedanceAudio) {
-      update(invalidSeedanceAudio.id, { status: "failed", dirty: true, error: t("canvas.node.seedanceAudioNeedsVisual") });
+      if (!audioAvailable || imageAvailable || videoAvailable) return null;
+      return {
+        node,
+        errorKey: profile === "minimax_h3"
+          ? "canvas.node.referenceVisualRequired"
+          : "canvas.node.seedanceAudioNeedsVisual",
+      };
+    }).find((item): item is { node: CanvasNode; errorKey: string } => Boolean(item));
+    if (invalidReferenceAudio) {
+      const reason = t(invalidReferenceAudio.errorKey);
+      update(invalidReferenceAudio.node.id, { status: "failed", dirty: true, error: reason });
       setNotice(t("canvas.nodeInvalid", {
-        name: invalidSeedanceAudio.data.label || invalidSeedanceAudio.id,
-        reason: t("canvas.node.seedanceAudioNeedsVisual"),
+        name: invalidReferenceAudio.node.data.label || invalidReferenceAudio.node.id,
+        reason,
       }));
       return;
     }
@@ -2303,6 +2657,396 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     await executeNodes(new Set([id, ...collectDownstreamIDs(id, edgesRef.current)]));
   }, [executeNodes, markDirtyFrom]);
 
+  const configureStory = useCallback((id: string, requestedCount: number, requestedDuration: number) => {
+    const inputNode = nodesRef.current.find((node) => node.id === id && node.data.storyRole === "input");
+    const groupID = String(inputNode?.data.storyGroupID || "");
+    if (!inputNode || !groupID) return;
+
+    const segmentCount = STORY_SEGMENT_COUNT_OPTIONS.includes(requestedCount as (typeof STORY_SEGMENT_COUNT_OPTIONS)[number])
+      ? requestedCount
+      : 4;
+    const groupNodes = nodesRef.current.filter((node) => node.data.storyGroupID === groupID);
+    const scriptNode = groupNodes.find((node) => node.data.storyRole === "script");
+    const narrationTextNode = groupNodes.find((node) => node.data.storyRole === "narrationText");
+    const narrationNode = groupNodes.find((node) => node.data.storyRole === "narration");
+    const finalNode = groupNodes.find((node) => node.data.storyRole === "final");
+    if (!scriptNode || !narrationTextNode || !narrationNode || !finalNode) return;
+
+    const existingKeyframes = new Map(
+      groupNodes
+        .filter((node) => node.data.storyRole === "keyframe")
+        .map((node) => [Number(node.data.storySegmentIndex || 0), node])
+    );
+    const existingVideos = new Map(
+      groupNodes
+        .filter((node) => node.data.storyRole === "video")
+        .map((node) => [Number(node.data.storySegmentIndex || 0), node])
+    );
+    const existingVideoModel = videoModels.find((model) =>
+      groupNodes.some((node) => node.data.storyRole === "video" && node.data.modelCode === model.code)
+    ) || preferredVideoModel(videoModels);
+    const durationOptions = storyDurationOptions(existingVideoModel);
+    const segmentDuration = durationOptions.includes(requestedDuration)
+      ? requestedDuration
+      : preferredStoryDuration(existingVideoModel);
+    const baseX = inputNode.position.x;
+    const baseY = inputNode.position.y;
+    const branchGap = 420;
+    const sharedPatch = { storySegmentCount: segmentCount, storySegmentDuration: segmentDuration };
+    const resetInput: CanvasNode = {
+      ...inputNode,
+      data: {
+        ...inputNode.data,
+        ...sharedPatch,
+        storyDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
+      },
+    };
+    const resetScript = storyNodeNeedsReset(scriptNode, {
+      ...sharedPatch,
+      prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration }),
+    });
+    resetScript.position = { x: baseX + 400, y: baseY };
+    const resetNarrationText = storyNodeNeedsReset(narrationTextNode, {
+      ...sharedPatch,
+      prompt: t("canvas.story.narrationTextPrompt", {
+        count: segmentCount,
+        duration: segmentDuration,
+        total: segmentCount * segmentDuration,
+      }),
+    });
+    resetNarrationText.position = { x: baseX + 800, y: baseY + segmentCount * branchGap + 40 };
+    const resetNarration = storyNodeNeedsReset(narrationNode, {
+      ...sharedPatch,
+      // TTS 上游会直接朗读 prompt；旁白节点只应朗读前一节点整理出的正文。
+      prompt: "",
+    });
+    resetNarration.position = { x: baseX + 1200, y: baseY + segmentCount * branchGap + 40 };
+    const resetFinal = storyNodeNeedsReset(finalNode, {
+      ...sharedPatch,
+      composeMode: "auto",
+    });
+    resetFinal.position = { x: baseX + 1640, y: baseY + Math.max(120, (segmentCount - 1) * branchGap / 2) };
+
+    const defaultImageModel = imageModels[0];
+    const defaultVideoModel = existingVideoModel;
+    const keyframes: CanvasNode[] = [];
+    const videos: CanvasNode[] = [];
+    for (let index = 1; index <= segmentCount; index += 1) {
+      const existingKeyframe = existingKeyframes.get(index);
+      const keyframe = storyNodeNeedsReset(
+        existingKeyframe || {
+          id: newNodeID(),
+          type: "generator",
+          position: { x: baseX + 800, y: baseY + (index - 1) * branchGap },
+          data: {
+            label: "",
+            mediaKind: "image",
+            modelCode: defaultImageModel?.code || "",
+            params: canvasModelDefaults("image", defaultImageModel),
+            status: "idle",
+          },
+        },
+        {
+          label: t("canvas.node.storyKeyframeIndexed", { index, count: segmentCount }),
+          mediaKind: "image",
+          storyGroupID: groupID,
+          storyRole: "keyframe",
+          storySegmentIndex: index,
+          ...sharedPatch,
+          prompt: t("canvas.story.keyframePrompt", { index, count: segmentCount }),
+        }
+      );
+      keyframe.position = { x: baseX + 800, y: baseY + (index - 1) * branchGap };
+      keyframes.push(keyframe);
+
+      const existingVideo = existingVideos.get(index);
+      const selectedVideoModel = videoModels.find((model) => model.code === existingVideo?.data.modelCode) || defaultVideoModel;
+      const videoParams = normalizeCanvasParamsForModel(
+        {
+          ...canvasModelDefaults("video", selectedVideoModel),
+          ...(existingVideo?.data.params || {}),
+          duration: segmentDuration,
+        },
+        selectedVideoModel?.input_schema,
+        selectedVideoModel?.default_params
+      );
+      const video = storyNodeNeedsReset(
+        existingVideo || {
+          id: newNodeID(),
+          type: "generator",
+          position: { x: baseX + 1200, y: baseY + (index - 1) * branchGap },
+          data: {
+            label: "",
+            mediaKind: "video",
+            modelCode: selectedVideoModel?.code || "",
+            params: videoParams,
+            status: "idle",
+          },
+        },
+        {
+          label: t("canvas.node.storyVideoIndexed", { index, count: segmentCount }),
+          mediaKind: "video",
+          modelCode: selectedVideoModel?.code || "",
+          params: videoParams,
+          storyGroupID: groupID,
+          storyRole: "video",
+          storySegmentIndex: index,
+          ...sharedPatch,
+          prompt: t("canvas.story.videoPrompt", { index, count: segmentCount, duration: segmentDuration }),
+        }
+      );
+      video.position = { x: baseX + 1200, y: baseY + (index - 1) * branchGap };
+      videos.push(video);
+    }
+
+    const groupNodeIDs = new Set(groupNodes.map((node) => node.id));
+    const preservedGroupIDs = new Set([
+      resetInput.id,
+      resetScript.id,
+      resetNarrationText.id,
+      resetNarration.id,
+      resetFinal.id,
+      ...keyframes.map((node) => node.id),
+      ...videos.map((node) => node.id),
+    ]);
+    const unrelatedNodes = nodesRef.current.filter((node) => node.data.storyGroupID !== groupID);
+    const retainedExternalEdges = edgesRef.current.filter((edge) => {
+      const sourceInGroup = groupNodeIDs.has(edge.source);
+      const targetInGroup = groupNodeIDs.has(edge.target);
+      if (sourceInGroup && targetInGroup) return false;
+      if (sourceInGroup && !preservedGroupIDs.has(edge.source)) return false;
+      if (targetInGroup && !preservedGroupIDs.has(edge.target)) return false;
+      return true;
+    });
+    const connectStory = (source: CanvasNode, target: CanvasNode): CanvasEdge => ({
+      id: `edge_${crypto.randomUUID()}`,
+      source: source.id,
+      target: target.id,
+      type: "smoothstep",
+      animated: true,
+      style: { stroke: "#22d3ee", strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: "#22d3ee" },
+    });
+    const internalEdges: CanvasEdge[] = [
+      connectStory(resetInput, resetScript),
+      connectStory(resetScript, resetNarrationText),
+      connectStory(resetNarrationText, resetNarration),
+    ];
+    keyframes.forEach((keyframe, index) => {
+      internalEdges.push(connectStory(index === 0 ? resetScript : keyframes[index - 1], keyframe));
+      internalEdges.push(connectStory(keyframe, videos[index]));
+      internalEdges.push(connectStory(videos[index], resetFinal));
+    });
+    internalEdges.push(connectStory(resetNarration, resetFinal));
+
+    nodesRef.current = [
+      ...unrelatedNodes,
+      resetInput,
+      resetScript,
+      ...keyframes,
+      ...videos,
+      resetNarrationText,
+      resetNarration,
+      resetFinal,
+    ];
+    edgesRef.current = [...retainedExternalEdges, ...internalEdges];
+    setNodes(nodesRef.current);
+    setEdges(edgesRef.current);
+    setNotice(t("canvas.story.structureUpdated", {
+      count: segmentCount,
+      duration: segmentDuration,
+      total: segmentCount * segmentDuration,
+    }));
+  }, [imageModels, setEdges, setNodes, t, videoModels]);
+
+  const configureViral = useCallback((id: string, requestedCount: number, requestedDuration: number) => {
+    const briefNode = nodesRef.current.find((node) => node.id === id && node.data.viralRole === "brief");
+    const groupID = String(briefNode?.data.viralGroupID || "");
+    if (!briefNode || !groupID) return;
+    const segmentCount = VIRAL_SEGMENT_COUNT_OPTIONS.includes(requestedCount as (typeof VIRAL_SEGMENT_COUNT_OPTIONS)[number])
+      ? requestedCount
+      : 3;
+    const groupNodes = nodesRef.current.filter((node) => node.data.viralGroupID === groupID);
+    const referenceNode = groupNodes.find((node) => node.data.viralRole === "reference");
+    const brandNode = groupNodes.find((node) => node.data.viralRole === "brand");
+    const analysisNode = groupNodes.find((node) => node.data.viralRole === "analysis");
+    const finalNode = groupNodes.find((node) => node.data.viralRole === "final");
+    if (!referenceNode || !brandNode || !analysisNode || !finalNode) return;
+
+    const existingKeyframes = new Map(
+      groupNodes.filter((node) => node.data.viralRole === "keyframe").map((node) => [Number(node.data.viralSegmentIndex || 0), node])
+    );
+    const existingVideos = new Map(
+      groupNodes.filter((node) => node.data.viralRole === "video").map((node) => [Number(node.data.viralSegmentIndex || 0), node])
+    );
+    const selectedVideoModel = videoModels.find((model) =>
+      groupNodes.some((node) => node.data.viralRole === "video" && node.data.modelCode === model.code)
+    ) || preferredVideoModel(videoModels);
+    const durationOptions = storyDurationOptions(selectedVideoModel);
+    const segmentDuration = durationOptions.includes(requestedDuration)
+      ? requestedDuration
+      : preferredStoryDuration(selectedVideoModel);
+    const sharedPatch = { viralSegmentCount: segmentCount, viralSegmentDuration: segmentDuration };
+    const baseX = briefNode.position.x;
+    const baseY = briefNode.position.y;
+    const gap = 430;
+    const resetBrief: CanvasNode = {
+      ...briefNode,
+      data: {
+        ...briefNode.data,
+        ...sharedPatch,
+        viralDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
+      },
+    };
+    resetBrief.position = { x: baseX, y: baseY };
+    const resetReference = { ...referenceNode, position: { x: baseX, y: baseY + 330 } };
+    const resetBrand = { ...brandNode, position: { x: baseX, y: baseY + 660 } };
+    const resetAnalysis = storyNodeNeedsReset(analysisNode, {
+      ...sharedPatch,
+      prompt: t("canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
+    });
+    resetAnalysis.position = { x: baseX + 400, y: baseY + 220 };
+    const resetFinal = storyNodeNeedsReset(finalNode, {
+      ...sharedPatch,
+      composeMode: "concat",
+      outputSize: "keep",
+    });
+    resetFinal.position = { x: baseX + 1640, y: baseY + Math.max(160, (segmentCount - 1) * gap / 2) };
+
+    const defaultImageModel = imageModels[0];
+    const keyframes: CanvasNode[] = [];
+    const videos: CanvasNode[] = [];
+    for (let index = 1; index <= segmentCount; index += 1) {
+      const oldKeyframe = existingKeyframes.get(index);
+      const imageModel = imageModels.find((model) => model.code === oldKeyframe?.data.modelCode) || defaultImageModel;
+      const imageParams = aspectRatioParams(
+        imageModel,
+        { ...(imageModel?.default_params || {}), ...(oldKeyframe?.data.params || {}) },
+        "9:16"
+      );
+      const keyframe = storyNodeNeedsReset(
+        oldKeyframe || {
+          id: newNodeID(),
+          type: "generator",
+          position: { x: baseX + 800, y: baseY + (index - 1) * gap },
+          data: { label: "", mediaKind: "image", status: "idle" },
+        },
+        {
+          label: t("canvas.viral.keyframeIndexed", { index, count: segmentCount }),
+          mediaKind: "image",
+          modelCode: imageModel?.code || "",
+          params: imageParams,
+          viralGroupID: groupID,
+          viralRole: "keyframe",
+          viralSegmentIndex: index,
+          ...sharedPatch,
+          prompt: t("canvas.viral.keyframePrompt", { index, count: segmentCount }),
+          referenceImageLabel: t("canvas.node.brandMaterial"),
+        }
+      );
+      keyframe.position = { x: baseX + 800, y: baseY + (index - 1) * gap };
+      keyframes.push(keyframe);
+
+      const oldVideo = existingVideos.get(index);
+      const videoModel = videoModels.find((model) => model.code === oldVideo?.data.modelCode) || selectedVideoModel;
+      const videoParams = aspectRatioParams(
+        videoModel,
+        normalizeCanvasParamsForModel(
+          {
+            ...canvasModelDefaults("video", videoModel),
+            ...(oldVideo?.data.params || {}),
+            duration: segmentDuration,
+          },
+          videoModel?.input_schema,
+          videoModel?.default_params
+        ),
+        "9:16"
+      );
+      const video = storyNodeNeedsReset(
+        oldVideo || {
+          id: newNodeID(),
+          type: "generator",
+          position: { x: baseX + 1200, y: baseY + (index - 1) * gap },
+          data: { label: "", mediaKind: "video", status: "idle" },
+        },
+        {
+          label: t("canvas.viral.videoIndexed", { index, count: segmentCount }),
+          mediaKind: "video",
+          modelCode: videoModel?.code || "",
+          params: videoParams,
+          viralGroupID: groupID,
+          viralRole: "video",
+          viralSegmentIndex: index,
+          ...sharedPatch,
+          prompt: t("canvas.viral.videoPrompt", { index, count: segmentCount, duration: segmentDuration }),
+          referenceImageLabel: t("canvas.node.avatarAndFirstFrame"),
+        }
+      );
+      video.position = { x: baseX + 1200, y: baseY + (index - 1) * gap };
+      videos.push(video);
+    }
+
+    const groupNodeIDs = new Set(groupNodes.map((node) => node.id));
+    const preservedGroupIDs = new Set([
+      resetBrief.id,
+      resetReference.id,
+      resetBrand.id,
+      resetAnalysis.id,
+      resetFinal.id,
+      ...keyframes.map((node) => node.id),
+      ...videos.map((node) => node.id),
+    ]);
+    const unrelatedNodes = nodesRef.current.filter((node) => node.data.viralGroupID !== groupID);
+    const retainedExternalEdges = edgesRef.current.filter((edge) => {
+      const sourceInGroup = groupNodeIDs.has(edge.source);
+      const targetInGroup = groupNodeIDs.has(edge.target);
+      if (sourceInGroup && targetInGroup) return false;
+      if (sourceInGroup && !preservedGroupIDs.has(edge.source)) return false;
+      if (targetInGroup && !preservedGroupIDs.has(edge.target)) return false;
+      return true;
+    });
+    const connectViral = (source: CanvasNode, target: CanvasNode): CanvasEdge => ({
+      id: `edge_${crypto.randomUUID()}`,
+      source: source.id,
+      target: target.id,
+      type: "smoothstep",
+      animated: true,
+      style: { stroke: "#f97316", strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: "#f97316" },
+    });
+    const internalEdges: CanvasEdge[] = [
+      connectViral(resetBrief, resetAnalysis),
+      connectViral(resetReference, resetAnalysis),
+      connectViral(resetBrand, resetAnalysis),
+    ];
+    keyframes.forEach((keyframe, index) => {
+      internalEdges.push(connectViral(resetAnalysis, keyframe));
+      internalEdges.push(connectViral(resetBrand, keyframe));
+      if (index > 0) internalEdges.push(connectViral(keyframes[index - 1], keyframe));
+      internalEdges.push(connectViral(resetAnalysis, videos[index]));
+      internalEdges.push(connectViral(keyframe, videos[index]));
+      internalEdges.push(connectViral(videos[index], resetFinal));
+    });
+    nodesRef.current = [
+      ...unrelatedNodes,
+      resetBrief,
+      resetReference,
+      resetBrand,
+      resetAnalysis,
+      ...keyframes,
+      ...videos,
+      resetFinal,
+    ];
+    edgesRef.current = [...retainedExternalEdges, ...internalEdges];
+    setNodes(nodesRef.current);
+    setEdges(edgesRef.current);
+    setNotice(t("canvas.viral.structureUpdated", {
+      count: segmentCount,
+      duration: segmentDuration,
+      total: segmentCount * segmentDuration,
+    }));
+  }, [imageModels, setEdges, setNodes, t, videoModels]);
+
   const openOutputMenu = useCallback((sourceID: string, point: { x: number; y: number }) => {
     const bounds = editorRef.current?.getBoundingClientRect();
     if (!bounds) return;
@@ -2332,8 +3076,10 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       openAssetLibrary,
       openOutputMenu,
       openResultPreview: setResultPreview,
+      configureStory,
+      configureViral,
     }),
-    [audioModels, chatModels, imageModels, openAssetLibrary, openOutputMenu, remove, runFrom, runOnly, update, upload, uploadReference, videoModels]
+    [audioModels, chatModels, configureStory, configureViral, imageModels, openAssetLibrary, openOutputMenu, remove, runFrom, runOnly, update, upload, uploadReference, videoModels]
   );
 
   const onConnect = useCallback((connection: Connection) => {
@@ -2511,6 +3257,8 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     });
     let nextNodes: CanvasNode[] = [];
     let nextEdges: CanvasEdge[] = [];
+    let storyBootstrap: { inputID: string; segmentCount: number; segmentDuration: number } | null = null;
+    let viralBootstrap: { inputID: string; segmentCount: number; segmentDuration: number } | null = null;
     const connect = (source: CanvasNode, target: CanvasNode): CanvasEdge => ({
       id: `edge_${crypto.randomUUID()}`,
       source: source.id,
@@ -2582,36 +3330,145 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       nextNodes = [textNode, restoreNode];
       nextEdges = [connect(textNode, restoreNode)];
     } else if (templateID === "story-short-video") {
+      const storyGroupID = `story_${crypto.randomUUID()}`;
+      const storyVideoModel = preferredVideoModel(videoModels);
+      const durationOptions = storyDurationOptions(storyVideoModel);
+      const segmentDuration = preferredStoryDuration(storyVideoModel);
+      const segmentCount = 4;
       const textNode = text();
+      textNode.data = {
+        ...textNode.data,
+        storyGroupID,
+        storyRole: "input",
+        storySegmentCount: segmentCount,
+        storySegmentDuration: segmentDuration,
+        storyDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
+      };
       const scriptNode = generator("text", 0, t("canvas.node.storyScript"));
-      const keyframeNode = generator("image", 0, t("canvas.node.storyKeyframe"), 2);
-      const narrationNode = generator("audio", 300, t("canvas.node.storyNarration"), 2);
-      const videoNode = generator("video", 0, t("canvas.node.storyVideo"), 3);
+      scriptNode.data = {
+        ...scriptNode.data,
+        storyGroupID,
+        storyRole: "script",
+        storySegmentCount: segmentCount,
+        storySegmentDuration: segmentDuration,
+        prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration }),
+      };
+      const narrationTextNode = generator("text", 300, t("canvas.node.storyNarrationText"), 2);
+      narrationTextNode.data = {
+        ...narrationTextNode.data,
+        storyGroupID,
+        storyRole: "narrationText",
+        storySegmentCount: segmentCount,
+        storySegmentDuration: segmentDuration,
+        prompt: t("canvas.story.narrationTextPrompt", {
+          count: segmentCount,
+          duration: segmentDuration,
+          total: segmentCount * segmentDuration,
+        }),
+      };
+      const narrationNode = generator("audio", 300, t("canvas.node.storyNarration"), 3);
+      const narrationModel = preferredNarrationAudioModel(audioModels);
+      narrationNode.data = {
+        ...narrationNode.data,
+        modelCode: narrationModel?.code || "",
+        params: canvasModelDefaults("audio", narrationModel),
+        storyGroupID,
+        storyRole: "narration",
+        storySegmentCount: segmentCount,
+        storySegmentDuration: segmentDuration,
+        prompt: "",
+      };
       const finalNode = { ...compositor(100, t("canvas.node.storyFinalVideo")), position: { x: originX + 1720, y: originY + 100 } };
-      nextNodes = [textNode, scriptNode, keyframeNode, narrationNode, videoNode, finalNode];
+      finalNode.data = {
+        ...finalNode.data,
+        storyGroupID,
+        storyRole: "final",
+        storySegmentCount: segmentCount,
+        storySegmentDuration: segmentDuration,
+        composeMode: "auto",
+      };
+      nextNodes = [textNode, scriptNode, narrationTextNode, narrationNode, finalNode];
       nextEdges = [
         connect(textNode, scriptNode),
-        connect(scriptNode, keyframeNode),
-        connect(scriptNode, narrationNode),
-        connect(keyframeNode, videoNode),
-        connect(videoNode, finalNode),
+        connect(scriptNode, narrationTextNode),
+        connect(narrationTextNode, narrationNode),
         connect(narrationNode, finalNode),
       ];
+      storyBootstrap = { inputID: textNode.id, segmentCount, segmentDuration };
     } else if (templateID === "viral-remake") {
-      const briefNode = text(t("canvas.node.viralRemakePrompt"), t("canvas.node.viralRemakeBrief"));
+      const viralGroupID = `viral_${crypto.randomUUID()}`;
+      const viralVideoModel = preferredVideoModel(videoModels);
+      const durationOptions = storyDurationOptions(viralVideoModel);
+      const configuredCount = Number(workspaceRuntime.default_segment_count || 3);
+      const segmentCount = VIRAL_SEGMENT_COUNT_OPTIONS.includes(configuredCount as (typeof VIRAL_SEGMENT_COUNT_OPTIONS)[number])
+        ? configuredCount
+        : 3;
+      const configuredDuration = Number(workspaceRuntime.default_segment_duration || 0);
+      const segmentDuration = durationOptions.includes(configuredDuration)
+        ? configuredDuration
+        : preferredStoryDuration(viralVideoModel);
+      const briefNode = text(t("canvas.viral.defaultBrief"), t("canvas.node.viralRemakeBrief"));
+      briefNode.data = {
+        ...briefNode.data,
+        viralGroupID,
+        viralRole: "brief",
+        viralSegmentCount: segmentCount,
+        viralSegmentDuration: segmentDuration,
+        viralDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
+      };
+      const referenceNode: CanvasNode = {
+        id: newNodeID(),
+        type: "imageInput",
+        position: { x: originX, y: originY + 330 },
+        data: {
+          label: t("canvas.node.viralReference"),
+          prompt: t("canvas.viral.referenceNote"),
+          mediaKind: "video",
+          viralGroupID,
+          viralRole: "reference",
+        },
+      };
+      const brandNode: CanvasNode = {
+        id: newNodeID(),
+        type: "imageInput",
+        position: { x: originX, y: originY + 660 },
+        data: {
+          label: t("canvas.node.brandMaterial"),
+          prompt: t("canvas.viral.brandNote"),
+          mediaKind: "image",
+          viralGroupID,
+          viralRole: "brand",
+        },
+      };
       const analysisNode = generator("text", 0, t("canvas.node.viralAnalysis"));
-      const remakeImage = generator("image", 0, t("canvas.node.viralRemakeImage"), 2);
-      remakeImage.data.referenceImageLabel = t("canvas.node.viralAndBrandReferences");
-      remakeImage.data.ratio = "9:16";
-      const remakeVideo = generator("video", 0, t("canvas.node.viralRemakeVideo"), 3);
-      remakeVideo.data.referenceImageLabel = t("canvas.node.avatarAndFirstFrame");
-      remakeVideo.data.ratio = "9:16";
-      nextNodes = [briefNode, analysisNode, remakeImage, remakeVideo];
+      const analysisModel = preferredMultimodalChatModel(chatModels);
+      analysisNode.data = {
+        ...analysisNode.data,
+        modelCode: analysisModel?.code || "",
+        params: canvasModelDefaults("text", analysisModel),
+        viralGroupID,
+        viralRole: "analysis",
+        viralSegmentCount: segmentCount,
+        viralSegmentDuration: segmentDuration,
+        prompt: t("canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
+      };
+      const finalNode = compositor(100, t("canvas.viral.finalVideo"));
+      finalNode.data = {
+        ...finalNode.data,
+        viralGroupID,
+        viralRole: "final",
+        viralSegmentCount: segmentCount,
+        viralSegmentDuration: segmentDuration,
+        composeMode: "concat",
+        outputSize: "keep",
+      };
+      nextNodes = [briefNode, referenceNode, brandNode, analysisNode, finalNode];
       nextEdges = [
         connect(briefNode, analysisNode),
-        connect(analysisNode, remakeImage),
-        connect(remakeImage, remakeVideo),
+        connect(referenceNode, analysisNode),
+        connect(brandNode, analysisNode),
       ];
+      viralBootstrap = { inputID: briefNode.id, segmentCount, segmentDuration };
     } else if (templateID === "multi-image") {
       const textNode = text(t("canvas.template.multiImagePrompt"));
       const outputA = generator("image", 0, t("canvas.node.imageOptionA"));
@@ -2627,8 +3484,32 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     setNodes(nodesRef.current);
     setEdges(edgesRef.current);
     setShowEmptyWelcome(false);
+    if (storyBootstrap) {
+      const { inputID, segmentCount, segmentDuration } = storyBootstrap;
+      window.setTimeout(() => configureStory(inputID, segmentCount, segmentDuration), 0);
+    }
+    if (viralBootstrap) {
+      const { inputID, segmentCount, segmentDuration } = viralBootstrap;
+      window.setTimeout(() => configureViral(inputID, segmentCount, segmentDuration), 0);
+    }
     window.setTimeout(() => void setViewport({ x: Math.min(0, 180 - originX), y: 80, zoom: 1 }, { duration: 350 }), 50);
-  }, [audioModels, chatModels, imageModels, setEdges, setNodes, setViewport, t, videoModels]);
+  }, [audioModels, chatModels, configureStory, configureViral, imageModels, setEdges, setNodes, setViewport, t, videoModels, workspaceRuntime]);
+
+  const bootstrapInitialTemplate = useCallback(() => {
+    if (!initialTemplateID) return;
+    const definition = ALL_TEMPLATE_DEFINITIONS.find((item) => item.id === initialTemplateID);
+    const flowName = definition ? t(definition.titleKey) : initialTemplateID;
+    workflowNameRef.current = flowName;
+    titleManuallyEditedRef.current = false;
+    setTitle(flowName);
+    appendTemplate(initialTemplateID, flowName);
+  }, [appendTemplate, initialTemplateID, t]);
+
+  useEffect(() => {
+    if (!initialTemplateID || !modelCatalogReady || !workspaceConfigReady || initialTemplateAppliedRef.current) return;
+    initialTemplateAppliedRef.current = true;
+    bootstrapInitialTemplate();
+  }, [bootstrapInitialTemplate, initialTemplateID, modelCatalogReady, workspaceConfigReady]);
 
   const availableTemplates = useMemo<CanvasTemplate[]>(() => {
     if (managedTemplates.length) {
@@ -2683,7 +3564,10 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     setShowEmptyWelcome(showWelcome);
   }, [locale, setEdges, setNodes, setViewport, t]);
 
-  const newCanvas = useCallback(() => resetCanvas(true), [resetCanvas]);
+  const newCanvas = useCallback(() => {
+    resetCanvas(true);
+    if (initialTemplateID) window.setTimeout(bootstrapInitialTemplate, 0);
+  }, [bootstrapInitialTemplate, initialTemplateID, resetCanvas]);
   const newBlankCanvas = useCallback(() => resetCanvas(false), [resetCanvas]);
 
   const documentSnapshot = useCallback((): CanvasDocument => ({
@@ -2708,6 +3592,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
         const previous = existing.find((item) => item.public_id === publicID);
         const item: CanvasDetail = {
           public_id: publicID,
+          workflow_code: workflowCode,
           title: effectiveTitle || t("canvas.untitled"),
           document: documentSnapshot(),
           created_at: previous?.created_at || now,
@@ -2722,7 +3607,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
       const serverCanvasID = canvasID && !canvasID.startsWith("local_") ? canvasID : "";
       const item = await api<CanvasDetail>(serverCanvasID ? `/api/canvases/${serverCanvasID}` : "/api/canvases", {
         method: serverCanvasID ? "PUT" : "POST",
-        body: JSON.stringify({ title: effectiveTitle || t("canvas.untitled"), document: documentSnapshot() }),
+        body: JSON.stringify({ workflow_code: workflowCode, title: effectiveTitle || t("canvas.untitled"), document: documentSnapshot() }),
       });
       setCanvasID(item.public_id);
       setTitle(item.title);
@@ -2733,7 +3618,7 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
     } finally {
       setSaving(false);
     }
-  }, [authenticated, canvasID, documentSnapshot, refreshHistory, t, title]);
+  }, [authenticated, canvasID, documentSnapshot, refreshHistory, t, title, workflowCode]);
 
   const loadCanvas = useCallback(async (id: string) => {
     try {
@@ -3335,10 +4220,18 @@ function CanvasEditor({ authenticated }: { authenticated: boolean }) {
   );
 }
 
-export function InfiniteCanvasWorkspace({ authenticated = false }: { authenticated?: boolean }) {
+export function InfiniteCanvasWorkspace({
+  authenticated = false,
+  workflowCode = "infinite_canvas",
+  initialTemplateID = "",
+}: {
+  authenticated?: boolean;
+  workflowCode?: string;
+  initialTemplateID?: string;
+}) {
   return (
     <ReactFlowProvider>
-      <CanvasEditor authenticated={authenticated} />
+      <CanvasEditor authenticated={authenticated} workflowCode={workflowCode} initialTemplateID={initialTemplateID} />
     </ReactFlowProvider>
   );
 }

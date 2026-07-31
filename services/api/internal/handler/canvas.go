@@ -27,7 +27,7 @@ func (h *Handler) CreateCanvas(c *gin.Context) {
 func (h *Handler) ListCanvases(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "30"))
-	items, total, err := h.canvases.List(c.Request.Context(), c.GetInt64("user_id"), page, pageSize)
+	items, total, err := h.canvases.List(c.Request.Context(), c.GetInt64("user_id"), c.DefaultQuery("workflow_code", "infinite_canvas"), page, pageSize)
 	if err != nil {
 		util.InternalError(c, err.Error())
 		return

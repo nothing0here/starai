@@ -44,6 +44,31 @@ func TestEstimateDynamicPriceRuleCostWorkerSeedance2(t *testing.T) {
 	}
 }
 
+func TestEstimateDynamicPriceRuleCostWorkerMiniMaxH3(t *testing.T) {
+	rule := map[string]interface{}{
+		"billing_type":                "dynamic",
+		"strategy":                    "minimax_h3_seconds",
+		"default_resolution":          "2K",
+		"default_input_video_seconds": float64(4),
+		"free_reference_images":       float64(5),
+		"excess_image_price":          float64(0.2),
+		"rates_per_second": map[string]interface{}{
+			"2k": float64(0.8),
+		},
+	}
+	got := estimatePriceRuleCostWorker(rule, map[string]interface{}{
+		"resolution":                       "2K",
+		"duration":                         float64(5),
+		"reference_videos":                 []interface{}{"https://example.test/input.mp4"},
+		"reference_video_duration_seconds": float64(8),
+		"reference_images":                 []interface{}{"1", "2", "3", "4", "5", "6", "7"},
+	}, 0, 0)
+	want := float64(13)*0.8 + float64(2)*0.2
+	if math.Abs(got-want) > 0.000001 {
+		t.Fatalf("MiniMax-H3 cost = %f, want %f", got, want)
+	}
+}
+
 func TestApplyAgentModelDefaultsInfersSeedanceMode(t *testing.T) {
 	input := map[string]interface{}{"reference_images": []string{"https://example.test/frame.png"}}
 	defaults := map[string]interface{}{"resolution": "720p", "generation_mode": "text"}

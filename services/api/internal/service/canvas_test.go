@@ -22,6 +22,21 @@ func TestValidateCanvasInput(t *testing.T) {
 	if valid.Title != "商品图流程" {
 		t.Fatalf("expected trimmed title, got %q", valid.Title)
 	}
+	if valid.WorkflowCode != "infinite_canvas" {
+		t.Fatalf("expected default workflow code, got %q", valid.WorkflowCode)
+	}
+
+	viral := valid
+	viral.WorkflowCode = "viral_remake"
+	if err := validateCanvasInput(&viral); err != nil {
+		t.Fatalf("expected viral remake canvas to be valid, got %v", err)
+	}
+
+	invalidWorkflow := valid
+	invalidWorkflow.WorkflowCode = "../viral"
+	if err := validateCanvasInput(&invalidWorkflow); err == nil {
+		t.Fatal("expected invalid workflow code error")
+	}
 
 	invalidJSON := SaveCanvasInput{Document: json.RawMessage(`{"nodes":`)}
 	if err := validateCanvasInput(&invalidJSON); err == nil {

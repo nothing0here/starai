@@ -148,6 +148,26 @@ func TestJoinBaseEndpointNormalizesMissingSlash(t *testing.T) {
 	}
 }
 
+func TestUnwrapUpstreamBodySupportsNestedTask(t *testing.T) {
+	got := unwrapUpstreamBody(map[string]interface{}{
+		"request_id": "req-1",
+		"task": map[string]interface{}{
+			"id":     "task-1",
+			"status": "succeeded",
+			"content": map[string]interface{}{
+				"url": "https://example.com/result.mp4",
+			},
+		},
+	})
+	if got["status"] != "succeeded" || got["id"] != "task-1" {
+		t.Fatalf("nested task was not unwrapped: %#v", got)
+	}
+	items := extractMediaItems(got)
+	if len(items) != 1 || items[0].URL != "https://example.com/result.mp4" {
+		t.Fatalf("nested task media not extracted: %#v", items)
+	}
+}
+
 func TestUpstreamRequestTimeoutSupportsAudioAndOverride(t *testing.T) {
 	if got := upstreamRequestTimeout(nil, true); got != 15*time.Minute {
 		t.Fatalf("audio timeout = %s", got)
@@ -228,8 +248,16 @@ func TestUpstreamErrorMessageHumanizesUnsafePrompt(t *testing.T) {
 	body := []byte(`{"code":"upstream_error","message":"The provided prompt is considered unsafe and it cannot be used to generate content."}`)
 
 	got := upstreamErrorMessage(body)
-	if got != "生成内容未通过安全审核，请修改提示词或参考图后重试" {
+	if got != "生成内容未通过上游安全审核，请修改提示词或参考素材后重试（避免武器、暴力、敏感人物、侵权或受限内容）" {
 		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestHumanizeUpstreamFailureHandlesAsyncModerationBlock(t *testing.T) {
+	got := humanizeUpstreamFailure("content blocked by moderation")
+	want := "生成内容未通过上游安全审核，请修改提示词或参考素材后重试（避免武器、暴力、敏感人物、侵权或受限内容）"
+	if got != want {
+		t.Fatalf("message = %q, want %q", got, want)
 	}
 }
 

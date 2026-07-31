@@ -1,14 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2, Sparkles, Trash2, Video, X } from "lucide-react";
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
-type GenerationType = "image" | "video" | "comic_drama";
+type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "infinite_canvas";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
   system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
@@ -35,6 +36,24 @@ type RuntimeConfig = {
   orientation?: string;
   quality?: string;
   output_mode?: string;
+  supported_resolutions?: string[];
+  default_target_resolution?: string;
+  preserve_audio?: boolean;
+  default_enhancement_mode?: string;
+  max_input_duration_sec?: number;
+  max_input_size_mb?: number;
+  upscale_operation?: string;
+  upscale_prompt?: string;
+  default_style_strength?: number;
+  preserve_motion?: boolean;
+  preserve_identity?: boolean;
+  redraw_operation?: string;
+  redraw_prompt?: string;
+  default_subtitle_mode?: string;
+  default_subtitle_region?: string;
+  protect_watermark?: boolean;
+  subtitle_remove_operation?: string;
+  subtitle_remove_prompt?: string;
 };
 type Workflow = {
   code: string;
@@ -85,6 +104,24 @@ type FormState = {
   logic_score: number;
   orientation: string;
   quality: string;
+  supported_resolutions: string[];
+  default_target_resolution: string;
+  preserve_audio: boolean;
+  default_enhancement_mode: string;
+  max_input_duration_sec: number;
+  max_input_size_mb: number;
+  upscale_operation: string;
+  upscale_prompt: string;
+  default_style_strength: number;
+  preserve_motion: boolean;
+  preserve_identity: boolean;
+  redraw_operation: string;
+  redraw_prompt: string;
+  default_subtitle_mode: string;
+  default_subtitle_region: string;
+  protect_watermark: boolean;
+  subtitle_remove_operation: string;
+  subtitle_remove_prompt: string;
   require_image: boolean;
   allow_text_only: boolean;
   support_reference_image: boolean;
@@ -153,6 +190,42 @@ const TYPE_PRESETS = {
     featureTags: ["商品视频", "图生视频", "运镜", "短视频素材"],
     defaults: { require_image: true, allow_text_only: false, support_reference_image: true, support_multiple_references: true, support_first_last_frame: true },
   },
+  video_upscale: {
+    label: "一键视频高清",
+    icon: "✨",
+    theme: "cyan",
+    description: "上传低清视频，通过 AI 超分增强输出 720P、1K 或 2K 高清视频。",
+    placeholder: "可选：补充降噪、人物细节或画面增强要求",
+    help: "上传源视频或从资产库选择视频，选择目标清晰度后运行。系统会保留原始内容、时长和构图，并按后台配置的超分模型实际计费。",
+    imageLabel: "源视频",
+    heroTags: ["AI超分", "视频高清", "画质增强"],
+    featureTags: ["720P", "1K", "2K", "保留原音"],
+    defaults: { require_image: false, allow_text_only: false, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
+  },
+  video_redraw: {
+    label: "一键转绘",
+    icon: "🪄",
+    theme: "violet",
+    description: "上传视频并选择目标画风，通过视频转视频模型保持动作与人物一致性完成风格转绘。",
+    placeholder: "描述目标画风，例如：日系动漫、厚涂插画、赛博朋克电影感",
+    help: "上传源视频，可补充风格参考图和画风描述。系统调用后台指定的视频转视频模型，按模型实际费用结算。",
+    imageLabel: "源视频",
+    heroTags: ["视频转绘", "风格迁移", "动作保持"],
+    featureTags: ["人物一致", "运动一致", "风格参考", "保留原音"],
+    defaults: { require_image: false, allow_text_only: false, support_reference_image: true, support_multiple_references: false, support_first_last_frame: false },
+  },
+  subtitle_remove: {
+    label: "一键去字幕",
+    icon: "🧹",
+    theme: "emerald",
+    description: "自动识别独立字幕轨或烧录硬字幕，并输出清理后的完整视频。",
+    placeholder: "可选：说明字幕位置、需要保护的水印或画面区域",
+    help: "自动模式优先无损移除独立字幕轨；没有字幕轨时调用后台配置的 AI 修复模型清除画面硬字幕。",
+    imageLabel: "源视频",
+    heroTags: ["自动识别", "软字幕无损", "硬字幕修复"],
+    featureTags: ["字幕区域", "保护水印", "保留原音", "结果预览"],
+    defaults: { require_image: false, allow_text_only: false, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
+  },
   comic_drama: {
     label: "AI漫剧",
     icon: "🎨",
@@ -167,9 +240,10 @@ const TYPE_PRESETS = {
   },
 } as const;
 
-const defaultScenes = (type: GenerationType) => (type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
-const sceneDefs = (type: GenerationType) => (type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
-const presetCode = (type: GenerationType) => (type === "comic_drama" ? "ai_comic_drama" : type === "video" ? "ecommerce_video" : "ecommerce_image");
+const isVideoUtilityType = (type: GenerationType) => ["video_upscale", "video_redraw", "subtitle_remove"].includes(type);
+const defaultScenes = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
+const sceneDefs = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
+const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "video" ? "ecommerce_video" : "ecommerce_image");
 const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
   { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
@@ -182,11 +256,20 @@ const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "product-showcase-video", name: "商品展示视频", description: "商品图先生成关键视觉，再延展为展示视频", template_id: "product-showcase-video" },
   { id: "brand-visual-kit", name: "品牌视觉套件", description: "品牌需求并行生成标志创意和视觉海报", template_id: "brand-visual-kit" },
   { id: "photo-restoration", name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图", template_id: "photo-restoration" },
-  { id: "story-short-video", name: "故事短视频", description: "故事脚本先生成关键帧，再生成短视频", template_id: "story-short-video" },
-  { id: "viral-remake", name: "爆款复刻", description: "爆款参考与品牌素材生成复刻主视觉并延展为短视频", template_id: "viral-remake" },
+  { id: "story-short-video", name: "故事短视频", description: "故事拆分为多关键帧、多视频片段并合成为完整成片", template_id: "story-short-video" },
+  { id: "viral-remake", name: "爆款复刻", description: "多模态拆解爆款参考，生成多关键帧、多片段并合成为原创短视频", template_id: "viral-remake" },
 ];
 
 const defaultNodes = (analysis = "", generation = "", type: GenerationType = "image", imageModel = "", videoModel = ""): WorkflowNode[] => {
+  if (type === "video_upscale") {
+    return [{ id: "upscale", type: "video", name: "AI 视频高清", model_code: generation, prompt_template: "", cost: 0 }];
+  }
+  if (type === "video_redraw") {
+    return [{ id: "redraw", type: "video", name: "AI 视频转绘", model_code: generation, prompt_template: "", cost: 0 }];
+  }
+  if (type === "subtitle_remove") {
+    return [{ id: "subtitle_remove", type: "video", name: "AI 视频去字幕", model_code: generation, prompt_template: "", cost: 0 }];
+  }
   if (type === "comic_drama") {
     return [
       { id: "comic_plan", type: "llm", name: "AI漫剧规划", model_code: analysis, prompt_template: "", cost: 0 },
@@ -201,7 +284,36 @@ const defaultNodes = (analysis = "", generation = "", type: GenerationType = "im
   ];
 };
 
-const defaultSchema = (count = 1) => ({
+const defaultSchema = (count = 1, type: GenerationType = "image", form?: FormState) => type === "video_upscale" ? ({
+  type: "object",
+  required: ["video_url", "target_resolution"],
+  properties: {
+    video_url: { type: "string", title: "源视频" },
+    target_resolution: { type: "string", title: "目标清晰度", enum: form?.supported_resolutions || ["720P", "1K", "2K"], default: form?.default_target_resolution || "720P" },
+    preserve_audio: { type: "boolean", title: "保留原音", default: form?.preserve_audio !== false },
+    enhancement_mode: { type: "string", title: "增强模式", enum: ["balanced", "detail", "denoise"], default: form?.default_enhancement_mode || "balanced" },
+  },
+}) : type === "video_redraw" ? ({
+  type: "object",
+  required: ["video_url"],
+  properties: {
+    video_url: { type: "string", title: "源视频" },
+    prompt: { type: "string", title: "转绘要求" },
+    style_strength: { type: "number", title: "风格强度", minimum: 0, maximum: 1, default: form?.default_style_strength ?? 0.65 },
+    preserve_motion: { type: "boolean", title: "保留动作", default: form?.preserve_motion !== false },
+    preserve_identity: { type: "boolean", title: "保留人物身份", default: form?.preserve_identity !== false },
+    preserve_audio: { type: "boolean", title: "保留原音", default: form?.preserve_audio !== false },
+  },
+}) : type === "subtitle_remove" ? ({
+  type: "object",
+  required: ["video_url"],
+  properties: {
+    video_url: { type: "string", title: "源视频" },
+    subtitle_mode: { type: "string", title: "字幕类型", enum: ["auto", "soft_track", "hardcoded_ai"], default: form?.default_subtitle_mode || "auto" },
+    subtitle_region: { type: "string", title: "字幕区域", enum: ["bottom_15", "bottom_25", "bottom_35", "full"], default: form?.default_subtitle_region || "bottom_25" },
+    protect_watermark: { type: "boolean", title: "保护水印", default: form?.protect_watermark !== false },
+  },
+}) : ({
   type: "object",
   properties: {
     prompt: { type: "string", title: "需求描述", placeholder: "简单描述你想要的效果" },
@@ -211,7 +323,25 @@ const defaultSchema = (count = 1) => ({
 
 function displayConfig(form: FormState) {
   const preset = TYPE_PRESETS[form.generation_type];
-  const steps = form.generation_type === "comic_drama"
+  const steps = form.generation_type === "video_upscale"
+    ? [
+        { icon: "🎬", title: "上传源视频", subtitle: "上传文件或从资产库引用已有视频", tags: ["格式校验", "时长检查"] },
+        { icon: "✨", title: "AI 超分增强", subtitle: "降噪、去压缩瑕疵并恢复自然细节", tags: ["模型计费", "实时进度"] },
+        { icon: "📥", title: "高清结果", subtitle: "在线预览并下载高清成片", tags: ["720P", "1K", "2K"] },
+      ]
+    : form.generation_type === "video_redraw"
+    ? [
+        { icon: "🎬", title: "导入源视频", subtitle: "上传视频并校验格式、时长和文件大小", tags: ["资产库", "安全校验"] },
+        { icon: "🎨", title: "风格转绘", subtitle: "保留动作与人物一致性，重绘画面风格", tags: ["参考图", "强度可调"] },
+        { icon: "📥", title: "转绘成片", subtitle: "在线预览、下载并自动保存到作品", tags: ["真实计费", "失败可追踪"] },
+      ]
+    : form.generation_type === "subtitle_remove"
+    ? [
+        { icon: "🔎", title: "识别字幕类型", subtitle: "自动区分独立字幕轨和画面硬字幕", tags: ["本地检测", "不误删水印"] },
+        { icon: "🧹", title: "移除与修复", subtitle: "字幕轨无损移除，硬字幕调用 AI 修复", tags: ["区域可选", "自动回退"] },
+        { icon: "📥", title: "无字幕成片", subtitle: "保留原始音视频并输出可下载结果", tags: ["实际路径提示", "费用透明"] },
+      ]
+    : form.generation_type === "comic_drama"
     ? [
         { icon: "📝", title: "剧本与资产规划", subtitle: "生成剧本、角色、道具、场景和分镜", tags: ["主备模型", "资产引用"] },
         { icon: "🖼️", title: "关键帧生成", subtitle: "按分镜生成角色与画风一致的关键帧", tags: ["角色一致", "失败重试"] },
@@ -234,6 +364,63 @@ function displayConfig(form: FormState) {
 }
 
 function runtimeConfig(form: FormState): RuntimeConfig {
+  if (form.generation_type === "video_upscale") {
+    return {
+      agent_mode: "video_upscale",
+      generation_model_code: form.generation_model_code,
+      generation_type: "video",
+      preset_code: "video_upscale",
+      default_count: 1,
+      supported_resolutions: form.supported_resolutions,
+      default_target_resolution: form.default_target_resolution,
+      preserve_audio: form.preserve_audio,
+      default_enhancement_mode: form.default_enhancement_mode,
+      max_input_duration_sec: form.max_input_duration_sec,
+      max_input_size_mb: form.max_input_size_mb,
+      upscale_operation: form.upscale_operation || "upscale",
+      upscale_prompt: form.upscale_prompt,
+      input_capabilities: { allow_text_only: false, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
+      flow_options: { enable_step_confirm: false, enable_autopilot: true, allow_prompt_edit: true },
+    };
+  }
+  if (form.generation_type === "video_redraw") {
+    return {
+      agent_mode: "video_redraw",
+      generation_model_code: form.generation_model_code,
+      generation_type: "video",
+      preset_code: "video_redraw",
+      default_count: 1,
+      default_style_strength: form.default_style_strength,
+      preserve_motion: form.preserve_motion,
+      preserve_identity: form.preserve_identity,
+      preserve_audio: form.preserve_audio,
+      max_input_duration_sec: form.max_input_duration_sec,
+      max_input_size_mb: form.max_input_size_mb,
+      redraw_operation: form.redraw_operation || "video_redraw",
+      redraw_prompt: form.redraw_prompt,
+      input_capabilities: { allow_text_only: false, support_reference_image: true, support_multiple_references: false, support_first_last_frame: false },
+      flow_options: { enable_step_confirm: false, enable_autopilot: true, allow_prompt_edit: true },
+    };
+  }
+  if (form.generation_type === "subtitle_remove") {
+    return {
+      agent_mode: "subtitle_remove",
+      generation_model_code: form.generation_model_code,
+      generation_type: "video",
+      preset_code: "subtitle_remove",
+      default_count: 1,
+      default_subtitle_mode: form.default_subtitle_mode,
+      default_subtitle_region: form.default_subtitle_region,
+      protect_watermark: form.protect_watermark,
+      preserve_audio: form.preserve_audio,
+      max_input_duration_sec: form.max_input_duration_sec,
+      max_input_size_mb: form.max_input_size_mb,
+      subtitle_remove_operation: form.subtitle_remove_operation || "subtitle_remove",
+      subtitle_remove_prompt: form.subtitle_remove_prompt,
+      input_capabilities: { allow_text_only: false, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
+      flow_options: { enable_step_confirm: false, enable_autopilot: true, allow_prompt_edit: true },
+    };
+  }
   if (form.generation_type === "comic_drama") {
     const dialogue = form.dialogue_model_codes.split(",").map((item) => item.trim()).filter(Boolean);
     return {
@@ -301,7 +488,7 @@ function presetBundle(form: FormState): PresetBundle {
   return {
     display_config: displayConfig(form),
     runtime_config: runtimeConfig(form),
-    input_schema: defaultSchema(form.default_count),
+    input_schema: defaultSchema(form.default_count, form.generation_type, form),
     nodes: defaultNodes(
       form.analysis_model_code,
       form.generation_model_code,
@@ -344,6 +531,24 @@ function makeEmptyForm(): FormState {
     logic_score: 50,
     orientation: "landscape",
     quality: "480P",
+    supported_resolutions: ["720P", "1K", "2K"],
+    default_target_resolution: "720P",
+    preserve_audio: true,
+    default_enhancement_mode: "balanced",
+    max_input_duration_sec: 300,
+    max_input_size_mb: 500,
+    upscale_operation: "upscale",
+    upscale_prompt: "Enhance the source video to the requested resolution. Preserve the original content, timing, composition, identity, motion and audio. Reduce compression artifacts and noise, recover natural detail, and avoid changing the scene.",
+    default_style_strength: 0.65,
+    preserve_motion: true,
+    preserve_identity: true,
+    redraw_operation: "video_redraw",
+    redraw_prompt: "Redraw the source video in the requested visual style while preserving timing, motion, composition, subject identity and scene continuity. Avoid flicker and temporal inconsistency.",
+    default_subtitle_mode: "auto",
+    default_subtitle_region: "bottom_25",
+    protect_watermark: true,
+    subtitle_remove_operation: "subtitle_remove",
+    subtitle_remove_prompt: "Remove burned-in subtitles from the selected region and naturally reconstruct the background. Preserve people, products, logos, watermarks outside the subtitle region, motion, timing and audio.",
     ...preset.defaults,
     enable_step_confirm: true,
     enable_autopilot: true,
@@ -359,6 +564,7 @@ function makeEmptyForm(): FormState {
 }
 
 function normalizeScenes(items: unknown, type: GenerationType): string[] {
+  if (isVideoUtilityType(type)) return [];
   const fallback = type === "video" ? "product_video" : "main_image";
   const allowed = new Set(sceneDefs(type).map((item) => item.code));
   const raw = Array.isArray(items) ? items.map(String) : [];
@@ -372,6 +578,9 @@ function readBool(map: Record<string, any> | undefined, key: string, fallback: b
 }
 
 function typeFromRuntime(runtime: RuntimeConfig, category: string): GenerationType {
+  if (runtime.agent_mode === "video_upscale" || runtime.preset_code === "video_upscale") return "video_upscale";
+  if (runtime.agent_mode === "video_redraw" || runtime.preset_code === "video_redraw") return "video_redraw";
+  if (runtime.agent_mode === "subtitle_remove" || runtime.preset_code === "subtitle_remove") return "subtitle_remove";
   if (runtime.agent_mode === "comic_drama" || runtime.preset_code === "ai_comic_drama") return "comic_drama";
   if (runtime.generation_type === "video" || category === "video" || runtime.preset_code === "product_showcase_video" || runtime.preset_code === "image_to_video") return "video";
   return "image";
@@ -411,7 +620,7 @@ export default function AgentsAdminPage() {
     }),
     [models]
   );
-  const generationModels = form.generation_type === "video" ? videoModels : imageModels;
+  const generationModels = form.generation_type === "video" || isVideoUtilityType(form.generation_type) ? videoModels : imageModels;
   const activePreset = TYPE_PRESETS[form.generation_type];
   const paginatedItems = useMemo(() => items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [items, page]);
 
@@ -497,6 +706,24 @@ export default function AgentsAdminPage() {
       logic_score: Number(runtime.logic_score || 50),
       orientation: runtime.orientation || "landscape",
       quality: runtime.quality || "480P",
+      supported_resolutions: Array.isArray(runtime.supported_resolutions) && runtime.supported_resolutions.length ? runtime.supported_resolutions : ["720P", "1K", "2K"],
+      default_target_resolution: runtime.default_target_resolution || "720P",
+      preserve_audio: runtime.preserve_audio !== false,
+      default_enhancement_mode: runtime.default_enhancement_mode || "balanced",
+      max_input_duration_sec: Number(runtime.max_input_duration_sec || 300),
+      max_input_size_mb: Number(runtime.max_input_size_mb || 500),
+      upscale_operation: runtime.upscale_operation || "upscale",
+      upscale_prompt: runtime.upscale_prompt || "Enhance the source video to the requested resolution. Preserve the original content, timing, composition, identity, motion and audio. Reduce compression artifacts and noise, recover natural detail, and avoid changing the scene.",
+      default_style_strength: Number(runtime.default_style_strength ?? 0.65),
+      preserve_motion: runtime.preserve_motion !== false,
+      preserve_identity: runtime.preserve_identity !== false,
+      redraw_operation: runtime.redraw_operation || "video_redraw",
+      redraw_prompt: runtime.redraw_prompt || "Redraw the source video in the requested visual style while preserving timing, motion, composition, subject identity and scene continuity. Avoid flicker and temporal inconsistency.",
+      default_subtitle_mode: runtime.default_subtitle_mode || "auto",
+      default_subtitle_region: runtime.default_subtitle_region || "bottom_25",
+      protect_watermark: runtime.protect_watermark !== false,
+      subtitle_remove_operation: runtime.subtitle_remove_operation || "subtitle_remove",
+      subtitle_remove_prompt: runtime.subtitle_remove_prompt || "Remove burned-in subtitles from the selected region and naturally reconstruct the background. Preserve people, products, logos, watermarks outside the subtitle region, motion, timing and audio.",
       require_image: runtime.require_image !== false,
       allow_text_only: readBool(inputCaps, "allow_text_only", preset.defaults.allow_text_only),
       support_reference_image: readBool(inputCaps, "support_reference_image", preset.defaults.support_reference_image),
@@ -532,6 +759,9 @@ export default function AgentsAdminPage() {
     });
     setErr("");
     setShowForm(true);
+    window.setTimeout(() => {
+      document.getElementById(`agent-edit-panel-${w.code}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 0);
   };
 
   const openJson = () => {
@@ -584,7 +814,15 @@ export default function AgentsAdminPage() {
       setErr("当前配音策略需要选择一个对白与旁白配音模型");
       return;
     }
-    if (!form.system_workspace && form.generation_type !== "comic_drama" && (!form.analysis_model_code || !form.generation_model_code)) {
+    if (!form.system_workspace && (form.generation_type === "video_upscale" || form.generation_type === "video_redraw") && !form.generation_model_code) {
+      setErr(form.generation_type === "video_upscale" ? "请选择支持视频转视频/超分的模型" : "请选择支持视频转视频/风格转绘的模型");
+      return;
+    }
+    if (!form.system_workspace && form.generation_type === "subtitle_remove" && form.default_subtitle_mode === "hardcoded_ai" && !form.generation_model_code) {
+      setErr("硬字幕 AI 修复模式必须选择去字幕/视频修复模型");
+      return;
+    }
+    if (!form.system_workspace && form.generation_type !== "comic_drama" && !isVideoUtilityType(form.generation_type) && (!form.analysis_model_code || !form.generation_model_code)) {
       setErr("请选择分析模型和生成模型");
       return;
     }
@@ -609,13 +847,13 @@ export default function AgentsAdminPage() {
       name: form.name.trim(),
       description: form.description.trim(),
       icon: form.icon,
-      category: form.generation_type === "comic_drama" ? "video" : form.generation_type,
+      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : "simple_pipeline",
+      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
-      generation_type: form.generation_type === "comic_drama" ? "video" : form.generation_type,
+      generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
       preset_code: presetCode(form.generation_type),
       require_image: form.require_image,
       default_count: Number(form.default_count) || 1,
@@ -673,7 +911,8 @@ export default function AgentsAdminPage() {
         </button>
       </div>
 
-      {showForm && (
+      {showForm && (() => {
+        const editor = (
         <form onSubmit={submit} className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
             <div>
@@ -688,7 +927,7 @@ export default function AgentsAdminPage() {
               {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />选择智能体类型</div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {(["image", "video", "comic_drama"] as GenerationType[]).map((type) => {
+                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama"] as GenerationType[]).map((type) => {
                     const preset = TYPE_PRESETS[type];
                     const active = form.generation_type === type;
                     return (
@@ -754,9 +993,22 @@ export default function AgentsAdminPage() {
 
               {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
-                <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                {!isVideoUtilityType(form.generation_type) && <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>}
                 {form.generation_type !== "comic_drama" && (
-                  <Field label={form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}><select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}><option value="">请选择生成模型</option>{generationModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                  <Field label={form.generation_type === "video_upscale" ? "视频超分模型" : form.generation_type === "video_redraw" ? "视频转绘模型" : form.generation_type === "subtitle_remove" ? "硬字幕 AI 修复模型（可选）" : form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}>
+                    <select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}>
+                      <option value="">{form.generation_type === "subtitle_remove" ? "不配置（仅支持独立字幕轨）" : "请选择生成模型"}</option>{generationModels.map((m) => {
+                        const rule = m.runtime_rule || {};
+                        const capability = form.generation_type === "video_upscale" ? "video_upscale" : form.generation_type === "video_redraw" ? "video_redraw" : form.generation_type === "subtitle_remove" ? "subtitle_remove" : "";
+                        const pattern = capability === "video_upscale" ? /upscale|super_resolution|video_enhance/i : capability === "video_redraw" ? /video_redraw|video-to-video|stylize|style_transfer|转绘/i : /subtitle_remove|inpaint|remove_subtitle|去字幕/i;
+                        const declared = !capability || rule?.capabilities?.[capability] === true || pattern.test(JSON.stringify(rule));
+                        return <option key={m.code} value={m.code}>{m.display_name} / {m.code}{capability && !declared ? `（未声明${form.generation_type === "video_upscale" ? "超分" : form.generation_type === "video_redraw" ? "转绘" : "去字幕"}能力）` : ""}</option>;
+                      })}
+                    </select>
+                    {form.generation_type === "video_upscale" && <p className="mt-1.5 text-[11px] leading-5 text-amber-600">必须选择上游真正支持视频转视频/超分的模型；普通文生视频模型不会自动获得超分能力。请求会携带 operation=upscale、源视频和目标清晰度。</p>}
+                    {form.generation_type === "video_redraw" && <p className="mt-1.5 text-[11px] leading-5 text-amber-600">必须选择真正支持 video-to-video/风格迁移的上游模型；系统会发送源视频、可选风格参考图、强度与一致性参数。</p>}
+                    {form.generation_type === "subtitle_remove" && <p className="mt-1.5 text-[11px] leading-5 text-amber-600">独立字幕轨由 Worker 使用 FFmpeg 无损移除，不产生模型费用；烧录在画面里的硬字幕必须配置支持局部修复/去字幕的模型。</p>}
+                  </Field>
                 )}
                 {form.generation_type === "comic_drama" && (
                   <>
@@ -800,10 +1052,87 @@ export default function AgentsAdminPage() {
                     </Field>
                   </>
                 )}
-                <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>
-                <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>
+                {!isVideoUtilityType(form.generation_type) && <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>}
+                {!isVideoUtilityType(form.generation_type) && <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>}
                 <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
+                {isVideoUtilityType(form.generation_type) && <p className="self-end text-[11px] leading-5 text-gray-400">最终冻结金额 = 工作流收费 + 所选模型估算费用；完成后按实际模型任务费用结算。独立字幕轨移除不产生模型费用。</p>}
               </section>}
+
+              {form.generation_type === "video_upscale" && (
+                <section className="grid gap-4 rounded-2xl border border-cyan-100 bg-cyan-50/30 p-4 md:grid-cols-2">
+                  <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />视频高清参数</div>
+                  <Field label="允许的目标清晰度" wide>
+                    <div className="flex flex-wrap gap-2">
+                      {["720P", "1K", "2K"].map((resolution) => {
+                        const checked = form.supported_resolutions.includes(resolution);
+                        return <label key={resolution} className={`flex cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm ${checked ? "border-cyan-300 bg-white text-cyan-800" : "border-gray-100 bg-gray-50 text-gray-400"}`}>
+                          <input type="checkbox" checked={checked} onChange={(e) => {
+                            const next = e.target.checked ? [...form.supported_resolutions, resolution] : form.supported_resolutions.filter((item) => item !== resolution);
+                            const normalized = ["720P", "1K", "2K"].filter((item) => next.includes(item));
+                            setForm({ ...form, supported_resolutions: normalized, default_target_resolution: normalized.includes(form.default_target_resolution) ? form.default_target_resolution : normalized[0] || "720P" });
+                          }} />{resolution}
+                        </label>;
+                      })}
+                    </div>
+                  </Field>
+                  <Field label="默认目标清晰度"><select className="admin-input" value={form.default_target_resolution} onChange={(e) => setForm({ ...form, default_target_resolution: e.target.value })}>{form.supported_resolutions.map((item) => <option key={item}>{item}</option>)}</select></Field>
+                  <Field label="默认增强模式"><select className="admin-input" value={form.default_enhancement_mode} onChange={(e) => setForm({ ...form, default_enhancement_mode: e.target.value })}><option value="balanced">均衡增强</option><option value="detail">细节优先</option><option value="denoise">降噪优先</option></select></Field>
+                  <Field label="最大视频时长（秒）"><input type="number" min={1} max={7200} className="admin-input" value={form.max_input_duration_sec} onChange={(e) => setForm({ ...form, max_input_duration_sec: Math.max(1, Number(e.target.value) || 300) })} /></Field>
+                  <Field label="最大文件大小（MB）"><input type="number" min={1} max={10240} className="admin-input" value={form.max_input_size_mb} onChange={(e) => setForm({ ...form, max_input_size_mb: Math.max(1, Number(e.target.value) || 500) })} /></Field>
+                  <Field label="音频处理"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 bg-white px-3 text-sm"><input type="checkbox" checked={form.preserve_audio} onChange={(e) => setForm({ ...form, preserve_audio: e.target.checked })} />默认保留源视频声音</label></Field>
+                  <Field label="上游操作值"><input className="admin-input" value={form.upscale_operation} onChange={(e) => setForm({ ...form, upscale_operation: e.target.value })} placeholder="upscale" /><p className="mt-1.5 text-[11px] text-gray-400">发送为 operation 参数；如上游使用其他字段名，请在模型 runtime_rule.upstream.map 中映射。</p></Field>
+                  <Field label="默认超分指令" wide><textarea className="admin-input min-h-24 py-2" value={form.upscale_prompt} onChange={(e) => setForm({ ...form, upscale_prompt: e.target.value })} /></Field>
+                </section>
+              )}
+
+              {form.generation_type === "video_redraw" && (
+                <section className="grid gap-4 rounded-2xl border border-violet-100 bg-violet-50/30 p-4 md:grid-cols-2">
+                  <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />视频转绘参数</div>
+                  <Field label="默认风格强度">
+                    <input type="number" min={0} max={1} step={0.05} className="admin-input" value={form.default_style_strength} onChange={(e) => setForm({ ...form, default_style_strength: Math.max(0, Math.min(1, Number(e.target.value) || 0)) })} />
+                    <p className="mt-1.5 text-[11px] text-gray-400">0 更接近源视频，1 更接近目标画风；建议 0.55–0.75。</p>
+                  </Field>
+                  <Field label="默认一致性策略">
+                    <div className="flex min-h-10 flex-wrap items-center gap-4 rounded-xl border border-gray-100 bg-white px-3 text-sm">
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={form.preserve_motion} onChange={(e) => setForm({ ...form, preserve_motion: e.target.checked })} />保留动作</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={form.preserve_identity} onChange={(e) => setForm({ ...form, preserve_identity: e.target.checked })} />保留人物</label>
+                      <label className="flex items-center gap-2"><input type="checkbox" checked={form.preserve_audio} onChange={(e) => setForm({ ...form, preserve_audio: e.target.checked })} />保留原音</label>
+                    </div>
+                  </Field>
+                  <Field label="最大视频时长（秒）"><input type="number" min={1} max={7200} className="admin-input" value={form.max_input_duration_sec} onChange={(e) => setForm({ ...form, max_input_duration_sec: Math.max(1, Number(e.target.value) || 300) })} /></Field>
+                  <Field label="最大文件大小（MB）"><input type="number" min={1} max={10240} className="admin-input" value={form.max_input_size_mb} onChange={(e) => setForm({ ...form, max_input_size_mb: Math.max(1, Number(e.target.value) || 500) })} /></Field>
+                  <Field label="上游操作值"><input className="admin-input" value={form.redraw_operation} onChange={(e) => setForm({ ...form, redraw_operation: e.target.value })} placeholder="video_redraw" /></Field>
+                  <Field label="系统转绘指令" wide><textarea className="admin-input min-h-24 py-2" value={form.redraw_prompt} onChange={(e) => setForm({ ...form, redraw_prompt: e.target.value })} /></Field>
+                </section>
+              )}
+
+              {form.generation_type === "subtitle_remove" && (
+                <section className="grid gap-4 rounded-2xl border border-emerald-100 bg-emerald-50/30 p-4 md:grid-cols-2">
+                  <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />视频去字幕参数</div>
+                  <Field label="默认处理模式">
+                    <select className="admin-input" value={form.default_subtitle_mode} onChange={(e) => setForm({ ...form, default_subtitle_mode: e.target.value })}>
+                      <option value="auto">自动识别（推荐）</option>
+                      <option value="soft_track">仅移除独立字幕轨</option>
+                      <option value="hardcoded_ai">仅处理画面硬字幕</option>
+                    </select>
+                  </Field>
+                  <Field label="默认字幕区域">
+                    <select className="admin-input" value={form.default_subtitle_region} onChange={(e) => setForm({ ...form, default_subtitle_region: e.target.value })}>
+                      <option value="bottom_15">底部 15%</option>
+                      <option value="bottom_25">底部 25%（推荐）</option>
+                      <option value="bottom_35">底部 35%</option>
+                      <option value="full">全画面</option>
+                    </select>
+                  </Field>
+                  <Field label="画面保护"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 bg-white px-3 text-sm"><input type="checkbox" checked={form.protect_watermark} onChange={(e) => setForm({ ...form, protect_watermark: e.target.checked })} />默认保护字幕区域外的水印与 Logo</label></Field>
+                  <Field label="声音处理"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 bg-white px-3 text-sm"><input type="checkbox" checked={form.preserve_audio} onChange={(e) => setForm({ ...form, preserve_audio: e.target.checked })} />保留源视频声音</label></Field>
+                  <Field label="最大视频时长（秒）"><input type="number" min={1} max={7200} className="admin-input" value={form.max_input_duration_sec} onChange={(e) => setForm({ ...form, max_input_duration_sec: Math.max(1, Number(e.target.value) || 300) })} /></Field>
+                  <Field label="最大文件大小（MB）"><input type="number" min={1} max={10240} className="admin-input" value={form.max_input_size_mb} onChange={(e) => setForm({ ...form, max_input_size_mb: Math.max(1, Number(e.target.value) || 500) })} /></Field>
+                  <Field label="上游操作值"><input className="admin-input" value={form.subtitle_remove_operation} onChange={(e) => setForm({ ...form, subtitle_remove_operation: e.target.value })} placeholder="subtitle_remove" /></Field>
+                  <Field label="硬字幕修复指令" wide><textarea className="admin-input min-h-24 py-2" value={form.subtitle_remove_prompt} onChange={(e) => setForm({ ...form, subtitle_remove_prompt: e.target.value })} /></Field>
+                  <p className="md:col-span-2 rounded-xl border border-emerald-100 bg-white px-3 py-2 text-xs leading-5 text-emerald-700">自动模式会先用 FFprobe 检测独立字幕轨；检测到后由 FFmpeg 无损封装移除。未检测到时才调用 AI 修复模型，不会把硬字幕任务伪装成成功。</p>
+                </section>
+              )}
 
               {form.generation_type === "comic_drama" && (
                 <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
@@ -847,7 +1176,7 @@ export default function AgentsAdminPage() {
                 </section>
               )}
 
-              {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && !isVideoUtilityType(form.generation_type) && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900">{form.generation_type === "video" ? <Video size={16} /> : <ImageIcon size={16} />}{form.generation_type === "video" ? "视频场景" : "出图场景"}</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {sceneDefs(form.generation_type).map((scene) => {
@@ -869,7 +1198,7 @@ export default function AgentsAdminPage() {
                 </div>
               </section>}
 
-              {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && !isVideoUtilityType(form.generation_type) && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Layers size={16} />输入能力与流程</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   <CheckItem label="允许纯文字提交" checked={form.allow_text_only} onChange={(v) => setForm({ ...form, allow_text_only: v, require_image: v ? false : form.require_image })} />
@@ -930,7 +1259,12 @@ export default function AgentsAdminPage() {
             </aside>
           </div>
         </form>
-      )}
+        );
+        if (!form.isEdit) return editor;
+        if (typeof document === "undefined") return null;
+        const target = document.getElementById(`agent-edit-panel-${form.code}`);
+        return target ? createPortal(editor, target) : null;
+      })()}
 
       <div className="grid gap-4">
         {paginatedItems.map((w) => {
@@ -939,7 +1273,8 @@ export default function AgentsAdminPage() {
           const preset = TYPE_PRESETS[type];
           const isSystemWorkspace = runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas";
           return (
-            <div key={w.code} className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
+            <div key={w.code} className="space-y-3">
+              <div className="rounded-2xl border border-gray-100 bg-white p-5 shadow-sm">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
@@ -963,6 +1298,8 @@ export default function AgentsAdminPage() {
                   {!isSystemWorkspace && <button onClick={() => remove(w)} className="rounded-lg border border-red-100 px-3 py-2 text-sm text-red-500 hover:bg-red-50"><Trash2 size={15} /></button>}
                 </div>
               </div>
+              </div>
+              <div id={`agent-edit-panel-${w.code}`} className="scroll-mt-6" />
             </div>
           );
         })}

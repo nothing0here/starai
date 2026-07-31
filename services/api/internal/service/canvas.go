@@ -23,19 +23,33 @@ func NewCanvasService(db *pgxpool.Pool) *CanvasService {
 }
 
 type CanvasDTO struct {
-	PublicID  string          `json:"public_id"`
-	Title     string          `json:"title"`
-	Document  json.RawMessage `json:"document,omitempty"`
-	CreatedAt string          `json:"created_at"`
-	UpdatedAt string          `json:"updated_at"`
+	PublicID     string          `json:"public_id"`
+	WorkflowCode string          `json:"workflow_code"`
+	Title        string          `json:"title"`
+	Document     json.RawMessage `json:"document,omitempty"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
 }
 
 type SaveCanvasInput struct {
-	Title    string          `json:"title"`
-	Document json.RawMessage `json:"document"`
+	WorkflowCode string          `json:"workflow_code"`
+	Title        string          `json:"title"`
+	Document     json.RawMessage `json:"document"`
 }
 
 func validateCanvasInput(input *SaveCanvasInput) error {
+	input.WorkflowCode = strings.TrimSpace(input.WorkflowCode)
+	if input.WorkflowCode == "" {
+		input.WorkflowCode = "infinite_canvas"
+	}
+	if len(input.WorkflowCode) > 64 {
+		return errors.New("工作流编码不能超过 64 个字符")
+	}
+	for _, char := range input.WorkflowCode {
+		if !(char == '_' || char == '-' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9') {
+			return errors.New("工作流编码格式无效")
+		}
+	}
 	input.Title = strings.TrimSpace(input.Title)
 	if input.Title == "" {
 		input.Title = "未命名画布"
@@ -71,11 +85,11 @@ func (s *CanvasService) Create(ctx context.Context, userID int64, input SaveCanv
 	item := &CanvasDTO{PublicID: util.NewPublicID("canvas")}
 	var created, updated time.Time
 	err := s.db.QueryRow(ctx, `
-		INSERT INTO infinite_canvases (public_id, user_id, title, document)
-		VALUES ($1,$2,$3,$4)
-		RETURNING title, document, created_at, updated_at`,
-		item.PublicID, userID, input.Title, input.Document).
-		Scan(&item.Title, &item.Document, &created, &updated)
+		INSERT INTO infinite_canvases (public_id, user_id, workflow_code, title, document)
+		VALUES ($1,$2,$3,$4,$5)
+		RETURNING workflow_code, title, document, created_at, updated_at`,
+		item.PublicID, userID, input.WorkflowCode, input.Title, input.Document).
+		Scan(&item.WorkflowCode, &item.Title, &item.Document, &created, &updated)
 	if err != nil {
 		return nil, err
 	}
@@ -84,23 +98,27 @@ func (s *CanvasService) Create(ctx context.Context, userID int64, input SaveCanv
 	return item, nil
 }
 
-func (s *CanvasService) List(ctx context.Context, userID int64, page, pageSize int) ([]CanvasDTO, int, error) {
+func (s *CanvasService) List(ctx context.Context, userID int64, workflowCode string, page, pageSize int) ([]CanvasDTO, int, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 || pageSize > 100 {
 		pageSize = 30
 	}
+	workflowCode = strings.TrimSpace(workflowCode)
+	if workflowCode == "" {
+		workflowCode = "infinite_canvas"
+	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM infinite_canvases WHERE user_id=$1`, userID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM infinite_canvases WHERE user_id=$1 AND workflow_code=$2`, userID, workflowCode).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT public_id, title, created_at, updated_at
+		SELECT public_id, workflow_code, title, created_at, updated_at
 		FROM infinite_canvases
-		WHERE user_id=$1
+		WHERE user_id=$1 AND workflow_code=$2
 		ORDER BY updated_at DESC
-		LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
+		LIMIT $3 OFFSET $4`, userID, workflowCode, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -109,7 +127,7 @@ func (s *CanvasService) List(ctx context.Context, userID int64, page, pageSize i
 	for rows.Next() {
 		var item CanvasDTO
 		var created, updated time.Time
-		if err := rows.Scan(&item.PublicID, &item.Title, &created, &updated); err != nil {
+		if err := rows.Scan(&item.PublicID, &item.WorkflowCode, &item.Title, &created, &updated); err != nil {
 			return nil, 0, err
 		}
 		item.CreatedAt = created.Format(time.RFC3339)
@@ -123,10 +141,10 @@ func (s *CanvasService) Get(ctx context.Context, userID int64, publicID string) 
 	var item CanvasDTO
 	var created, updated time.Time
 	err := s.db.QueryRow(ctx, `
-		SELECT public_id, title, document, created_at, updated_at
+		SELECT public_id, workflow_code, title, document, created_at, updated_at
 		FROM infinite_canvases
 		WHERE user_id=$1 AND public_id=$2`, userID, publicID).
-		Scan(&item.PublicID, &item.Title, &item.Document, &created, &updated)
+		Scan(&item.PublicID, &item.WorkflowCode, &item.Title, &item.Document, &created, &updated)
 	if err != nil {
 		return nil, err
 	}
@@ -145,9 +163,9 @@ func (s *CanvasService) Update(ctx context.Context, userID int64, publicID strin
 		UPDATE infinite_canvases
 		SET title=$3, document=$4, updated_at=now()
 		WHERE user_id=$1 AND public_id=$2
-		RETURNING public_id, title, document, created_at, updated_at`,
+		RETURNING public_id, workflow_code, title, document, created_at, updated_at`,
 		userID, publicID, input.Title, input.Document).
-		Scan(&item.PublicID, &item.Title, &item.Document, &created, &updated)
+		Scan(&item.PublicID, &item.WorkflowCode, &item.Title, &item.Document, &created, &updated)
 	if err != nil {
 		return nil, err
 	}

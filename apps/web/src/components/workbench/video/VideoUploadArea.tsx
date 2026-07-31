@@ -316,6 +316,98 @@ export function VideoUploadArea({
     onChange({ ...media, reference_images: media.reference_images.filter((_, idx) => idx !== index) });
   };
 
+  if (profile === "minimax_h3") {
+    const activeMode = mode || "text";
+    if (activeMode === "text") return null;
+    if (activeMode === "first_frame" || activeMode === "last_frame" || activeMode === "first_last") {
+      const showFirst = activeMode === "first_frame" || activeMode === "first_last";
+      const showLast = activeMode === "last_frame" || activeMode === "first_last";
+      return (
+        <div className="flex min-h-16 w-fit max-w-full flex-nowrap items-center gap-2">
+          {showFirst && (
+            <FrameSlot
+              label={t("video.firstFrame")}
+              image={media.first_frame}
+              uploading={uploading}
+              onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))}
+              onRemove={() => onChange({ ...media, first_frame: null })}
+            />
+          )}
+          {showFirst && showLast && <ArrowRight size={15} className="shrink-0 text-gray-300" />}
+          {showLast && (
+            <FrameSlot
+              label={t("video.lastFrame")}
+              image={media.last_frame}
+              uploading={uploading}
+              onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, last_frame: item }))}
+              onRemove={() => onChange({ ...media, last_frame: null })}
+            />
+          )}
+        </div>
+      );
+    }
+    return (
+      <div className="flex min-h-14 w-fit max-w-full flex-wrap items-center gap-1.5">
+        <ReferenceImageStack
+          images={media.reference_images}
+          max={config.reference_images?.max ?? 9}
+          uploading={uploading}
+          onUpload={(files) => uploadMany(files, config.reference_images?.max ?? 9)}
+          onRemove={removeRef}
+          compact
+        />
+        <ArrowRight size={13} className="shrink-0 text-gray-300" />
+        <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
+          {media.reference_videos.map((item, index) => (
+            <FilledFileCard
+              key={item.url}
+              item={item}
+              kind="video"
+              onRemove={() => onChange({ ...media, reference_videos: media.reference_videos.filter((_, i) => i !== index) })}
+            />
+          ))}
+          {media.reference_videos.length < (config.reference_videos?.max ?? 3) && (
+            <EmptyUploadBox
+              label={`${t("video.referenceVideo")} ${media.reference_videos.length}/${config.reference_videos?.max ?? 3}`}
+              compact
+              accept={VIDEO_ACCEPT}
+              uploading={uploading}
+              onUpload={(files) =>
+                uploadFiles(files, "video", media.reference_videos, config.reference_videos?.max ?? 3, (items) =>
+                  onChange({ ...media, reference_videos: items })
+                )
+              }
+            />
+          )}
+        </div>
+        <ArrowRight size={13} className="shrink-0 text-gray-300" />
+        <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
+          {media.reference_audios.map((item, index) => (
+            <FilledFileCard
+              key={item.url}
+              item={item}
+              kind="audio"
+              onRemove={() => onChange({ ...media, reference_audios: media.reference_audios.filter((_, i) => i !== index) })}
+            />
+          ))}
+          {media.reference_audios.length < (config.reference_audios?.max ?? 3) && (
+            <EmptyUploadBox
+              label={`${t("video.referenceAudio")} ${media.reference_audios.length}/${config.reference_audios?.max ?? 3}`}
+              compact
+              accept={AUDIO_ACCEPT}
+              uploading={uploading}
+              onUpload={(files) =>
+                uploadFiles(files, "audio", media.reference_audios, config.reference_audios?.max ?? 3, (items) =>
+                  onChange({ ...media, reference_audios: items })
+                )
+              }
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (profile === "seedance_2") {
     const activeMode = mode || "text";
     const imageModes = new Set(["image", "image_audio", "image_video", "image_video_audio"]);

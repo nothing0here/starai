@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 
 export function MediaOptionMenu({
@@ -29,9 +30,11 @@ export function MediaOptionMenu({
   const openMenu = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (rect) {
+      const menuWidth = 220;
+      const viewportGap = 8;
       setPos({
-        left: Math.min(rect.left, window.innerWidth - 272),
-        bottom: window.innerHeight - rect.top + 8,
+        left: Math.max(viewportGap, Math.min(rect.left, window.innerWidth - menuWidth - viewportGap)),
+        bottom: Math.max(viewportGap, window.innerHeight - rect.top + viewportGap),
       });
     }
     setOpen((v) => !v);
@@ -53,21 +56,24 @@ export function MediaOptionMenu({
         <span className={compactOnMobile ? "hidden sm:inline" : ""}>{activeLabel || label}</span>
         <ChevronDown size={13} className={`text-gray-500 transition dark:text-gray-400 ${open ? "rotate-180" : ""}`} />
       </button>
-      {open && (
-        <div className="fixed inset-0 z-[70]" onClick={() => setOpen(false)}>
-          <div
-            className="fixed w-[220px] max-w-[calc(100vw-1rem)] rounded-2xl bg-white border border-gray-200 shadow-2xl overflow-hidden dark:bg-gray-900 dark:border-white/10"
-            style={{ left: pos.left, bottom: pos.bottom }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-4 py-2.5 border-b border-gray-100 dark:border-white/10">
-              <div className="text-sm font-bold text-gray-900 dark:text-gray-100">{title}</div>
-              <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed mt-1">{subtitle}</div>
-            </div>
-            <div className="p-2.5 max-h-[280px] overflow-y-auto bg-white dark:bg-gray-900">{children(() => setOpen(false))}</div>
-          </div>
-        </div>
-      )}
+      {open && typeof document !== "undefined"
+        ? createPortal(
+            <div className="fixed inset-0 z-[70]" onClick={() => setOpen(false)}>
+              <div
+                className="fixed w-[220px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-white/10 dark:bg-gray-900"
+                style={{ left: pos.left, bottom: pos.bottom }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-gray-100 px-4 py-2.5 dark:border-white/10">
+                  <div className="text-sm font-bold text-gray-900 dark:text-gray-100">{title}</div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-gray-500 dark:text-gray-400">{subtitle}</div>
+                </div>
+                <div className="max-h-[280px] overflow-y-auto bg-white p-2.5 dark:bg-gray-900">{children(() => setOpen(false))}</div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </>
   );
 }

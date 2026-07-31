@@ -1,6 +1,6 @@
 /** Video model runtime_rule.video + input_schema extensions (config-driven UI & API). */
 
-export type VideoUploadProfile = "single_ref" | "multi_ref" | "frame_pair" | "seedance_2" | "none";
+export type VideoUploadProfile = "single_ref" | "multi_ref" | "frame_pair" | "seedance_2" | "minimax_h3" | "none";
 
 export interface VideoFrameSlotConfig {
   key?: string;

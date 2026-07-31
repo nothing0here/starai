@@ -232,7 +232,10 @@ func composeCanvasMedia(ctx context.Context, tmpDir string, sources []composeSou
 					return "", "", "", err
 				}
 			}
-			if err := runFFmpeg(ctx, "-y", "-i", silentPath, "-i", audioPath, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-shortest", "-movflags", "+faststart", outputPath); err != nil {
+			// Pad a short narration track with silence, then let -shortest stop at the
+			// concatenated video duration. Without apad, a short narration would cut
+			// off the remaining story clips.
+			if err := runFFmpeg(ctx, "-y", "-i", silentPath, "-i", audioPath, "-filter_complex", "[1:a]apad[a]", "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-shortest", "-movflags", "+faststart", outputPath); err != nil {
 				return "", "", "", fmt.Errorf("视频与音频合成失败：%w", err)
 			}
 		} else if err := runFFmpeg(ctx, "-y", "-i", silentPath, "-c", "copy", "-movflags", "+faststart", outputPath); err != nil {

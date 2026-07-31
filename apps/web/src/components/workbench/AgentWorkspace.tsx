@@ -22,8 +22,10 @@ import { MediaMenuOption, MediaOptionMenu } from "./MediaOptionMenu";
 import { ImageGenerationToolbar, buildImageGenerationParams } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
 import { useI18n } from "@/i18n/I18nProvider";
+import { VideoUpscaleWorkspace } from "./VideoUpscaleWorkspace";
+import { AgentLanding, type AgentDisplayStep } from "./AgentLanding";
 
-type DisplayStep = { icon?: string; title: string; subtitle?: string; tags?: string[] };
+type DisplayStep = AgentDisplayStep;
 type DisplayConfig = {
   theme?: string;
   hero_tags?: string[];
@@ -64,6 +66,18 @@ type Workflow = {
     dialogue_model_codes?: string[];
     orientation?: string;
     quality?: string;
+    supported_resolutions?: string[];
+    default_target_resolution?: string;
+    preserve_audio?: boolean;
+    default_enhancement_mode?: string;
+    max_input_duration_sec?: number;
+    max_input_size_mb?: number;
+    default_style_strength?: number;
+    preserve_motion?: boolean;
+    preserve_identity?: boolean;
+    default_subtitle_mode?: string;
+    default_subtitle_region?: string;
+    protect_watermark?: boolean;
   };
 };
 type NodeRun = { node_id: string; name: string; type: string; status: string; output: Record<string, any>; error?: string };
@@ -303,7 +317,11 @@ export function AgentWorkspace({ code }: { code: string }) {
             .then((m) => {
               if (controller.signal.aborted) return;
               setGenerationModel(m);
-              setParams({ ...schemaDefaultsFromFields(m.input_schema), ...(m.default_params || {}) });
+              setParams(
+                m.category === "video"
+                  ? { ...(m.default_params || {}), ...schemaDefaultsFromFields(m.input_schema) }
+                  : { ...schemaDefaultsFromFields(m.input_schema), ...(m.default_params || {}) }
+              );
               if (typeof m.default_params?.channel_key === "string") {
                 setBottom((prev) => ({ ...prev, channel_key: String(m.default_params.channel_key) }));
               }
@@ -330,6 +348,8 @@ export function AgentWorkspace({ code }: { code: string }) {
 
   const display = workflow?.display_config || {};
   const isComicDrama = workflow?.runtime_config?.agent_mode === "comic_drama" || workflow?.runtime_config?.preset_code === "ai_comic_drama";
+  const videoUtilityMode = workflow?.runtime_config?.agent_mode || workflow?.runtime_config?.preset_code;
+  const isVideoUtility = ["video_upscale", "video_redraw", "subtitle_remove"].includes(videoUtilityMode || "");
   const workflowName = workflow ? td(`agent.${workflow.code}.name`, workflow.name) : "";
   const workflowDescription = workflow ? td(`agent.${workflow.code}.description`, workflow.description || "") : "";
   const inputCaps = workflow?.runtime_config?.input_capabilities || {};
@@ -492,21 +512,12 @@ export function AgentWorkspace({ code }: { code: string }) {
     try {
       const res = await api<{ items: ComicProject[] }>(`/api/comic-drama/projects${includeArchived ? "?include_archived=true" : ""}`);
       const items = res.items || [];
-      const storedID = typeof window !== "undefined" ? window.localStorage.getItem(`starai:comic:active:${code}`) : "";
       setComicProjects(items);
-      setActiveComicProject((prev) => {
-        const preferredID = prev?.public_id || storedID;
-        return items.find((item) => item.public_id === preferredID) || items[0] || null;
-      });
+      setActiveComicProject((prev) => prev ? items.find((item) => item.public_id === prev.public_id) || null : null);
     } catch {
       setComicProjects([]);
     }
   };
-
-  useEffect(() => {
-    if (!isComicDrama || !activeComicProject?.public_id || typeof window === "undefined") return;
-    window.localStorage.setItem(`starai:comic:active:${code}`, activeComicProject.public_id);
-  }, [activeComicProject?.public_id, code, isComicDrama]);
 
   useEffect(() => {
     if (!isComicDrama || !activeComicProject?.last_workflow_project_id) return;
@@ -554,13 +565,19 @@ export function AgentWorkspace({ code }: { code: string }) {
 
   useEffect(() => {
     if (!isComicDrama) return;
+    if (pollRef.current) clearInterval(pollRef.current);
+    setActiveComicProject(null);
+    setProject(null);
+    setComicAssets([]);
+    setError("");
+    if (typeof window !== "undefined") window.localStorage.removeItem(`starai:comic:active:${code}`);
     loadComicProjects();
     loadComicStyles();
     const stored = typeof window !== "undefined" ? window.localStorage.getItem("comicProjectDrawerCollapsed") : null;
     if (stored === "1") setProjectDrawerCollapsed(true);
 		// Load once when entering comic mode; the loaders intentionally use the current view state.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isComicDrama]);
+  }, [code, isComicDrama]);
 
   useEffect(() => {
     if (!isComicDrama) return;
@@ -583,6 +600,13 @@ export function AgentWorkspace({ code }: { code: string }) {
   const setComicDrawerCollapsed = (value: boolean) => {
     setProjectDrawerCollapsed(value);
     if (typeof window !== "undefined") window.localStorage.setItem("comicProjectDrawerCollapsed", value ? "1" : "0");
+  };
+
+  const selectComicProject = (item: ComicProject) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setProject(null);
+    setError("");
+    setActiveComicProject(item);
   };
 
   useEffect(() => {
@@ -735,6 +759,10 @@ export function AgentWorkspace({ code }: { code: string }) {
     if (pollRef.current) clearInterval(pollRef.current);
     setProject(null);
     setError("");
+    if (isComicDrama) {
+      setActiveComicProject(null);
+      setComicAssets([]);
+    }
   };
 
   const openHistory = () => {
@@ -789,6 +817,39 @@ export function AgentWorkspace({ code }: { code: string }) {
       setError(err instanceof Error ? err.message : "创建项目失败");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const updateComicProjectOutput = async (patch: { quality?: string; orientation?: string }) => {
+    setProjectDraft((prev) => ({ ...prev, ...patch }));
+    if (!activeComicProject) return;
+    const previous = activeComicProject;
+    const optimistic = { ...activeComicProject, ...patch };
+    setActiveComicProject(optimistic);
+    setComicProjects((items) => items.map((item) => item.public_id === optimistic.public_id ? optimistic : item));
+    try {
+      const updated = await api<ComicProject>(`/api/comic-drama/projects/${activeComicProject.public_id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: activeComicProject.name,
+          description: activeComicProject.description || "",
+          cover_url: activeComicProject.cover_url || "",
+          style_id: activeComicProject.style_id || "",
+          orientation: patch.orientation || activeComicProject.orientation,
+          quality: patch.quality || activeComicProject.quality,
+        }),
+      });
+      setActiveComicProject(updated);
+      setComicProjects((items) => items.map((item) => item.public_id === updated.public_id ? updated : item));
+    } catch (err) {
+      setActiveComicProject(previous);
+      setComicProjects((items) => items.map((item) => item.public_id === previous.public_id ? previous : item));
+      setProjectDraft((prev) => ({
+        ...prev,
+        quality: previous.quality,
+        orientation: previous.orientation,
+      }));
+      setError(err instanceof Error ? err.message : t("canvas.saveFailed"));
     }
   };
 
@@ -879,6 +940,10 @@ export function AgentWorkspace({ code }: { code: string }) {
 
   if (!workflow) return <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">加载中...</div>;
 
+  if (isVideoUtility) {
+    return <VideoUpscaleWorkspace workflow={workflow} />;
+  }
+
   if (isComicDrama) {
     const activeStyle = comicStyles.find((item) => item.public_id === projectDraft.style_id) || comicStyles.find((item) => item.public_id === activeComicProject?.style_id);
     const filteredStyles = comicStyles.filter((item) => styleFilter === "all" || (styleFilter === "system" ? item.source === "system" : item.source !== "system"));
@@ -925,8 +990,8 @@ export function AgentWorkspace({ code }: { code: string }) {
                           key={item.public_id}
 									role="button"
 									tabIndex={0}
-                          onClick={() => setActiveComicProject(item)}
-									onKeyDown={(event) => { if (event.key === "Enter") setActiveComicProject(item); }}
+                          onClick={() => selectComicProject(item)}
+									onKeyDown={(event) => { if (event.key === "Enter") selectComicProject(item); }}
                           className={"w-full rounded-2xl border p-3 text-left transition " + (active ? "border-cyan-300 bg-cyan-50 shadow-sm dark:border-cyan-400/40 dark:bg-cyan-400/10" : "border-gray-100 bg-white/70 hover:bg-white dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10")}
                         >
                           <div className="flex items-center gap-3">
@@ -962,10 +1027,10 @@ export function AgentWorkspace({ code }: { code: string }) {
           )}
         </aside>
 
-        <main className="relative flex min-w-0 flex-1 flex-col overflow-y-auto" onMouseEnter={() => !projectDrawerCollapsed && setComicDrawerCollapsed(true)}>
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden" onMouseEnter={() => !projectDrawerCollapsed && setComicDrawerCollapsed(true)}>
           <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_10%,rgba(34,211,238,.24),transparent_28%),radial-gradient(circle_at_12%_84%,rgba(20,184,166,.18),transparent_22%)] dark:bg-[radial-gradient(circle_at_76%_10%,rgba(20,184,166,.22),transparent_28%),radial-gradient(circle_at_14%_82%,rgba(6,182,212,.14),transparent_22%)]" />
-          <div className="relative z-10 flex min-h-0 flex-1 flex-col px-3 py-3 pb-4 sm:px-5 lg:min-h-[700px] lg:px-8 lg:py-4">
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-3 pb-4 sm:px-5 lg:min-h-[700px] lg:px-8 lg:py-4">
             <div className="shrink-0 pt-1 text-center sm:pt-3 lg:pt-4">
               <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-[11px] font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200 sm:px-4 sm:text-xs">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" /> {t("comic.superAgent")}
@@ -1049,8 +1114,55 @@ export function AgentWorkspace({ code }: { code: string }) {
                     <button type="button" disabled={!activeComicProject} onClick={() => setAssetModalOpen(true)} className="flex h-9 items-center gap-2 rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-semibold text-gray-700 disabled:opacity-40 dark:border-white/10 dark:bg-white/5 dark:text-gray-200">
                       <ImageIcon size={14} /> {t("comic.assetLibrary")} · {comicAssets.length}
                     </button>
-                    <span className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">{projectQuality}</span>
-					<span className="rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300">{projectOrientation === "portrait" ? t("comic.portrait") : t("comic.landscape")}</span>
+                    <MediaOptionMenu
+                      icon={<Settings2 size={14} />}
+                      activeLabel={projectQuality}
+                      title={t("imageToolbar.quality")}
+                      subtitle={t("imageToolbar.qualityDesc")}
+                    >
+                      {(close) => (
+                        <div className="space-y-1.5">
+                          {["480P", "720P", "1080P"].map((quality) => (
+                            <MediaMenuOption
+                              key={quality}
+                              selected={projectQuality === quality}
+                              onClick={() => {
+                                void updateComicProjectOutput({ quality });
+                                close();
+                              }}
+                            >
+                              {quality}
+                            </MediaMenuOption>
+                          ))}
+                        </div>
+                      )}
+                    </MediaOptionMenu>
+                    <MediaOptionMenu
+                      icon={<Wand2 size={14} />}
+                      activeLabel={projectOrientation === "portrait" ? t("comic.portrait") : t("comic.landscape")}
+                      title={t("video.orientation")}
+                      subtitle={t("video.orientationDesc")}
+                    >
+                      {(close) => (
+                        <div className="space-y-1.5">
+                          {[
+                            { value: "landscape", label: t("comic.landscape") },
+                            { value: "portrait", label: t("comic.portrait") },
+                          ].map((option) => (
+                            <MediaMenuOption
+                              key={option.value}
+                              selected={projectOrientation === option.value}
+                              onClick={() => {
+                                void updateComicProjectOutput({ orientation: option.value });
+                                close();
+                              }}
+                            >
+                              {option.label}
+                            </MediaMenuOption>
+                          ))}
+                        </div>
+                      )}
+                    </MediaOptionMenu>
                     <div className="mx-auto flex w-full max-w-[260px] items-center justify-center rounded-full bg-gray-100 p-1 dark:bg-white/10 sm:ml-auto sm:mr-0 sm:w-auto sm:max-w-none">
 					<button type="button" onClick={() => setMode("step")} className={"flex-1 rounded-full px-4 py-2 text-center text-xs font-semibold sm:flex-none " + (mode === "step" ? "bg-cyan-500 text-white shadow" : "text-gray-500 dark:text-gray-300")}>{t("agent.stepConfirm")}</button>
 					<button type="button" onClick={() => setMode("auto")} className={"flex-1 rounded-full px-4 py-2 text-center text-xs font-semibold sm:flex-none " + (mode === "auto" ? "bg-gray-900 text-white shadow dark:bg-white dark:text-gray-900" : "text-gray-500 dark:text-gray-300")}>{t("agent.autopilot")}</button>
@@ -1135,7 +1247,6 @@ export function AgentWorkspace({ code }: { code: string }) {
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_10%,rgba(34,211,238,.22),transparent_28%),radial-gradient(circle_at_12%_84%,rgba(20,184,166,.16),transparent_22%)] dark:bg-[radial-gradient(circle_at_76%_10%,rgba(20,184,166,.2),transparent_28%),radial-gradient(circle_at_14%_82%,rgba(6,182,212,.12),transparent_22%)]" />
         </>
       )}
-      {project && (
       <div className="relative z-10 shrink-0 px-4 sm:px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <button onClick={resetTask} className="h-9 px-3 rounded-xl bg-primary text-dark text-sm font-semibold flex items-center gap-1.5"><Plus size={15} />{t("common.newTask")}</button>
@@ -1157,7 +1268,6 @@ export function AgentWorkspace({ code }: { code: string }) {
           </div>
         </div>
       </div>
-      )}
 
       <div className={(project ? "relative z-10 flex-1 overflow-y-auto min-h-0 px-4 sm:px-6 py-4" : "relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-3 sm:px-5 lg:px-8 lg:py-4")}>
         <div className={project ? "max-w-[1120px] mx-auto space-y-4" : "mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col"}>
@@ -1263,7 +1373,7 @@ export function AgentWorkspace({ code }: { code: string }) {
       </div>
 
       <div className="relative z-10 shrink-0 px-3 sm:px-6 pb-4 sm:pb-5 pt-2">
-        <div className="max-w-[1120px] mx-auto">
+        <div className="mx-auto w-full max-w-[1040px]">
           {error && <p className="text-sm text-red-500 mb-2 px-1">{error}</p>}
           <div className="soft-input overflow-hidden">
             <div className="px-3 sm:px-4 py-2 border-b border-gray-50 dark:border-white/10">
@@ -1439,7 +1549,7 @@ export function AgentWorkspace({ code }: { code: string }) {
   );
 }
 
-function AgentLanding({
+function LegacyAgentLanding({
   workflowIcon,
   workflowName,
   workflowDescription,
@@ -1561,6 +1671,7 @@ function AgentLanding({
     </div>
   );
 }
+void LegacyAgentLanding;
 
 function SceneOptionMenu({ scenes, value, onChange }: { scenes: string[]; value: string; onChange: (value: string) => void }) {
   const { t } = useI18n();

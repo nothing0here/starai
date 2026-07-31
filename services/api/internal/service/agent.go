@@ -226,6 +226,24 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 			return nil, err
 		}
 	}
+	if stringValue(def.RuntimeConfig["agent_mode"]) == "video_upscale" {
+		inputs = mergeVideoUpscaleRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validateVideoUpscaleRequest(ctx, userID, def.RuntimeConfig, inputs); err != nil {
+			return nil, err
+		}
+	}
+	if stringValue(def.RuntimeConfig["agent_mode"]) == "video_redraw" {
+		inputs = mergeVideoRedrawRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validateVideoRedrawRequest(ctx, userID, def.RuntimeConfig, inputs); err != nil {
+			return nil, err
+		}
+	}
+	if stringValue(def.RuntimeConfig["agent_mode"]) == "subtitle_remove" {
+		inputs = mergeSubtitleRemovalRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validateSubtitleRemovalRequest(ctx, userID, def.RuntimeConfig, inputs); err != nil {
+			return nil, err
+		}
+	}
 	estimated := 0.0
 	if v, ok := def.PriceRule["unit_price"].(float64); ok {
 		estimated = v
@@ -262,6 +280,248 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 		return nil, err
 	}
 	return s.GetProject(ctx, userID, publicID)
+}
+
+func mergeVideoUpscaleRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
+	if inputs == nil {
+		inputs = map[string]interface{}{}
+	}
+	if stringValue(inputs["target_resolution"]) == "" {
+		inputs["target_resolution"] = firstAgentString(stringValue(runtimeCfg["default_target_resolution"]), "720P")
+	}
+	if _, ok := inputs["preserve_audio"]; !ok {
+		if value, exists := runtimeCfg["preserve_audio"].(bool); exists {
+			inputs["preserve_audio"] = value
+		} else {
+			inputs["preserve_audio"] = true
+		}
+	}
+	if stringValue(inputs["enhancement_mode"]) == "" {
+		inputs["enhancement_mode"] = firstAgentString(stringValue(runtimeCfg["default_enhancement_mode"]), "balanced")
+	}
+	inputs["count"] = 1
+	inputs["n"] = 1
+	inputs["_mode"] = "auto"
+	return inputs
+}
+
+func (s *AgentService) validateVideoUpscaleRequest(ctx context.Context, userID int64, runtimeCfg, inputs map[string]interface{}) error {
+	modelCode := strings.TrimSpace(stringValue(runtimeCfg["generation_model_code"]))
+	if modelCode == "" {
+		return errors.New("AI 视频高清尚未配置超分模型，请联系管理员")
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category='video' AND is_enabled=true)`, modelCode).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("超分模型不存在、类型不匹配或已停用：%s", modelCode)
+	}
+	sourceVideo := firstAgentString(
+		stringValue(inputs["video_url"]),
+		stringValue(inputs["source_video_url"]),
+		firstAgentURL(inputs["reference_videos"]),
+	)
+	if sourceVideo == "" {
+		return errors.New("请先上传或从资产库选择源视频")
+	}
+	resolution := normalizeAgentUpscaleResolution(stringValue(inputs["target_resolution"]))
+	if resolution == "" || !agentUpscaleResolutionAllowed(resolution, runtimeCfg["supported_resolutions"]) {
+		return errors.New("目标清晰度不受支持")
+	}
+	if err := s.validateVideoSourceAsset(ctx, userID, runtimeCfg, inputs); err != nil {
+		return err
+	}
+	inputs["video_url"] = sourceVideo
+	inputs["source_video_url"] = sourceVideo
+	inputs["reference_videos"] = []string{sourceVideo}
+	inputs["target_resolution"] = resolution
+	inputs["resolution"] = resolution
+	return nil
+}
+
+func mergeVideoRedrawRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
+	if inputs == nil {
+		inputs = map[string]interface{}{}
+	}
+	if _, ok := inputs["style_strength"]; !ok {
+		inputs["style_strength"] = firstAgentNonNil(runtimeCfg["default_style_strength"], 0.65)
+	}
+	for _, key := range []string{"preserve_motion", "preserve_identity", "preserve_audio"} {
+		if _, ok := inputs[key]; !ok {
+			if value, exists := runtimeCfg[key].(bool); exists {
+				inputs[key] = value
+			} else {
+				inputs[key] = true
+			}
+		}
+	}
+	inputs["count"], inputs["n"], inputs["_mode"] = 1, 1, "auto"
+	return inputs
+}
+
+func mergeSubtitleRemovalRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
+	if inputs == nil {
+		inputs = map[string]interface{}{}
+	}
+	if stringValue(inputs["subtitle_mode"]) == "" {
+		inputs["subtitle_mode"] = firstAgentString(stringValue(runtimeCfg["default_subtitle_mode"]), "auto")
+	}
+	if stringValue(inputs["subtitle_region"]) == "" {
+		inputs["subtitle_region"] = firstAgentString(stringValue(runtimeCfg["default_subtitle_region"]), "bottom_25")
+	}
+	if _, ok := inputs["protect_watermark"]; !ok {
+		if value, exists := runtimeCfg["protect_watermark"].(bool); exists {
+			inputs["protect_watermark"] = value
+		} else {
+			inputs["protect_watermark"] = true
+		}
+	}
+	inputs["count"], inputs["n"], inputs["_mode"] = 1, 1, "auto"
+	return inputs
+}
+
+func (s *AgentService) validateVideoRedrawRequest(ctx context.Context, userID int64, runtimeCfg, inputs map[string]interface{}) error {
+	if err := s.validateEnabledVideoModel(ctx, stringValue(runtimeCfg["generation_model_code"]), "转绘"); err != nil {
+		return err
+	}
+	if err := normalizeAgentVideoSource(inputs); err != nil {
+		return err
+	}
+	if err := s.validateVideoSourceAsset(ctx, userID, runtimeCfg, inputs); err != nil {
+		return err
+	}
+	strength := floatValue(inputs["style_strength"])
+	if strength < 0 || strength > 1 {
+		return errors.New("风格强度必须在 0 到 1 之间")
+	}
+	styleAssetID := strings.TrimSpace(stringValue(inputs["style_reference_asset_id"]))
+	if styleAssetID == "" {
+		return nil
+	}
+	var kind, url string
+	if err := s.db.QueryRow(ctx, `SELECT kind, url FROM assets WHERE public_id=$1 AND user_id=$2`, styleAssetID, userID).Scan(&kind, &url); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("所选风格参考图不存在或无权访问")
+		}
+		return err
+	}
+	if kind != "image" {
+		return errors.New("风格参考素材必须是图片")
+	}
+	inputs["style_reference_url"] = url
+	inputs["reference_images"] = []string{url}
+	return nil
+}
+
+func (s *AgentService) validateSubtitleRemovalRequest(ctx context.Context, userID int64, runtimeCfg, inputs map[string]interface{}) error {
+	if err := normalizeAgentVideoSource(inputs); err != nil {
+		return err
+	}
+	if err := s.validateVideoSourceAsset(ctx, userID, runtimeCfg, inputs); err != nil {
+		return err
+	}
+	mode := stringValue(inputs["subtitle_mode"])
+	if mode != "auto" && mode != "soft_track" && mode != "hardcoded_ai" {
+		return errors.New("去字幕模式无效")
+	}
+	if mode == "hardcoded_ai" {
+		return s.validateEnabledVideoModel(ctx, stringValue(runtimeCfg["generation_model_code"]), "硬字幕修复")
+	}
+	return nil
+}
+
+func normalizeAgentVideoSource(inputs map[string]interface{}) error {
+	sourceVideo := firstAgentString(stringValue(inputs["video_url"]), stringValue(inputs["source_video_url"]), firstAgentURL(inputs["reference_videos"]))
+	if sourceVideo == "" {
+		return errors.New("请先上传或从资产库选择源视频")
+	}
+	inputs["video_url"] = sourceVideo
+	inputs["source_video_url"] = sourceVideo
+	inputs["reference_videos"] = []string{sourceVideo}
+	return nil
+}
+
+func (s *AgentService) validateEnabledVideoModel(ctx context.Context, code, label string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return fmt.Errorf("%s工作流尚未配置视频模型，请联系管理员", label)
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category='video' AND is_enabled=true)`, code).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%s模型不存在、类型不匹配或已停用：%s", label, code)
+	}
+	return nil
+}
+
+func (s *AgentService) validateVideoSourceAsset(ctx context.Context, userID int64, runtimeCfg, inputs map[string]interface{}) error {
+	assetID := strings.TrimSpace(stringValue(inputs["source_asset_id"]))
+	if assetID == "" {
+		return nil
+	}
+	var kind string
+	var sizeBytes int64
+	if err := s.db.QueryRow(ctx, `SELECT kind, COALESCE(size_bytes,0) FROM assets WHERE public_id=$1 AND user_id=$2`, assetID, userID).Scan(&kind, &sizeBytes); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("所选源视频资产不存在或无权访问")
+		}
+		return err
+	}
+	if kind != "video" {
+		return errors.New("所选资产不是视频")
+	}
+	maxMB := intFromAgentAny(runtimeCfg["max_input_size_mb"])
+	if maxMB > 0 && sizeBytes > int64(maxMB)*1024*1024 {
+		return fmt.Errorf("源视频不能超过 %d MB", maxMB)
+	}
+	return nil
+}
+
+func firstAgentURL(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []string:
+		if len(typed) > 0 {
+			return strings.TrimSpace(typed[0])
+		}
+	case []interface{}:
+		if len(typed) > 0 {
+			return firstAgentURL(typed[0])
+		}
+	case map[string]interface{}:
+		return firstAgentString(stringValue(typed["url"]), stringValue(typed["video_url"]))
+	}
+	return ""
+}
+
+func normalizeAgentUpscaleResolution(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "720P", "1280X720":
+		return "720P"
+	case "1K", "1080P", "1920X1080":
+		return "1K"
+	case "2K", "1440P", "2560X1440":
+		return "2K"
+	default:
+		return ""
+	}
+}
+
+func agentUpscaleResolutionAllowed(value string, raw interface{}) bool {
+	allowed := map[string]bool{}
+	for _, item := range agentStringSlice(raw, nil) {
+		if normalized := normalizeAgentUpscaleResolution(item); normalized != "" {
+			allowed[normalized] = true
+		}
+	}
+	if len(allowed) == 0 {
+		return value == "720P" || value == "1K" || value == "2K"
+	}
+	return allowed[value]
 }
 
 func (s *AgentService) validateComicDramaGenerationModels(ctx context.Context, inputs map[string]interface{}) error {
@@ -1025,6 +1285,41 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		return 0
 	}
 	total := 0.0
+	if stringValue(runtimeCfg["agent_mode"]) == "video_upscale" {
+		if code := stringValue(runtimeCfg["generation_model_code"]); code != "" {
+			params := make(map[string]interface{}, len(inputs)+4)
+			for key, value := range inputs {
+				params[key] = value
+			}
+			params["count"] = 1
+			params["n"] = 1
+			params["resolution"] = firstAgentString(stringValue(inputs["target_resolution"]), stringValue(runtimeCfg["default_target_resolution"]), "720P")
+			params["operation"] = firstAgentString(stringValue(runtimeCfg["upscale_operation"]), "upscale")
+			total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
+		}
+		return total
+	}
+	if stringValue(runtimeCfg["agent_mode"]) == "video_redraw" {
+		if code := stringValue(runtimeCfg["generation_model_code"]); code != "" {
+			params := copyAgentMap(inputs)
+			params["count"], params["n"] = 1, 1
+			params["operation"] = firstAgentString(stringValue(runtimeCfg["redraw_operation"]), "video_redraw")
+			total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
+		}
+		return total
+	}
+	if stringValue(runtimeCfg["agent_mode"]) == "subtitle_remove" {
+		mode := firstAgentString(stringValue(inputs["subtitle_mode"]), stringValue(runtimeCfg["default_subtitle_mode"]), "auto")
+		if mode != "soft_track" {
+			if code := stringValue(runtimeCfg["generation_model_code"]); code != "" {
+				params := copyAgentMap(inputs)
+				params["count"], params["n"] = 1, 1
+				params["operation"] = firstAgentString(stringValue(runtimeCfg["subtitle_remove_operation"]), "subtitle_remove")
+				total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
+			}
+		}
+		return total
+	}
 	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
 		maxRetry := intFromAgentAny(firstAgentNonNil(inputs["max_retry"], runtimeCfg["max_retry"]))
 		if maxRetry < 0 {
@@ -1093,6 +1388,14 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		total += s.estimateModelCostByCode(ctx, code, generationInputs, 0, 0)
 	}
 	return total
+}
+
+func copyAgentMap(source map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(source)+4)
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
 }
 
 func comicSegmentDurationSeconds(inputs, runtimeCfg map[string]interface{}) int {
@@ -1457,6 +1760,23 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 		}
 	} else if mode == "simple_pipeline" {
 		in = normalizeSimpleAgentInput(in)
+	} else if mode == "video_upscale" {
+		in = normalizeVideoUpscaleAgentInput(in)
+		if err := s.validateVideoUpscaleAdminModel(ctx, in.RuntimeConfig); err != nil {
+			return err
+		}
+	} else if mode == "video_redraw" {
+		in = normalizeVideoRedrawAgentInput(in)
+		if err := s.validateVideoUpscaleAdminModel(ctx, in.RuntimeConfig); err != nil {
+			return err
+		}
+	} else if mode == "subtitle_remove" {
+		in = normalizeSubtitleRemovalAgentInput(in)
+		if stringValue(in.RuntimeConfig["generation_model_code"]) != "" {
+			if err := s.validateVideoUpscaleAdminModel(ctx, in.RuntimeConfig); err != nil {
+				return err
+			}
+		}
 	}
 	nodes, _ := json.Marshal(in.Nodes)
 	if len(in.Nodes) == 0 {
@@ -1480,6 +1800,142 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 		  name=$2, description=$3, icon=$4, category=$5, nodes=$6, input_schema=$7, price_rule=$8, display_config=$9, runtime_config=$10, is_enabled=$11, sort_order=$12, updated_at=now()`,
 		in.Code, in.Name, desc, icon, in.Category, nodes, schema, price, display, runtime, in.IsEnabled, in.SortOrder)
 	return err
+}
+
+func normalizeVideoRedrawAgentInput(in AgentUpsertInput) AgentUpsertInput {
+	in.Category = "video"
+	in.GenerationType = "video"
+	in.RuntimeConfig["agent_mode"] = "video_redraw"
+	in.RuntimeConfig["generation_type"] = "video"
+	in.RuntimeConfig["preset_code"] = "video_redraw"
+	if stringValue(in.RuntimeConfig["generation_model_code"]) == "" {
+		in.RuntimeConfig["generation_model_code"] = in.GenerationModelCode
+	}
+	if floatValue(in.RuntimeConfig["default_style_strength"]) <= 0 {
+		in.RuntimeConfig["default_style_strength"] = 0.65
+	}
+	for _, key := range []string{"preserve_motion", "preserve_identity", "preserve_audio"} {
+		if _, ok := in.RuntimeConfig[key]; !ok {
+			in.RuntimeConfig[key] = true
+		}
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_duration_sec"]) <= 0 {
+		in.RuntimeConfig["max_input_duration_sec"] = 180
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_size_mb"]) <= 0 {
+		in.RuntimeConfig["max_input_size_mb"] = 500
+	}
+	in.RuntimeConfig["default_count"] = 1
+	in.Nodes = []WorkflowNode{{ID: "redraw", Type: "video", Name: "一键转绘", ModelCode: stringValue(in.RuntimeConfig["generation_model_code"]), Cost: 0}}
+	in.InputSchema = map[string]interface{}{
+		"type": "object", "required": []string{"video_url"},
+		"properties": map[string]interface{}{
+			"video_url":         map[string]interface{}{"type": "string", "title": "源视频"},
+			"style_strength":    map[string]interface{}{"type": "number", "title": "转绘强度", "minimum": 0.05, "maximum": 1, "default": in.RuntimeConfig["default_style_strength"]},
+			"preserve_motion":   map[string]interface{}{"type": "boolean", "title": "保持动作", "default": in.RuntimeConfig["preserve_motion"]},
+			"preserve_identity": map[string]interface{}{"type": "boolean", "title": "保持人物一致", "default": in.RuntimeConfig["preserve_identity"]},
+			"preserve_audio":    map[string]interface{}{"type": "boolean", "title": "保留原音", "default": in.RuntimeConfig["preserve_audio"]},
+		},
+	}
+	return in
+}
+
+func normalizeSubtitleRemovalAgentInput(in AgentUpsertInput) AgentUpsertInput {
+	in.Category = "video"
+	in.GenerationType = "video"
+	in.RuntimeConfig["agent_mode"] = "subtitle_remove"
+	in.RuntimeConfig["generation_type"] = "video"
+	in.RuntimeConfig["preset_code"] = "subtitle_remove"
+	if stringValue(in.RuntimeConfig["generation_model_code"]) == "" {
+		in.RuntimeConfig["generation_model_code"] = in.GenerationModelCode
+	}
+	if stringValue(in.RuntimeConfig["default_subtitle_mode"]) == "" {
+		in.RuntimeConfig["default_subtitle_mode"] = "auto"
+	}
+	if stringValue(in.RuntimeConfig["default_subtitle_region"]) == "" {
+		in.RuntimeConfig["default_subtitle_region"] = "bottom_25"
+	}
+	if _, ok := in.RuntimeConfig["protect_watermark"]; !ok {
+		in.RuntimeConfig["protect_watermark"] = true
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_duration_sec"]) <= 0 {
+		in.RuntimeConfig["max_input_duration_sec"] = 300
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_size_mb"]) <= 0 {
+		in.RuntimeConfig["max_input_size_mb"] = 1000
+	}
+	in.RuntimeConfig["default_count"] = 1
+	in.Nodes = []WorkflowNode{{ID: "remove_subtitle", Type: "video", Name: "一键去字幕", ModelCode: stringValue(in.RuntimeConfig["generation_model_code"]), Cost: 0}}
+	in.InputSchema = map[string]interface{}{
+		"type": "object", "required": []string{"video_url"},
+		"properties": map[string]interface{}{
+			"video_url":         map[string]interface{}{"type": "string", "title": "源视频"},
+			"subtitle_mode":     map[string]interface{}{"type": "string", "title": "去字幕模式", "enum": []string{"auto", "soft_track", "hardcoded_ai"}, "default": in.RuntimeConfig["default_subtitle_mode"]},
+			"subtitle_region":   map[string]interface{}{"type": "string", "title": "字幕区域", "enum": []string{"bottom_15", "bottom_25", "bottom_35", "full_frame"}, "default": in.RuntimeConfig["default_subtitle_region"]},
+			"protect_watermark": map[string]interface{}{"type": "boolean", "title": "保护水印与标识", "default": in.RuntimeConfig["protect_watermark"]},
+		},
+	}
+	return in
+}
+
+func normalizeVideoUpscaleAgentInput(in AgentUpsertInput) AgentUpsertInput {
+	in.Category = "video"
+	in.GenerationType = "video"
+	in.RuntimeConfig["agent_mode"] = "video_upscale"
+	in.RuntimeConfig["generation_type"] = "video"
+	in.RuntimeConfig["preset_code"] = "video_upscale"
+	if stringValue(in.RuntimeConfig["generation_model_code"]) == "" {
+		in.RuntimeConfig["generation_model_code"] = in.GenerationModelCode
+	}
+	if len(agentStringSlice(in.RuntimeConfig["supported_resolutions"], nil)) == 0 {
+		in.RuntimeConfig["supported_resolutions"] = []string{"720P", "1K", "2K"}
+	}
+	if normalizeAgentUpscaleResolution(stringValue(in.RuntimeConfig["default_target_resolution"])) == "" {
+		in.RuntimeConfig["default_target_resolution"] = "720P"
+	}
+	if _, ok := in.RuntimeConfig["preserve_audio"]; !ok {
+		in.RuntimeConfig["preserve_audio"] = true
+	}
+	if stringValue(in.RuntimeConfig["default_enhancement_mode"]) == "" {
+		in.RuntimeConfig["default_enhancement_mode"] = "balanced"
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_duration_sec"]) <= 0 {
+		in.RuntimeConfig["max_input_duration_sec"] = 300
+	}
+	if intFromAgentAny(in.RuntimeConfig["max_input_size_mb"]) <= 0 {
+		in.RuntimeConfig["max_input_size_mb"] = 500
+	}
+	in.RuntimeConfig["default_count"] = 1
+	in.Nodes = []WorkflowNode{{ID: "upscale", Type: "video", Name: "AI 视频高清", ModelCode: stringValue(in.RuntimeConfig["generation_model_code"]), Cost: 0}}
+	in.InputSchema = map[string]interface{}{
+		"type":     "object",
+		"required": []string{"video_url", "target_resolution"},
+		"properties": map[string]interface{}{
+			"video_url":         map[string]interface{}{"type": "string", "title": "源视频"},
+			"target_resolution": map[string]interface{}{"type": "string", "title": "目标清晰度", "enum": in.RuntimeConfig["supported_resolutions"], "default": in.RuntimeConfig["default_target_resolution"]},
+			"preserve_audio":    map[string]interface{}{"type": "boolean", "title": "保留原音", "default": in.RuntimeConfig["preserve_audio"]},
+			"enhancement_mode":  map[string]interface{}{"type": "string", "title": "增强模式", "enum": []string{"balanced", "detail", "denoise"}, "default": in.RuntimeConfig["default_enhancement_mode"]},
+		},
+	}
+	if len(in.PriceRule) == 0 {
+		in.PriceRule = map[string]interface{}{"billing_type": "model_actual", "unit_price": 0}
+	}
+	return in
+}
+
+func (s *AgentService) validateVideoUpscaleAdminModel(ctx context.Context, runtimeCfg map[string]interface{}) error {
+	code := strings.TrimSpace(stringValue(runtimeCfg["generation_model_code"]))
+	if code == "" {
+		return errors.New("请选择支持视频转视频/超分的模型")
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category='video' AND is_enabled=true)`, code).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("所选超分模型不存在、不是视频模型或已停用：%s", code)
+	}
+	return nil
 }
 
 func (s *AgentService) ConfirmStep(ctx context.Context, userID int64, publicID, step string, payload map[string]interface{}) error {

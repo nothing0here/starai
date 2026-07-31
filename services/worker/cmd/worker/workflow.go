@@ -94,6 +94,15 @@ func processWorkflowTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token
 	if stringAny(runtimeCfg["agent_mode"]) == "comic_drama" {
 		return processComicDramaWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}
+	if stringAny(runtimeCfg["agent_mode"]) == "video_upscale" {
+		return processVideoUpscaleWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
+	}
+	if stringAny(runtimeCfg["agent_mode"]) == "video_redraw" {
+		return processVideoRedrawWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
+	}
+	if stringAny(runtimeCfg["agent_mode"]) == "subtitle_remove" {
+		return processSubtitleRemovalWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
+	}
 	if stringAny(runtimeCfg["agent_mode"]) == "simple_pipeline" {
 		return processSimpleAgentWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}
@@ -101,6 +110,380 @@ func processWorkflowTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token
 	var nodes []workflowNode
 	_ = json.Unmarshal(nodesRaw, &nodes)
 	return processCustomWorkflow(ctx, pool, baseURL, token, p, publicID, category, estimated, inputs, nodes)
+}
+
+func processVideoRedrawWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p WorkflowTaskPayload, publicID string, estimated float64, inputs, runtimeCfg map[string]interface{}) error {
+	outputs := loadWorkflowOutputs(ctx, pool, p.ProjectID)
+	if _, done := outputs["media_tasks"]; done && stringAny(outputs["current_step"]) == "result" {
+		return completeSimpleAgentWorkflow(ctx, pool, p, publicID, estimated, outputs)
+	}
+	sourceVideo := firstNonEmpty(firstWorkerURL(inputs["video_url"]), firstWorkerURL(inputs["source_video_url"]), firstWorkerURL(inputs["reference_videos"]))
+	if sourceVideo == "" {
+		return failWorkflow(ctx, pool, p, publicID, estimated, "请先上传或从资产库选择源视频")
+	}
+	nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "redraw", "一键转绘", "video", map[string]interface{}{
+		"source_video_url": sourceVideo,
+		"model_code":       stringAny(runtimeCfg["generation_model_code"]),
+	}, 0)
+	start := time.Now()
+	taskInputs := copyMap(inputs)
+	taskInputs["count"] = 1
+	taskInputs["n"] = 1
+	taskInputs["video_url"] = sourceVideo
+	taskInputs["source_video_url"] = sourceVideo
+	taskInputs["reference_videos"] = []string{sourceVideo}
+	taskInputs["operation"] = firstNonEmpty(stringAny(runtimeCfg["redraw_operation"]), "video_redraw")
+	taskInputs["style_strength"] = clampFloat(firstPositiveFloat(floatAny(inputs["style_strength"]), floatAny(runtimeCfg["default_style_strength"]), 0.65), 0.05, 1)
+	taskInputs["preserve_motion"] = boolDefault(inputs["preserve_motion"], boolDefault(runtimeCfg["preserve_motion"], true))
+	taskInputs["preserve_identity"] = boolDefault(inputs["preserve_identity"], boolDefault(runtimeCfg["preserve_identity"], true))
+	taskInputs["preserve_audio"] = boolDefault(inputs["preserve_audio"], boolDefault(runtimeCfg["preserve_audio"], true))
+	prompt := joinWorkflowInstruction(
+		firstNonEmpty(
+			stringAny(runtimeCfg["redraw_prompt"]),
+			"Redraw the source video in the requested visual style. Preserve timing, camera motion, action continuity, composition and character identity. Avoid flicker, frame inconsistency, warped faces, extra limbs, subtitles and watermarks.",
+		),
+		stringAny(inputs["prompt"]),
+	)
+	videoRuntime := copyMap(runtimeCfg)
+	videoRuntime["generation_type"] = "video"
+	mediaTasks, errMsg := runAgentMediaTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, videoRuntime, taskInputs, prompt)
+	return finishVideoTransformWorkflow(ctx, pool, p, publicID, estimated, outputs, nodeRunID, start, mediaTasks, errMsg, map[string]interface{}{
+		"source_video_url": sourceVideo,
+		"style_strength":   taskInputs["style_strength"],
+	}, "视频转绘失败：")
+}
+
+func processSubtitleRemovalWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p WorkflowTaskPayload, publicID string, estimated float64, inputs, runtimeCfg map[string]interface{}) error {
+	outputs := loadWorkflowOutputs(ctx, pool, p.ProjectID)
+	if _, done := outputs["media_tasks"]; done && stringAny(outputs["current_step"]) == "result" {
+		return completeSimpleAgentWorkflow(ctx, pool, p, publicID, estimated, outputs)
+	}
+	sourceVideo := firstNonEmpty(firstWorkerURL(inputs["video_url"]), firstWorkerURL(inputs["source_video_url"]), firstWorkerURL(inputs["reference_videos"]))
+	if sourceVideo == "" {
+		return failWorkflow(ctx, pool, p, publicID, estimated, "请先上传或从资产库选择源视频")
+	}
+	removeMode := firstNonEmpty(stringAny(inputs["subtitle_mode"]), stringAny(runtimeCfg["default_subtitle_mode"]), "auto")
+	nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "remove_subtitle", "一键去字幕", "video", map[string]interface{}{
+		"source_video_url": sourceVideo,
+		"subtitle_mode":    removeMode,
+	}, 0)
+	start := time.Now()
+
+	if removeMode == "auto" || removeMode == "soft_track" {
+		localTask, hadTrack, localErr := removeEmbeddedSubtitleTracks(ctx, pool, p.ProjectID, p.UserID, publicID, sourceVideo)
+		if localErr == nil && hadTrack {
+			return finishVideoTransformWorkflow(ctx, pool, p, publicID, estimated, outputs, nodeRunID, start, []map[string]interface{}{localTask}, "", map[string]interface{}{
+				"source_video_url":   sourceVideo,
+				"subtitle_mode":      "soft_track",
+				"had_subtitle_track": hadTrack,
+			}, "")
+		}
+		if removeMode == "soft_track" {
+			message := "未检测到可移除的独立字幕轨"
+			if localErr != nil {
+				message = localErr.Error()
+			}
+			return finishVideoTransformWorkflow(ctx, pool, p, publicID, estimated, outputs, nodeRunID, start, nil, message, map[string]interface{}{"source_video_url": sourceVideo}, "字幕轨移除失败：")
+		}
+	}
+
+	if stringAny(runtimeCfg["generation_model_code"]) == "" {
+		return finishVideoTransformWorkflow(ctx, pool, p, publicID, estimated, outputs, nodeRunID, start, nil, "未检测到可移除的独立字幕轨，且后台未配置硬字幕 AI 修复模型", map[string]interface{}{"source_video_url": sourceVideo}, "")
+	}
+	taskInputs := copyMap(inputs)
+	taskInputs["count"] = 1
+	taskInputs["n"] = 1
+	taskInputs["video_url"] = sourceVideo
+	taskInputs["source_video_url"] = sourceVideo
+	taskInputs["reference_videos"] = []string{sourceVideo}
+	taskInputs["operation"] = firstNonEmpty(stringAny(runtimeCfg["subtitle_remove_operation"]), "subtitle_remove")
+	taskInputs["subtitle_region"] = firstNonEmpty(stringAny(inputs["subtitle_region"]), stringAny(runtimeCfg["default_subtitle_region"]), "bottom_25")
+	taskInputs["protect_watermark"] = boolDefault(inputs["protect_watermark"], boolDefault(runtimeCfg["protect_watermark"], true))
+	taskInputs["preserve_audio"] = true
+	prompt := joinWorkflowInstruction(
+		firstNonEmpty(
+			stringAny(runtimeCfg["subtitle_remove_prompt"]),
+			"Remove only the burned-in subtitles from the specified area of the source video. Reconstruct the background naturally across every frame, preserve people, objects, logos, watermarks outside the subtitle area, motion, timing and original audio, and avoid blur, flicker or ghosting.",
+		),
+		stringAny(inputs["prompt"]),
+	)
+	videoRuntime := copyMap(runtimeCfg)
+	videoRuntime["generation_type"] = "video"
+	mediaTasks, errMsg := runAgentMediaTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, videoRuntime, taskInputs, prompt)
+	return finishVideoTransformWorkflow(ctx, pool, p, publicID, estimated, outputs, nodeRunID, start, mediaTasks, errMsg, map[string]interface{}{
+		"source_video_url": sourceVideo,
+		"subtitle_mode":    "hardcoded_ai",
+		"subtitle_region":  taskInputs["subtitle_region"],
+	}, "硬字幕 AI 修复失败：")
+}
+
+func finishVideoTransformWorkflow(ctx context.Context, pool *pgxpool.Pool, p WorkflowTaskPayload, publicID string, estimated float64, outputs map[string]interface{}, nodeRunID int64, started time.Time, mediaTasks []map[string]interface{}, errMsg string, metadata map[string]interface{}, errPrefix string) error {
+	duration := int(time.Since(started).Milliseconds())
+	actual := sumAgentMediaTaskCost(mediaTasks)
+	out := map[string]interface{}{"media_tasks": mediaTasks, "cost": actual}
+	for key, value := range metadata {
+		out[key] = value
+		outputs[key] = value
+	}
+	if errMsg != "" {
+		outputs["current_step"] = "failed"
+		outputs["last_error"] = errMsg
+		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
+		pool.Exec(ctx, `UPDATE workflow_node_runs SET status='failed', output=$1, error=$2, duration_ms=$3 WHERE id=$4`, mustJSON(out), errMsg, duration, nodeRunID)
+		return failWorkflow(ctx, pool, p, publicID, estimated, errPrefix+errMsg)
+	}
+	delete(outputs, "last_error")
+	outputs["media_tasks"] = mediaTasks
+	outputs["current_step"] = "result"
+	saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
+	updateNodeRunSuccess(ctx, pool, nodeRunID, out, actual, duration)
+	return completeSimpleAgentWorkflow(ctx, pool, p, publicID, estimated, outputs)
+}
+
+func firstPositiveFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func clampFloat(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func joinWorkflowInstruction(systemInstruction, userInstruction string) string {
+	systemInstruction = strings.TrimSpace(systemInstruction)
+	userInstruction = strings.TrimSpace(userInstruction)
+	if userInstruction == "" {
+		return systemInstruction
+	}
+	if systemInstruction == "" {
+		return userInstruction
+	}
+	return systemInstruction + "\n\nUser requirements:\n" + userInstruction
+}
+
+func processVideoUpscaleWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p WorkflowTaskPayload, publicID string, estimated float64, inputs, runtimeCfg map[string]interface{}) error {
+	outputs := loadWorkflowOutputs(ctx, pool, p.ProjectID)
+	if _, done := outputs["media_tasks"]; done && stringAny(outputs["current_step"]) == "result" {
+		return completeSimpleAgentWorkflow(ctx, pool, p, publicID, estimated, outputs)
+	}
+	sourceVideo := firstWorkerURL(inputs["video_url"])
+	if sourceVideo == "" {
+		sourceVideo = firstWorkerURL(inputs["source_video_url"])
+	}
+	if sourceVideo == "" {
+		sourceVideo = firstWorkerURL(inputs["reference_videos"])
+	}
+	if sourceVideo == "" {
+		return failWorkflow(ctx, pool, p, publicID, estimated, "请先上传或从资产库选择源视频")
+	}
+	targetResolution := normalizeUpscaleResolution(firstNonEmpty(stringAny(inputs["target_resolution"]), stringAny(runtimeCfg["default_target_resolution"])))
+	if targetResolution == "" || !upscaleResolutionAllowed(targetResolution, runtimeCfg["supported_resolutions"]) {
+		return failWorkflow(ctx, pool, p, publicID, estimated, "目标清晰度不受支持")
+	}
+
+	nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "upscale", "AI 视频高清", "video", map[string]interface{}{
+		"source_video_url":  sourceVideo,
+		"target_resolution": targetResolution,
+		"model_code":        stringAny(runtimeCfg["generation_model_code"]),
+	}, 0)
+	start := time.Now()
+	taskInputs := copyMap(inputs)
+	taskInputs["count"] = 1
+	taskInputs["n"] = 1
+	taskInputs["video_url"] = sourceVideo
+	taskInputs["source_video_url"] = sourceVideo
+	taskInputs["reference_videos"] = []string{sourceVideo}
+	taskInputs["target_resolution"] = targetResolution
+	taskInputs["resolution"] = targetResolution
+	taskInputs["operation"] = firstNonEmpty(stringAny(runtimeCfg["upscale_operation"]), "upscale")
+	taskInputs["preserve_audio"] = boolDefault(taskInputs["preserve_audio"], boolDefault(runtimeCfg["preserve_audio"], true))
+	taskInputs["enhancement_mode"] = firstNonEmpty(stringAny(taskInputs["enhancement_mode"]), stringAny(runtimeCfg["default_enhancement_mode"]), "balanced")
+	prompt := firstNonEmpty(
+		stringAny(inputs["prompt"]),
+		stringAny(runtimeCfg["upscale_prompt"]),
+		"Enhance the source video to the requested resolution. Preserve the original content, timing, composition, identity, motion and audio. Reduce compression artifacts and noise, recover natural detail, and avoid changing the scene.",
+	)
+	videoRuntime := copyMap(runtimeCfg)
+	videoRuntime["generation_type"] = "video"
+	mediaTasks, errMsg := runAgentMediaTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, videoRuntime, taskInputs, prompt)
+	duration := int(time.Since(start).Milliseconds())
+	actual := sumAgentMediaTaskCost(mediaTasks)
+	out := map[string]interface{}{
+		"media_tasks":       mediaTasks,
+		"source_video_url":  sourceVideo,
+		"target_resolution": targetResolution,
+		"cost":              actual,
+	}
+	outputs["media_tasks"] = mediaTasks
+	outputs["source_video_url"] = sourceVideo
+	outputs["target_resolution"] = targetResolution
+	outputs["current_step"] = "result"
+	saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
+	if errMsg != "" {
+		pool.Exec(ctx, `UPDATE workflow_node_runs SET status='failed', output=$1, error=$2, duration_ms=$3 WHERE id=$4`, mustJSON(out), errMsg, duration, nodeRunID)
+		return failWorkflow(ctx, pool, p, publicID, estimated, "视频高清处理失败："+errMsg)
+	}
+	updateNodeRunSuccess(ctx, pool, nodeRunID, out, actual, duration)
+	return completeSimpleAgentWorkflow(ctx, pool, p, publicID, estimated, outputs)
+}
+
+func firstWorkerURL(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []string:
+		if len(v) > 0 {
+			return strings.TrimSpace(v[0])
+		}
+	case []interface{}:
+		if len(v) > 0 {
+			return firstWorkerURL(v[0])
+		}
+	case map[string]interface{}:
+		return firstNonEmpty(stringAny(v["url"]), stringAny(v["video_url"]))
+	}
+	return ""
+}
+
+func normalizeUpscaleResolution(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "720P", "1280X720":
+		return "720P"
+	case "1K", "1080P", "1920X1080":
+		return "1K"
+	case "2K", "1440P", "2560X1440":
+		return "2K"
+	default:
+		return ""
+	}
+}
+
+func upscaleResolutionAllowed(value string, raw interface{}) bool {
+	allowed := map[string]bool{}
+	switch items := raw.(type) {
+	case []interface{}:
+		for _, item := range items {
+			if normalized := normalizeUpscaleResolution(stringAny(item)); normalized != "" {
+				allowed[normalized] = true
+			}
+		}
+	case []string:
+		for _, item := range items {
+			if normalized := normalizeUpscaleResolution(item); normalized != "" {
+				allowed[normalized] = true
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return value == "720P" || value == "1K" || value == "2K"
+	}
+	return allowed[value]
+}
+
+func boolDefault(value interface{}, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	if typed, ok := value.(bool); ok {
+		return typed
+	}
+	return fallback
+}
+
+func removeEmbeddedSubtitleTracks(ctx context.Context, pool *pgxpool.Pool, projectID, userID int64, publicID, sourceURL string) (map[string]interface{}, bool, error) {
+	if objectStore == nil {
+		return nil, false, errors.New("对象存储未配置，无法保存去字幕结果")
+	}
+	if _, err := ffmpegBinaryPath(); err != nil {
+		return nil, false, err
+	}
+	data, _, err := downloadAuthenticatedMedia(ctx, connectionConfig{}, sourceURL, 1024<<20)
+	if err != nil {
+		return nil, false, fmt.Errorf("下载源视频失败：%w", err)
+	}
+	tmpDir, err := os.MkdirTemp("", "starai-subtitle-remove-*")
+	if err != nil {
+		return nil, false, err
+	}
+	defer os.RemoveAll(tmpDir)
+	inputPath := filepath.Join(tmpDir, "source.mp4")
+	if err := os.WriteFile(inputPath, data, 0600); err != nil {
+		return nil, false, err
+	}
+	hadTrack, probeErr := mediaHasSubtitle(ctx, inputPath)
+	if probeErr != nil {
+		return nil, false, fmt.Errorf("检测字幕轨失败：%w", probeErr)
+	}
+	if !hadTrack {
+		return nil, false, nil
+	}
+	taskNo := newWorkflowTaskNo(0)
+	taskInput := map[string]interface{}{"video_url": sourceURL, "operation": "remove_subtitle_track", "_skip_billing": true, "_workflow_project": publicID}
+	inputJSON, _ := json.Marshal(taskInput)
+	if _, err := pool.Exec(ctx, `INSERT INTO tasks (task_no,user_id,model_id,type,status,input,estimated_cost,started_at) VALUES ($1,$2,NULL,'video','running',$3,0,now())`, taskNo, userID, inputJSON); err != nil {
+		return nil, hadTrack, err
+	}
+	appendWorkflowMediaTask(ctx, pool, projectID, map[string]interface{}{"task_no": taskNo, "type": "video", "status": "running", "progress": 20, "output": map[string]interface{}{}})
+	outputPath := filepath.Join(tmpDir, "result.mp4")
+	if err := runFFmpeg(ctx, "-y", "-i", inputPath, "-map", "0:v?", "-map", "0:a?", "-map", "0:d?", "-c", "copy", "-sn", "-movflags", "+faststart", outputPath); err != nil {
+		pool.Exec(ctx, `UPDATE tasks SET status='failed',error_code='SUBTITLE_REMOVE_FAILED',error_message=$1,finished_at=now(),updated_at=now() WHERE task_no=$2`, err.Error(), taskNo)
+		return nil, hadTrack, err
+	}
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil || len(outputData) == 0 {
+		pool.Exec(ctx, `UPDATE tasks SET status='failed',error_code='SUBTITLE_REMOVE_FAILED',error_message='读取去字幕结果失败',finished_at=now(),updated_at=now() WHERE task_no=$1`, taskNo)
+		return nil, hadTrack, errors.New("读取去字幕结果失败")
+	}
+	objectName := fmt.Sprintf("works/subtitle-remove/%s/result_%d.mp4", publicID, time.Now().UnixNano())
+	publicURL, err := objectStore.Upload(ctx, objectName, "video/mp4", bytes.NewReader(outputData), int64(len(outputData)))
+	if err != nil {
+		pool.Exec(ctx, `UPDATE tasks SET status='failed',error_code='SUBTITLE_REMOVE_FAILED',error_message=$1,finished_at=now(),updated_at=now() WHERE task_no=$2`, err.Error(), taskNo)
+		return nil, hadTrack, fmt.Errorf("上传去字幕结果失败：%w", err)
+	}
+	output := map[string]interface{}{
+		"video_url":          publicURL,
+		"url":                publicURL,
+		"subtitle_mode":      "soft_track",
+		"had_subtitle_track": hadTrack,
+	}
+	outputJSON, _ := json.Marshal(output)
+	var taskID int64
+	if err := pool.QueryRow(ctx, `UPDATE tasks SET status='succeeded',output=$1,actual_cost=0,error_code=NULL,error_message=NULL,finished_at=now(),updated_at=now() WHERE task_no=$2 RETURNING id`, outputJSON, taskNo).Scan(&taskID); err != nil {
+		return nil, hadTrack, err
+	}
+	workID := fmt.Sprintf("work_%d", time.Now().UnixNano())
+	pool.Exec(ctx, `INSERT INTO works (public_id,user_id,task_id,model_id,type,prompt,thumbnail_url,metadata) VALUES ($1,$2,$3,NULL,'video',$4,$5,$6)`,
+		workID, userID, taskID, "移除视频独立字幕轨", publicURL, outputJSON)
+	pool.Exec(ctx, `INSERT INTO task_events (task_id,event_type,payload) VALUES ($1,'completed',$2)`, taskID, outputJSON)
+	item := map[string]interface{}{"task_no": taskNo, "type": "video", "status": "succeeded", "progress": 100, "output": output, "estimated_cost": 0, "actual_cost": 0}
+	appendWorkflowMediaTask(ctx, pool, projectID, item)
+	return item, hadTrack, nil
+}
+
+func mediaHasSubtitle(ctx context.Context, path string) (bool, error) {
+	ffprobePath := "ffprobe"
+	if ffmpegPath, err := ffmpegBinaryPath(); err == nil {
+		candidate := filepath.Join(filepath.Dir(ffmpegPath), ffprobeExecutableName())
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			ffprobePath = candidate
+		}
+	}
+	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", "s", "-show_entries", "stream=index", "-of", "csv=p=0", path)
+	output, err := cmd.Output()
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(output)) != "", nil
 }
 
 func processCustomWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p WorkflowTaskPayload, publicID string, category string, estimated float64, inputs map[string]interface{}, nodes []workflowNode) error {
@@ -1586,9 +1969,61 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 }
 
 func estimateDynamicPriceRuleCostWorker(rule, params map[string]interface{}) float64 {
-	if !strings.EqualFold(strings.TrimSpace(stringAny(rule["strategy"])), "seedance_2_tokens") {
+	switch strings.ToLower(strings.TrimSpace(stringAny(rule["strategy"]))) {
+	case "seedance_2_tokens":
+		return estimateSeedance2PriceRuleCostWorker(rule, params)
+	case "minimax_h3_seconds":
+		return estimateMiniMaxH3PriceRuleCostWorker(rule, params)
+	default:
 		return floatAny(rule["fallback_cost"])
 	}
+}
+
+func estimateMiniMaxH3PriceRuleCostWorker(rule, params map[string]interface{}) float64 {
+	resolution := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringAny(params["resolution"]), stringAny(rule["default_resolution"]), "2k")))
+	rate := nestedWorkerFloat(rule["rates_per_second"], resolution, "")
+	if rate <= 0 {
+		rate = map[string]float64{"2k": 0.8, "768p": 0.5}[resolution]
+	}
+	if rate <= 0 {
+		return floatAny(rule["fallback_cost"])
+	}
+	outputSeconds := workerDurationSeconds(params)
+	videoCount := workerURLFieldCount(params["reference_videos"])
+	inputSeconds := floatAny(params["reference_video_duration_seconds"])
+	if videoCount > 0 && inputSeconds <= 0 {
+		inputSeconds = float64(videoCount) * floatAny(rule["default_input_video_seconds"])
+		if inputSeconds <= 0 {
+			inputSeconds = float64(videoCount) * 4
+		}
+	}
+	imageCount := workerURLFieldCount(params["reference_images"]) +
+		workerURLFieldCount(params["first_frame"]) +
+		workerURLFieldCount(params["last_frame"])
+	freeImages := int(floatAny(rule["free_reference_images"]))
+	if freeImages < 0 {
+		freeImages = 0
+	}
+	excessImages := imageCount - freeImages
+	if excessImages < 0 {
+		excessImages = 0
+	}
+	imagePrice := floatAny(rule["excess_image_price"])
+	if imagePrice <= 0 {
+		imagePrice = 0.2
+	}
+	multiplier := floatAny(rule["platform_multiplier"])
+	if multiplier <= 0 {
+		multiplier = 1
+	}
+	pointsPerCNY := floatAny(rule["points_per_cny"])
+	if pointsPerCNY <= 0 {
+		pointsPerCNY = 1
+	}
+	return ((outputSeconds+inputSeconds)*rate + float64(excessImages)*imagePrice) * multiplier * pointsPerCNY
+}
+
+func estimateSeedance2PriceRuleCostWorker(rule, params map[string]interface{}) float64 {
 	resolution := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringAny(params["resolution"]), stringAny(rule["default_resolution"]), "720p")))
 	tokensPerSecond := nestedWorkerFloat(rule["tokens_per_second"], resolution, "")
 	if tokensPerSecond <= 0 {
