@@ -12,6 +12,7 @@ export function MediaOptionMenu({
   subtitle,
   tone = "white",
   compactOnMobile = false,
+  menuWidth = 220,
   children,
 }: {
   icon: ReactNode;
@@ -21,6 +22,7 @@ export function MediaOptionMenu({
   subtitle: string;
   tone?: "white" | "yellow";
   compactOnMobile?: boolean;
+  menuWidth?: number;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -30,7 +32,6 @@ export function MediaOptionMenu({
   const openMenu = () => {
     const rect = btnRef.current?.getBoundingClientRect();
     if (rect) {
-      const menuWidth = 220;
       const viewportGap = 8;
       setPos({
         left: Math.max(viewportGap, Math.min(rect.left, window.innerWidth - menuWidth - viewportGap)),
@@ -60,8 +61,8 @@ export function MediaOptionMenu({
         ? createPortal(
             <div className="fixed inset-0 z-[70]" onClick={() => setOpen(false)}>
               <div
-                className="fixed w-[220px] max-w-[calc(100vw-1rem)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-white/10 dark:bg-gray-900"
-                style={{ left: pos.left, bottom: pos.bottom }}
+                className="fixed max-w-[calc(100vw-1rem)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl dark:border-white/10 dark:bg-gray-900"
+                style={{ left: pos.left, bottom: pos.bottom, width: menuWidth }}
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="border-b border-gray-100 px-4 py-2.5 dark:border-white/10">
@@ -82,23 +83,25 @@ export function MediaMenuOption({
   selected,
   children,
   onClick,
+  multiline = false,
 }: {
   selected: boolean;
   children: ReactNode;
   onClick: () => void;
+  multiline?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`w-full h-10 px-3.5 rounded-xl text-left flex items-center justify-between text-sm font-semibold ${
+      className={`w-full px-3.5 rounded-xl text-left flex justify-between gap-3 text-sm font-semibold ${multiline ? "min-h-14 items-start py-2.5" : "h-10 items-center"} ${
         selected
           ? "bg-primary/10 dark:bg-primary/15 text-gray-900 dark:text-gray-100"
           : "bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10"
       }`}
     >
-      <span>{children}</span>
-      {selected && <Check size={16} className="text-primary" />}
+      <span className="min-w-0 flex-1">{children}</span>
+      {selected && <Check size={16} className={`shrink-0 text-primary ${multiline ? "mt-0.5" : ""}`} />}
     </button>
   );
 }

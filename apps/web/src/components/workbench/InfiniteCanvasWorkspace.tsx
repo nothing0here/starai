@@ -66,6 +66,15 @@ import { SchemaForm, schemaDefaults, schemaProperties } from "./SchemaForm";
 
 type CanvasNodeKind = "textInput" | "imageInput" | "generator" | "compositor";
 type GeneratorKind = "text" | "image" | "video" | "audio";
+type StoryNarrationMode = "narration" | "first_person" | "third_person" | "character_dialogue" | "smart";
+type StorySpeechItem = {
+  segment_index: number;
+  speaker_code: string;
+  speaker_name: string;
+  speech_type: "narration" | "dialogue" | "inner_monologue";
+  text: string;
+  voice_hint?: string;
+};
 type NewNodeKind =
   | "text"
   | "textGenerator"
@@ -90,13 +99,16 @@ type CanvasNodeData = Record<string, unknown> & {
   referenceAudioUrls?: string[];
   referenceAudioIds?: string[];
   outputUrl?: string;
+  outputUrls?: string[];
   outputText?: string;
   outputKind?: GeneratorKind;
   taskNo?: string;
+  taskNos?: string[];
   status?: "idle" | "pending" | "running" | "succeeded" | "failed" | "stale" | "blocked";
   progress?: number;
   progressStage?: string;
   error?: string;
+  warning?: string;
   dirty?: boolean;
   lastRunSignature?: string;
   count?: number;
@@ -119,6 +131,10 @@ type CanvasNodeData = Record<string, unknown> & {
   storySegmentCount?: number;
   storySegmentDuration?: number;
   storyDurationOptions?: number[];
+  storyNarrationMode?: StoryNarrationMode;
+  storySpeechPlan?: StorySpeechItem[];
+  storyVoiceAssignments?: Record<string, string>;
+  storyVoiceOverrides?: Record<string, string>;
   viralGroupID?: string;
   viralRole?: "brief" | "reference" | "brand" | "analysis" | "keyframe" | "video" | "final";
   viralSegmentIndex?: number;
@@ -222,7 +238,7 @@ type NodeActions = {
   openAssetLibrary: (id: string, kind: GeneratorKind) => void;
   openOutputMenu: (id: string, point: { x: number; y: number }) => void;
   openResultPreview: (preview: CanvasResultPreview) => void;
-  configureStory: (id: string, segmentCount: number, segmentDuration: number) => void;
+  configureStory: (id: string, segmentCount: number, segmentDuration: number, narrationMode?: StoryNarrationMode) => void;
   configureViral: (id: string, segmentCount: number, segmentDuration: number) => void;
 };
 
@@ -413,9 +429,14 @@ function nodeRunSignature(nodeID: string, nodes: CanvasNode[], edges: CanvasEdge
     "dirty",
     "lastRunSignature",
     "outputUrl",
+    "outputUrls",
     "outputText",
     "outputKind",
     "taskNo",
+    "taskNos",
+    "warning",
+    "storySpeechPlan",
+    "storyVoiceAssignments",
     "estimatedCost",
     "actualCost",
   ]);
@@ -429,8 +450,10 @@ function nodeRunSignature(nodeID: string, nodes: CanvasNode[], edges: CanvasEdge
     .map((item) => ({
       id: item.id,
       outputUrl: item.data.outputUrl || "",
+      outputUrls: item.data.outputUrls || [],
       outputText: item.data.outputText || "",
       taskNo: item.data.taskNo || "",
+      taskNos: item.data.taskNos || [],
       prompt: item.type === "textInput" ? item.data.prompt || "" : "",
       assetUrls: item.type === "imageInput" ? item.data.assetUrls || [] : [],
       referenceImageUrls: item.data.referenceImageUrls || [],
@@ -649,6 +672,93 @@ function numericDuration(value: unknown) {
 
 const STORY_SEGMENT_COUNT_OPTIONS = [3, 4, 6, 8] as const;
 const VIRAL_SEGMENT_COUNT_OPTIONS = [3, 4, 6] as const;
+const STORY_NARRATION_MODES: StoryNarrationMode[] = ["smart", "narration", "first_person", "third_person", "character_dialogue"];
+
+function normalizeStoryNarrationMode(value: unknown): StoryNarrationMode {
+  const mode = String(value || "").trim() as StoryNarrationMode;
+  return STORY_NARRATION_MODES.includes(mode) ? mode : "smart";
+}
+
+function extractJSONValue(text: string): unknown {
+  const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const arrayStart = trimmed.indexOf("[");
+  const arrayEnd = trimmed.lastIndexOf("]");
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  const candidate = arrayStart >= 0 && arrayEnd > arrayStart
+    ? trimmed.slice(arrayStart, arrayEnd + 1)
+    : objectStart >= 0 && objectEnd > objectStart
+      ? trimmed.slice(objectStart, objectEnd + 1)
+      : trimmed;
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function parseStorySpeechPlan(text: string): { items: StorySpeechItem[]; fallback: boolean } {
+  const parsed = extractJSONValue(text);
+  const rawItems = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).speeches)
+      ? (parsed as Record<string, unknown>).speeches as unknown[]
+      : [];
+  const items = rawItems.flatMap((raw, index) => {
+    if (!raw || typeof raw !== "object") return [];
+    const item = raw as Record<string, unknown>;
+    const speechText = String(item.text || item.content || "").trim();
+    if (!speechText) return [];
+    const speechTypeValue = String(item.speech_type || item.type || "narration");
+    const speechType: StorySpeechItem["speech_type"] = speechTypeValue === "dialogue"
+      ? "dialogue"
+      : speechTypeValue === "inner_monologue"
+        ? "inner_monologue"
+        : "narration";
+    return [{
+      segment_index: Math.max(1, Number(item.segment_index || item.segment || index + 1) || index + 1),
+      speaker_code: String(item.speaker_code || (speechType === "narration" ? "NARRATOR" : `CHAR_${index + 1}`)).trim(),
+      speaker_name: String(item.speaker_name || item.speaker || (speechType === "narration" ? "旁白" : `角色${index + 1}`)).trim(),
+      speech_type: speechType,
+      text: speechText,
+      voice_hint: String(item.voice_hint || "").trim() || undefined,
+    }];
+  });
+  if (items.length > 0) return { items, fallback: false };
+  const fallbackText = text.trim();
+  return {
+    items: fallbackText ? [{ segment_index: 1, speaker_code: "NARRATOR", speaker_name: "旁白", speech_type: "narration", text: fallbackText }] : [],
+    fallback: Boolean(fallbackText),
+  };
+}
+
+function storyVoiceConfiguration(model: Model | undefined, params: Record<string, unknown>) {
+  const properties = schemaProperties(canvasInputSchema("audio", model?.input_schema || {}));
+  const preferredKeys = ["voice_id", "voice", "speaker_id", "speaker", "timber", "voice_name"];
+  const key = preferredKeys.find((candidate) => properties[candidate]) || preferredKeys.find((candidate) => params[candidate] !== undefined) || "";
+  const property = key ? properties[key] as Record<string, unknown> | undefined : undefined;
+  const options = Array.isArray(property?.enum) ? property.enum.map(String).filter(Boolean) : [];
+  const configured = key && params[key] !== undefined ? String(params[key]) : "";
+  return { key, options, configured };
+}
+
+function assignStoryVoices(items: StorySpeechItem[], model: Model | undefined, params: Record<string, unknown>, overrides: Record<string, string> = {}) {
+  const config = storyVoiceConfiguration(model, params);
+  const assignments: Record<string, string> = {};
+  const speakers = Array.from(new Set(items.map((item) => item.speaker_code || "NARRATOR")));
+  speakers.forEach((speaker, index) => {
+    if (overrides[speaker]) assignments[speaker] = overrides[speaker];
+    else if (speaker === "NARRATOR" && config.configured) assignments[speaker] = config.configured;
+    else if (config.options.length > 0) assignments[speaker] = config.options[index % config.options.length];
+    else if (config.configured) assignments[speaker] = config.configured;
+  });
+  const distinct = new Set(Object.values(assignments).filter(Boolean));
+  return {
+    ...config,
+    assignments,
+    degraded: speakers.length > 1 && distinct.size < Math.min(2, speakers.length),
+  };
+}
 
 function storyDurationOptions(model?: Model) {
   const durationProperty = schemaProperties(canvasInputSchema("video", model?.input_schema || {})).duration as
@@ -725,9 +835,14 @@ function storyNodeNeedsReset(node: CanvasNode, patch: Partial<CanvasNodeData>): 
             progressStage: "",
             error: "",
             outputUrl: "",
+            outputUrls: [],
             outputText: "",
             outputKind: undefined,
             taskNo: "",
+            taskNos: [],
+            warning: "",
+            storySpeechPlan: [],
+            storyVoiceAssignments: {},
             estimatedCost: 0,
             actualCost: 0,
             lastRunSignature: "",
@@ -990,7 +1105,8 @@ function TextInputNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 onChange={(event) => actions?.configureStory(
                   id,
                   Number(event.target.value),
-                  Number(data.storySegmentDuration || 8)
+                  Number(data.storySegmentDuration || 8),
+                  normalizeStoryNarrationMode(data.storyNarrationMode)
                 )}
                 className="h-8 w-full rounded-lg border border-blue-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-blue-400/20 dark:bg-gray-900 dark:text-gray-100"
               >
@@ -1006,7 +1122,8 @@ function TextInputNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 onChange={(event) => actions?.configureStory(
                   id,
                   Number(data.storySegmentCount || 4),
-                  Number(event.target.value)
+                  Number(event.target.value),
+                  normalizeStoryNarrationMode(data.storyNarrationMode)
                 )}
                 className="h-8 w-full rounded-lg border border-blue-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-blue-400/20 dark:bg-gray-900 dark:text-gray-100"
               >
@@ -1016,6 +1133,21 @@ function TextInputNode({ id, data, selected }: NodeProps<CanvasNode>) {
                 ).map((duration) => (
                   <option key={duration} value={duration}>{t("canvas.story.secondsValue", { seconds: duration })}</option>
                 ))}
+              </select>
+            </label>
+            <label className="col-span-2 min-w-0 text-[9px] text-gray-500 dark:text-gray-300">
+              <span className="mb-1 block">{t("canvas.story.narrationMode")}</span>
+              <select
+                value={normalizeStoryNarrationMode(data.storyNarrationMode)}
+                onChange={(event) => actions?.configureStory(
+                  id,
+                  Number(data.storySegmentCount || 4),
+                  Number(data.storySegmentDuration || 8),
+                  normalizeStoryNarrationMode(event.target.value)
+                )}
+                className="h-8 w-full rounded-lg border border-blue-200 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none dark:border-blue-400/20 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {STORY_NARRATION_MODES.map((mode) => <option key={mode} value={mode}>{t(`canvas.story.narrationMode.${mode}`)}</option>)}
               </select>
             </label>
             <div className="col-span-2 flex items-center justify-between gap-2 text-[9px] text-blue-600 dark:text-blue-300">
@@ -1239,6 +1371,12 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const referenceImages = Array.isArray(data.referenceImageUrls) ? data.referenceImageUrls.map(String) : [];
   const referenceVideos = Array.isArray(data.referenceVideoUrls) ? data.referenceVideoUrls.map(String) : [];
   const referenceAudios = Array.isArray(data.referenceAudioUrls) ? data.referenceAudioUrls.map(String) : [];
+  const storyAudioURLs = Array.isArray(data.outputUrls) ? data.outputUrls.map(String).filter(Boolean) : [];
+  const storySpeechPlan = Array.isArray(data.storySpeechPlan) ? data.storySpeechPlan : [];
+  const storyVoiceConfig = kind === "audio" && data.storyRole === "narration"
+    ? storyVoiceConfiguration(selectedModel, data.params || {})
+    : null;
+  const storySpeakers = Array.from(new Map(storySpeechPlan.map((item) => [item.speaker_code, item.speaker_name])).entries());
   const seedanceImageLimit = selectedVideoRuntime?.reference_images?.max ?? selectedVideoRuntime?.max_reference_images ?? 9;
   const seedanceMaterialMode = inferSeedanceMaterialMode(referenceImages.length, referenceVideos.length, referenceAudios.length);
   const seedanceAudioNeedsVisual = isSeedanceFullReference
@@ -1353,6 +1491,46 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             )}
           </div>
         )}
+        {kind === "audio" && data.storyRole === "narration" && (
+          <div className="nodrag space-y-2 rounded-lg border border-violet-400/20 bg-violet-500/5 p-2.5">
+            <label className="block rounded-lg border border-violet-400/20 bg-white/70 p-2 dark:bg-gray-950/40">
+              <span className="mb-1.5 block text-[10px] font-semibold text-violet-600 dark:text-violet-300">{t("canvas.story.narrationMode")}</span>
+              <select
+                value={normalizeStoryNarrationMode(data.storyNarrationMode)}
+                onChange={(event) => actions?.configureStory(
+                  id,
+                  Number(data.storySegmentCount || 4),
+                  Number(data.storySegmentDuration || 8),
+                  normalizeStoryNarrationMode(event.target.value),
+                )}
+                className="h-8 w-full rounded-lg border border-violet-300/30 bg-white px-2 text-[10px] font-medium text-gray-700 outline-none focus:border-violet-400 dark:bg-gray-900 dark:text-gray-100"
+              >
+                {STORY_NARRATION_MODES.map((mode) => (
+                  <option key={mode} value={mode}>{t(`canvas.story.narrationMode.${mode}`)}</option>
+                ))}
+              </select>
+            </label>
+            <div className="text-[10px] font-semibold text-violet-600 dark:text-violet-300">{t("canvas.story.voiceDirection")}</div>
+            {storySpeakers.length > 0 ? (
+              <div className="space-y-1.5">
+                {storySpeakers.map(([speakerCode, speakerName]) => (
+                  <label key={speakerCode} className="flex items-center gap-2 text-[9px] text-gray-500 dark:text-gray-300">
+                    <span className="min-w-0 flex-1 truncate" title={`${speakerName} (${speakerCode})`}>{speakerName}</span>
+                    {storyVoiceConfig?.options.length ? (
+                      <select
+                        value={data.storyVoiceOverrides?.[speakerCode] || data.storyVoiceAssignments?.[speakerCode] || storyVoiceConfig.configured || storyVoiceConfig.options[0]}
+                        onChange={(event) => actions?.update(id, { storyVoiceOverrides: { ...(data.storyVoiceOverrides || {}), [speakerCode]: event.target.value } })}
+                        className="h-7 max-w-[190px] rounded-md border border-violet-300/30 bg-white px-2 text-[9px] text-gray-700 dark:bg-gray-900 dark:text-gray-100"
+                      >
+                        {storyVoiceConfig.options.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
+                      </select>
+                    ) : <span className="max-w-[190px] truncate text-amber-600 dark:text-amber-300">{data.storyVoiceAssignments?.[speakerCode] || storyVoiceConfig?.configured || t("canvas.story.defaultVoice")}</span>}
+                  </label>
+                ))}
+              </div>
+            ) : <div className="text-[9px] leading-relaxed text-gray-400">{t("canvas.story.voicePlanAfterRun")}</div>}
+          </div>
+        )}
         {isSeedanceFullReference && (
           <div className="nodrag space-y-2 border-t border-pink-400/20 pt-2.5">
             <div className="flex items-center gap-2 rounded-lg border border-pink-400/20 bg-pink-500/5 px-2.5 py-2">
@@ -1424,6 +1602,21 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
               {copied ? <Check size={13} /> : <Copy size={13} />}
             </button>
             {data.outputText}
+          </div>
+        ) : kind === "audio" && storyAudioURLs.length > 1 ? (
+          <div className={`max-h-48 space-y-2 overflow-y-auto rounded-xl border p-2 ${tone.result}`}>
+            <div className="flex items-center justify-between px-1 text-[10px] font-semibold">
+              <span>{t("canvas.story.generatedTracks", { count: storyAudioURLs.length })}</span>
+              <span className="text-gray-400">{t(`canvas.story.narrationMode.${normalizeStoryNarrationMode(data.storyNarrationMode)}`)}</span>
+            </div>
+            {storyAudioURLs.map((url, index) => (
+              <div key={`${url}-${index}`} className="rounded-lg border border-violet-400/15 bg-white/60 p-1.5 dark:bg-black/15">
+                <div className="mb-1 truncate px-1 text-[9px] text-gray-400">
+                  {data.storySpeechPlan?.[index]?.speaker_name || t("canvas.story.track", { index: index + 1 })} · {data.storySpeechPlan?.[index]?.text || ""}
+                </div>
+                <audio src={url} controls className="h-8 w-full" />
+              </div>
+            ))}
           </div>
         ) : data.outputUrl ? (
           <div className={`group/result relative overflow-hidden rounded-xl border p-2 ${tone.result}`}>
@@ -1518,6 +1711,9 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
             </div>
           ))}
         </div>
+        {data.warning && (
+          <div className="rounded-lg bg-amber-50 px-2.5 py-2 text-[10px] leading-relaxed text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">{data.warning}</div>
+        )}
         {data.error && (
           <div className="flex items-center gap-2 rounded-lg bg-red-50 px-2.5 py-2 text-[11px] text-red-600 dark:bg-red-500/10 dark:text-red-300">
             <span className="min-w-0 flex-1">{data.error}</span>
@@ -1819,9 +2015,14 @@ function CanvasEditor({
       "dirty",
       "lastRunSignature",
       "outputUrl",
+      "outputUrls",
       "outputText",
       "outputKind",
       "taskNo",
+      "taskNos",
+      "warning",
+      "storySpeechPlan",
+      "storyVoiceAssignments",
       "estimatedCost",
       "actualCost",
     ]);
@@ -1830,6 +2031,7 @@ function CanvasEditor({
     const currentNode = nodesRef.current.find((node) => node.id === id);
     const outputChanged =
       (Object.prototype.hasOwnProperty.call(patch, "outputUrl") && currentNode?.data.outputUrl !== patch.outputUrl)
+      || (Object.prototype.hasOwnProperty.call(patch, "outputUrls") && JSON.stringify(currentNode?.data.outputUrls || []) !== JSON.stringify(patch.outputUrls || []))
       || (Object.prototype.hasOwnProperty.call(patch, "outputText") && currentNode?.data.outputText !== patch.outputText);
     const downstream = configurationChanged || outputChanged
       ? collectDownstreamIDs(id, edgesRef.current)
@@ -2063,7 +2265,11 @@ function CanvasEditor({
       sources.push({ kind, url, ...(taskNo ? { task_no: taskNo } : {}), ...(assetID ? { asset_id: assetID } : {}) });
     };
     directSources.forEach((source) => {
-      if (source.data.outputUrl && source.data.taskNo && source.data.outputKind) {
+      const outputURLs = Array.isArray(source.data.outputUrls) ? source.data.outputUrls.map(String).filter(Boolean) : [];
+      const outputTaskNos = Array.isArray(source.data.taskNos) ? source.data.taskNos.map(String) : [];
+      if (outputURLs.length > 0 && source.data.outputKind) {
+        outputURLs.forEach((url, index) => addSource(source.data.outputKind as GeneratorKind, url, outputTaskNos[index]));
+      } else if (source.data.outputUrl && source.data.taskNo && source.data.outputKind) {
         addSource(source.data.outputKind, source.data.outputUrl, source.data.taskNo);
       }
       const mediaKind = source.data.mediaKind;
@@ -2081,6 +2287,8 @@ function CanvasEditor({
       progressStage: "canvas.progress.preparing",
       error: "",
       outputUrl: "",
+      outputUrls: [],
+      taskNos: [],
     });
     try {
       let task = await api<TaskResult>("/api/canvases/compose", {
@@ -2223,7 +2431,16 @@ function CanvasEditor({
       ])
       .filter(Boolean)
       .concat(Array.isArray(node.data.referenceAudioUrls) ? node.data.referenceAudioUrls.map(String) : []);
-    const prompt = [String(node.data.prompt || "").trim(), ...textInputs].filter(Boolean).join("\n\n");
+    const legacyStoryNarrationPrompt = storyRole === "narrationText" && !node.data.storyNarrationMode
+      ? t("canvas.story.narrationTextPrompt", {
+          count: Number(node.data.storySegmentCount || 4),
+          duration: Number(node.data.storySegmentDuration || 8),
+          total: Number(node.data.storySegmentCount || 4) * Number(node.data.storySegmentDuration || 8),
+          mode: t("canvas.story.narrationMode.smart"),
+          instruction: t("canvas.story.narrationInstruction.smart"),
+        })
+      : "";
+    const prompt = [legacyStoryNarrationPrompt || String(node.data.prompt || "").trim(), ...textInputs].filter(Boolean).join("\n\n");
     const videoRuntime = parseVideoRuntime(selectedModel?.runtime_rule);
     const audioRuntime = parseAudioRuntime(selectedModel?.runtime_rule);
     const isSeedance2 = node.data.mediaKind === "video" && videoRuntime.upload_profile === "seedance_2";
@@ -2243,8 +2460,12 @@ function CanvasEditor({
       progress: 6,
       progressStage: "canvas.progress.preparing",
       error: "",
+      warning: "",
       outputUrl: "",
+      outputUrls: [],
       outputText: "",
+      taskNo: "",
+      taskNos: [],
     });
     try {
       if (node.data.mediaKind === "text") {
@@ -2314,6 +2535,121 @@ function CanvasEditor({
           return;
         }
         baseParams[videoRuntime.mode_param || "generation_mode"] = h3Mode;
+      }
+      if (node.data.mediaKind === "audio" && storyRole === "narration") {
+        const parsedPlan = parseStorySpeechPlan(prompt);
+        if (parsedPlan.items.length === 0) {
+          update(id, { status: "failed", progress: 0, error: t("canvas.story.narrationPlanEmpty") });
+          return;
+        }
+        const voiceConfig = assignStoryVoices(parsedPlan.items, selectedModel, baseParams, node.data.storyVoiceOverrides || {});
+        const warnings = [
+          parsedPlan.fallback ? t("canvas.story.narrationPlanFallback") : "",
+          voiceConfig.degraded ? t("canvas.story.voiceFallback") : "",
+        ].filter(Boolean);
+        const outputURLs: string[] = [];
+        const taskNos: string[] = [];
+        let estimatedCost = 0;
+        let actualCost = 0;
+        update(id, {
+          status: "running",
+          progress: 8,
+          progressStage: "canvas.progress.audio",
+          warning: warnings.join(" "),
+          storySpeechPlan: parsedPlan.items,
+          storyVoiceAssignments: voiceConfig.assignments,
+          outputUrls: [],
+          taskNos: [],
+        });
+        for (let itemIndex = 0; itemIndex < parsedPlan.items.length; itemIndex += 1) {
+          const speech = parsedPlan.items[itemIndex];
+          const itemParams: Record<string, unknown> = { ...baseParams, user_prompt: speech.text };
+          const assignedVoice = voiceConfig.assignments[speech.speaker_code];
+          if (voiceConfig.key && assignedVoice) itemParams[voiceConfig.key] = assignedVoice;
+          const itemTaskParams = {
+            ...buildAudioTaskParams(
+              itemParams,
+              speech.text,
+              String(itemParams[audioRuntime.secondary_prompt_key || "style_prompt"] || speech.voice_hint || ""),
+              selectedModel.runtime_rule
+            ),
+            user_prompt: speech.text,
+          };
+          let speechTask = await api<TaskResult>("/api/tasks", {
+            method: "POST",
+            body: JSON.stringify({ model_code: modelCode, prompt: speech.text, params: itemTaskParams }),
+          });
+          if (speechTask.task_no) taskNos.push(speechTask.task_no);
+          estimatedCost += Number(speechTask.estimated_cost || 0);
+          if (speechTask.status === "failed") {
+            update(id, {
+              status: "failed",
+              progress: 0,
+              taskNo: taskNos[0] || "",
+              taskNos,
+              outputUrls: outputURLs,
+              error: t("canvas.story.speechFailed", { index: itemIndex + 1, reason: speechTask.error_message || t("canvas.generationFailed") }),
+            });
+            return;
+          }
+          let finished = false;
+          for (let attempt = 0; attempt < 240; attempt += 1) {
+            if (!["succeeded", "failed", "cancelled"].includes(speechTask.status)) {
+              await wait(2500);
+              speechTask = await api<TaskResult>(`/api/tasks/${speechTask.task_no}`);
+            }
+            const itemProgress = speechTask.status === "succeeded" ? 100 : runningProgress(speechTask.progress, attempt);
+            update(id, {
+              status: "running",
+              progress: Math.min(96, Math.round(8 + 88 * ((itemIndex + itemProgress / 100) / parsedPlan.items.length))),
+              progressStage: "canvas.progress.audio",
+              taskNo: taskNos[0] || speechTask.task_no,
+              taskNos,
+            });
+            if (speechTask.status === "succeeded") {
+              const audioURL = extractMedia(speechTask.output, "audio");
+              if (!audioURL) {
+                update(id, { status: "failed", progress: 0, error: t("canvas.noMediaResult") });
+                return;
+              }
+              outputURLs.push(audioURL);
+              actualCost += Number(speechTask.actual_cost || speechTask.estimated_cost || 0);
+              finished = true;
+              break;
+            }
+            if (["failed", "cancelled"].includes(speechTask.status)) {
+              update(id, {
+                status: "failed",
+                progress: 0,
+                taskNo: taskNos[0] || speechTask.task_no,
+                taskNos,
+                outputUrls: outputURLs,
+                error: t("canvas.story.speechFailed", { index: itemIndex + 1, reason: speechTask.error_message || t("canvas.generationFailed") }),
+              });
+              return;
+            }
+          }
+          if (!finished) {
+            update(id, { status: "failed", progress: 0, error: t("canvas.generationTimeout") });
+            return;
+          }
+        }
+        update(id, {
+          status: "succeeded",
+          progress: 100,
+          progressStage: "canvas.progress.completed",
+          outputUrl: outputURLs[0] || "",
+          outputUrls: outputURLs,
+          outputKind: "audio",
+          taskNo: taskNos[0] || "",
+          taskNos,
+          estimatedCost,
+          actualCost,
+          error: "",
+          dirty: false,
+          lastRunSignature: runSignature,
+        });
+        return;
       }
       const h3FirstFrame = isMiniMaxH3 && (h3Mode === "first_frame" || h3Mode === "first_last")
         ? { url: imageInputs[0], name: imageInputs[0] }
@@ -2657,10 +2993,11 @@ function CanvasEditor({
     await executeNodes(new Set([id, ...collectDownstreamIDs(id, edgesRef.current)]));
   }, [executeNodes, markDirtyFrom]);
 
-  const configureStory = useCallback((id: string, requestedCount: number, requestedDuration: number) => {
-    const inputNode = nodesRef.current.find((node) => node.id === id && node.data.storyRole === "input");
-    const groupID = String(inputNode?.data.storyGroupID || "");
-    if (!inputNode || !groupID) return;
+  const configureStory = useCallback((id: string, requestedCount: number, requestedDuration: number, requestedNarrationMode?: StoryNarrationMode) => {
+    const selectedNode = nodesRef.current.find((node) => node.id === id);
+    const groupID = String(selectedNode?.data.storyGroupID || "");
+    const inputNode = nodesRef.current.find((node) => node.data.storyGroupID === groupID && node.data.storyRole === "input");
+    if (!selectedNode || !inputNode || !groupID) return;
 
     const segmentCount = STORY_SEGMENT_COUNT_OPTIONS.includes(requestedCount as (typeof STORY_SEGMENT_COUNT_OPTIONS)[number])
       ? requestedCount
@@ -2689,10 +3026,13 @@ function CanvasEditor({
     const segmentDuration = durationOptions.includes(requestedDuration)
       ? requestedDuration
       : preferredStoryDuration(existingVideoModel);
+    const narrationMode = normalizeStoryNarrationMode(requestedNarrationMode || inputNode.data.storyNarrationMode);
+    const narrationModeLabel = t(`canvas.story.narrationMode.${narrationMode}`);
+    const narrationInstruction = t(`canvas.story.narrationInstruction.${narrationMode}`);
     const baseX = inputNode.position.x;
     const baseY = inputNode.position.y;
     const branchGap = 420;
-    const sharedPatch = { storySegmentCount: segmentCount, storySegmentDuration: segmentDuration };
+    const sharedPatch = { storySegmentCount: segmentCount, storySegmentDuration: segmentDuration, storyNarrationMode: narrationMode };
     const resetInput: CanvasNode = {
       ...inputNode,
       data: {
@@ -2703,7 +3043,7 @@ function CanvasEditor({
     };
     const resetScript = storyNodeNeedsReset(scriptNode, {
       ...sharedPatch,
-      prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration }),
+      prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration, mode: narrationModeLabel, instruction: narrationInstruction }),
     });
     resetScript.position = { x: baseX + 400, y: baseY };
     const resetNarrationText = storyNodeNeedsReset(narrationTextNode, {
@@ -2712,6 +3052,8 @@ function CanvasEditor({
         count: segmentCount,
         duration: segmentDuration,
         total: segmentCount * segmentDuration,
+        mode: narrationModeLabel,
+        instruction: narrationInstruction,
       }),
     });
     resetNarrationText.position = { x: baseX + 800, y: baseY + segmentCount * branchGap + 40 };
@@ -3335,6 +3677,9 @@ function CanvasEditor({
       const durationOptions = storyDurationOptions(storyVideoModel);
       const segmentDuration = preferredStoryDuration(storyVideoModel);
       const segmentCount = 4;
+      const narrationMode: StoryNarrationMode = "smart";
+      const narrationModeLabel = t(`canvas.story.narrationMode.${narrationMode}`);
+      const narrationInstruction = t(`canvas.story.narrationInstruction.${narrationMode}`);
       const textNode = text();
       textNode.data = {
         ...textNode.data,
@@ -3343,6 +3688,7 @@ function CanvasEditor({
         storySegmentCount: segmentCount,
         storySegmentDuration: segmentDuration,
         storyDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
+        storyNarrationMode: narrationMode,
       };
       const scriptNode = generator("text", 0, t("canvas.node.storyScript"));
       scriptNode.data = {
@@ -3351,7 +3697,8 @@ function CanvasEditor({
         storyRole: "script",
         storySegmentCount: segmentCount,
         storySegmentDuration: segmentDuration,
-        prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration }),
+        storyNarrationMode: narrationMode,
+        prompt: t("canvas.story.scriptPrompt", { count: segmentCount, duration: segmentDuration, mode: narrationModeLabel, instruction: narrationInstruction }),
       };
       const narrationTextNode = generator("text", 300, t("canvas.node.storyNarrationText"), 2);
       narrationTextNode.data = {
@@ -3360,10 +3707,13 @@ function CanvasEditor({
         storyRole: "narrationText",
         storySegmentCount: segmentCount,
         storySegmentDuration: segmentDuration,
+        storyNarrationMode: narrationMode,
         prompt: t("canvas.story.narrationTextPrompt", {
           count: segmentCount,
           duration: segmentDuration,
           total: segmentCount * segmentDuration,
+          mode: narrationModeLabel,
+          instruction: narrationInstruction,
         }),
       };
       const narrationNode = generator("audio", 300, t("canvas.node.storyNarration"), 3);
@@ -3376,6 +3726,7 @@ function CanvasEditor({
         storyRole: "narration",
         storySegmentCount: segmentCount,
         storySegmentDuration: segmentDuration,
+        storyNarrationMode: narrationMode,
         prompt: "",
       };
       const finalNode = { ...compositor(100, t("canvas.node.storyFinalVideo")), position: { x: originX + 1720, y: originY + 100 } };
@@ -3385,6 +3736,7 @@ function CanvasEditor({
         storyRole: "final",
         storySegmentCount: segmentCount,
         storySegmentDuration: segmentDuration,
+        storyNarrationMode: narrationMode,
         composeMode: "auto",
       };
       nextNodes = [textNode, scriptNode, narrationTextNode, narrationNode, finalNode];

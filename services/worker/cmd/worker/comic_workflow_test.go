@@ -138,6 +138,21 @@ func TestComicAudioStrategyDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestComicNarrationPerspectiveAndSpeechSelection(t *testing.T) {
+	storyboard := map[string]interface{}{"dialogue": "角色对白", "narration": "画外旁白"}
+	firstText, firstType := comicStoryboardSpeech(storyboard, map[string]interface{}{"narration_perspective": "first_person"}, map[string]interface{}{})
+	if firstText != "画外旁白" || firstType != "narration" {
+		t.Fatalf("first-person speech=%q/%q, want narration", firstText, firstType)
+	}
+	dialogueText, dialogueType := comicStoryboardSpeech(storyboard, map[string]interface{}{"narration_perspective": "character_dialogue"}, map[string]interface{}{})
+	if dialogueText != "角色对白" || dialogueType != "dialogue" {
+		t.Fatalf("character speech=%q/%q, want dialogue", dialogueText, dialogueType)
+	}
+	if got := comicNarrationPerspective(map[string]interface{}{"narration_perspective": "unknown"}, map[string]interface{}{}); got != "smart" {
+		t.Fatalf("invalid narration perspective=%q, want smart", got)
+	}
+}
+
 func TestComicIdentityPromptTreatsFirstReferenceAsIdentitySource(t *testing.T) {
 	prompt := comicIdentityPrompt(map[string]interface{}{
 		"reference_images": []interface{}{"https://cdn.example/hero.png"},
@@ -146,6 +161,22 @@ func TestComicIdentityPromptTreatsFirstReferenceAsIdentitySource(t *testing.T) {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("identity prompt does not contain %q: %s", expected, prompt)
 		}
+	}
+}
+
+func TestComicAssetReferenceURLs(t *testing.T) {
+	inputs := map[string]interface{}{
+		"comic_assets": []interface{}{
+			map[string]interface{}{"metadata": map[string]interface{}{"reference_urls": []interface{}{"https://cdn.example/role-a.png", "https://cdn.example/role-b.png"}}},
+			map[string]interface{}{"metadata": map[string]interface{}{"reference_urls": []string{"https://cdn.example/role-a.png", "https://cdn.example/prop.png"}}},
+		},
+	}
+	got := comicAssetReferenceURLs(inputs)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unique comic asset references, got %#v", got)
+	}
+	if got[0] != "https://cdn.example/role-a.png" || got[2] != "https://cdn.example/prop.png" {
+		t.Fatalf("unexpected comic asset reference order: %#v", got)
 	}
 }
 
