@@ -856,7 +856,26 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
   const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
-  const isVeoFramePair = isVideo && videoConfig.upload_profile === "veo_frame_pair";
+  const videoAdapter = String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase();
+  const veoIdentity = `${model.code} ${model.display_name}`.toLowerCase();
+  const isLegacyVeoFlFramePair =
+    videoConfig.upload_profile === "frame_pair" &&
+    /(^|[-_\s])veo($|[-_\s\d])/.test(veoIdentity) &&
+    /(^|[-_\s])fl($|[-_\s])/.test(veoIdentity);
+  const isVeoFramePair =
+    isVideo &&
+    (videoConfig.upload_profile === "veo_frame_pair" ||
+      videoAdapter === "veo_frame_pair_v1" ||
+      isLegacyVeoFlFramePair);
+  const videoUploadConfig = isVeoFramePair
+    ? {
+        ...videoConfig,
+        upload_profile: "veo_frame_pair" as const,
+        min_reference_images: 0,
+        max_reference_images: 0,
+        reference_images: { ...(videoConfig.reference_images || {}), max: 0 },
+      }
+    : videoConfig;
   const isOmniReference = isVideo && videoConfig.upload_profile === "omni_reference";
   const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference;
   const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
@@ -867,6 +886,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const veoLastFrameAssets = useMemo(
     () => (videoMedia.last_frame ? [videoMedia.last_frame] : []),
     [videoMedia.last_frame]
+  );
+  const videoTaskMedia = useMemo(
+    () => (isVeoFramePair ? { ...videoMedia, reference_images: [] } : videoMedia),
+    [isVeoFramePair, videoMedia]
   );
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
@@ -885,12 +908,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         ...refImages.map((x) => x.public_id),
         videoMedia.first_frame?.public_id,
         videoMedia.last_frame?.public_id,
-        ...videoMedia.reference_images.map((x) => x.public_id),
+        ...(!isVeoFramePair ? videoMedia.reference_images.map((x) => x.public_id) : []),
         ...videoMedia.reference_videos.map((x) => x.public_id),
         ...videoMedia.reference_audios.map((x) => x.public_id),
       ].filter((x): x is string => !!x),
     [
       refImages,
+      isVeoFramePair,
       videoMedia.first_frame,
       videoMedia.last_frame,
       videoMedia.reference_images,
@@ -927,7 +951,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     const selectedReferenceAssets = referenceAssetIds.length ? { reference_asset_ids: referenceAssetIds } : {};
     const languageParams = buildLanguageParams(selectedLanguage);
     const bodyParams = isVideo
-      ? { ...buildVideoTaskParams(params, videoMedia, model.runtime_rule), ...languageParams, ...selectedAssets, ...selectedReferenceAssets }
+      ? { ...buildVideoTaskParams(params, videoTaskMedia, model.runtime_rule), ...languageParams, ...selectedAssets, ...selectedReferenceAssets }
       : isAudio
         ? {
             ...buildAudioTaskParams(singleResultAudioParams(params), prompt, audioSecondaryPrompt, model.runtime_rule),
@@ -972,7 +996,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   }, [
     model.code,
     params,
-    videoMedia,
+    videoTaskMedia,
     isVideo,
     isImage,
     isAudio,
@@ -1603,7 +1627,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
       const selectedReferenceAssets = referenceAssetIds.length ? { reference_asset_ids: referenceAssetIds } : {};
       const taskParams = isVideo
-        ? { ...buildVideoTaskParams(params, videoMedia, model.runtime_rule), ...buildLanguageParams(selectedLanguage), user_prompt: prompt, ...selectedAssets, ...selectedReferenceAssets }
+        ? { ...buildVideoTaskParams(params, videoTaskMedia, model.runtime_rule), ...buildLanguageParams(selectedLanguage), user_prompt: prompt, ...selectedAssets, ...selectedReferenceAssets }
         : isAudio
           ? {
               ...buildAudioTaskParams(singleResultAudioParams(params), prompt, audioSecondaryPrompt, model.runtime_rule),
@@ -2309,7 +2333,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                     </div>
                     {!isEnhancedVideoMaterial && (
                       <VideoUploadArea
-                        config={videoConfig}
+                        config={videoUploadConfig}
                         media={videoMedia}
                         onChange={setVideoMedia}
                         mode={videoMaterialMode}
@@ -2390,7 +2414,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
             {isSeedance2 && videoMaterialMode === "draft_task" ? (
               <div className="px-3 py-3 sm:px-4">
                 <VideoUploadArea
-                  config={videoConfig}
+                  config={videoUploadConfig}
                   media={videoMedia}
                   onChange={setVideoMedia}
                   mode={videoMaterialMode}
@@ -2402,7 +2426,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
               <div className="flex flex-col md:flex-row md:items-stretch">
                 <div className="w-full min-w-0 px-3 py-3 sm:px-4 md:w-auto md:max-w-[62%] md:flex-none md:pr-1">
                   <VideoUploadArea
-                    config={videoConfig}
+                    config={videoUploadConfig}
                     media={videoMedia}
                     onChange={setVideoMedia}
                     mode={videoMaterialMode}
