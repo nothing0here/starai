@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
@@ -133,6 +133,11 @@ function usableAvatar(url?: string) {
   return clean;
 }
 
+function fixedNumber(value: unknown, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : (0).toFixed(digits);
+}
+
 function UserAvatar({ user }: { user: Pick<UserItem, "nickname" | "avatar_url" | "public_id"> }) {
   const src = usableAvatar(user.avatar_url);
   const initial = (user.nickname || user.public_id || "U").slice(0, 1).toUpperCase();
@@ -149,6 +154,7 @@ export default function UsersPage() {
   const [levels, setLevels] = useState<MemberLevel[]>([]);
   const [status, setStatus] = useState("");
   const [search, setSearch] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [detail, setDetail] = useState<UserDetail | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [levelOpen, setLevelOpen] = useState(false);
@@ -157,27 +163,32 @@ export default function UsersPage() {
   const [amount, setAmount] = useState("");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const loadVersion = useRef(0);
 
   const load = useCallback(() => {
-    adminApi<{ items: UserItem[]; total: number }>(`/users?page=${page}&page_size=${PAGE_SIZE}`).then((r) => {
+    const version = ++loadVersion.current;
+    const query = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
+    if (searchQuery) query.set("search", searchQuery);
+    if (status) query.set("status", status);
+    adminApi<{ items: UserItem[]; total: number }>(`/users?${query.toString()}`).then((r) => {
+      if (version !== loadVersion.current) return;
       setUsers(r.items || []);
-      setTotal(r.total || 0);
+      setTotal(Number(r.total) || 0);
     });
     adminApi<{ items: MemberLevel[] }>("/member-levels").then((r) => setLevels(r.items || []));
-  }, [page]);
+  }, [page, searchQuery, status]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const filtered = useMemo(() => {
-    const kw = search.trim().toLowerCase();
-    return users.filter((u) => {
-      if (status && u.status !== status) return false;
-      if (!kw) return true;
-      return [u.nickname, u.public_id, u.email, u.referral_code, u.referrer_name || ""].some((v) => (v || "").toLowerCase().includes(kw));
-    });
-  }, [users, status, search]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPage(1);
+      setSearchQuery(search.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search]);
 
   const openDetail = async (u: UserItem) => {
     const d = await adminApi<UserDetail>(`/users/${u.id}/detail`);
@@ -221,13 +232,13 @@ export default function UsersPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <input placeholder="搜索昵称 / 用户ID / 邮箱 / 推荐码" value={search} onChange={(e) => setSearch(e.target.value)} className="w-72 rounded-xl border px-3 py-2 text-sm" />
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className="rounded-xl border px-3 py-2 text-sm">
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="rounded-xl border px-3 py-2 text-sm">
           <option value="">全部状态</option>
           <option value="active">正常</option>
           <option value="frozen">冻结</option>
           <option value="banned">封禁</option>
         </select>
-        <span className="text-xs text-gray-400">共 {filtered.length} 人</span>
+        <span className="text-xs text-gray-400">共 {total} 人</span>
       </div>
 
       <div className="overflow-hidden rounded-2xl border bg-white">
@@ -246,7 +257,7 @@ export default function UsersPage() {
             </tr>
           </thead>
           <tbody className="divide-y">
-            {filtered.map((u) => {
+            {users.map((u) => {
               const meta = STATUS_META[u.status] || { label: u.status, className: "bg-gray-100 text-gray-500" };
               return (
                 <tr key={u.id}>
@@ -283,8 +294,8 @@ export default function UsersPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">{new Date(u.created_at).toLocaleString("zh-CN", { hour12: false })}</td>
-                  <td className="px-4 py-3 text-right font-mono">{u.compute_balance.toFixed(2)}</td>
-                  <td className="px-4 py-3 text-right font-mono">¥{u.cash_balance.toFixed(2)}</td>
+                  <td className="px-4 py-3 text-right font-mono">{fixedNumber(u.compute_balance)}</td>
+                  <td className="px-4 py-3 text-right font-mono">¥{fixedNumber(u.cash_balance)}</td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${meta.className}`}>{meta.label}</span></td>
                   <td className="px-4 py-3">
                     <div className="flex flex-wrap gap-2">
@@ -413,10 +424,10 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
             </div>
 
             <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <DetailMetric label="算力余额" value={detail.compute_balance.toFixed(2)} hint="查看全部算力明细" active={detailView === "compute"} onClick={() => setDetailView("compute")} />
-              <DetailMetric label="冻结算力" value={detail.frozen_compute.toFixed(2)} hint="查看冻结与释放记录" active={detailView === "frozen"} onClick={() => setDetailView("frozen")} />
-              <DetailMetric label="现金余额" value={`¥${detail.cash_balance.toFixed(2)}`} hint="查看全部现金明细" active={detailView === "cash"} onClick={() => setDetailView("cash")} />
-              <DetailMetric label="作品数" value={String(detail.works_count)} hint="查看用户作品记录" active={detailView === "works"} onClick={() => setDetailView("works")} />
+              <DetailMetric label="算力余额" value={fixedNumber(detail.compute_balance)} hint="查看全部算力明细" active={detailView === "compute"} onClick={() => setDetailView("compute")} />
+              <DetailMetric label="冻结算力" value={fixedNumber(detail.frozen_compute)} hint="查看冻结与释放记录" active={detailView === "frozen"} onClick={() => setDetailView("frozen")} />
+              <DetailMetric label="现金余额" value={`¥${fixedNumber(detail.cash_balance)}`} hint="查看全部现金明细" active={detailView === "cash"} onClick={() => setDetailView("cash")} />
+              <DetailMetric label="作品数" value={String(Number(detail.works_count) || 0)} hint="查看用户作品记录" active={detailView === "works"} onClick={() => setDetailView("works")} />
             </div>
 
             <UserDetailRecords userID={detail.id} view={detailView} />
@@ -456,7 +467,7 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
                   <tr key={r.id}>
                     <td className="px-3 py-2">{r.referred_nickname || r.referred_public_id}</td>
                     <td className="px-3 py-2">{r.reward_account === "cash" ? "现金" : "算力"}</td>
-                    <td className="px-3 py-2 font-mono">{r.amount.toFixed(2)}</td>
+                    <td className="px-3 py-2 font-mono">{fixedNumber(r.amount)}</td>
                     <td className="px-3 py-2">{new Date(r.created_at).toLocaleString("zh-CN", { hour12: false })}</td>
                   </tr>
                 ))}
@@ -468,7 +479,7 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
                 {detail.withdrawals?.map((w) => (
                   <tr key={w.id}>
                     <td className="px-3 py-2">{w.method}</td>
-                    <td className="px-3 py-2 font-mono">¥{w.amount.toFixed(2)}</td>
+                    <td className="px-3 py-2 font-mono">¥{fixedNumber(w.amount)}</td>
                     <td className="px-3 py-2">{w.status}</td>
                     <td className="px-3 py-2">{new Date(w.created_at).toLocaleString("zh-CN", { hour12: false })}</td>
                   </tr>
@@ -568,7 +579,7 @@ function MemberLevelModal({ levels, onClose, onSaved }: { levels: MemberLevel[];
                   <td className="px-3 py-2 font-mono text-xs">{l.code}</td>
                   <td className="px-3 py-2">{l.name}{l.is_default && <span className="ml-2 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-600">默认</span>}</td>
                   <td className="px-3 py-2">
-                    {l.referral_reward_type === "percent" ? `${l.referral_reward_amount}%` : `${l.referral_reward_amount.toFixed(2)} ${l.referral_reward_account === "cash" ? "元" : "算力"}`}
+                    {l.referral_reward_type === "percent" ? `${l.referral_reward_amount}%` : `${fixedNumber(l.referral_reward_amount)} ${l.referral_reward_account === "cash" ? "元" : "算力"}`}
                     <span className="ml-1 text-xs text-gray-400">到{l.referral_reward_account === "cash" ? "现金" : "算力"}</span>
                   </td>
                   <td className="px-3 py-2">{l.referral_reward_trigger === "every_recharge" ? "每次充值" : "首次充值"}</td>
@@ -667,10 +678,10 @@ function UserDetailRecords({ userID, view }: { userID: number; view: UserDetailV
                   }
                   if (view === "frozen") {
                     const item = raw as FreezeItem;
-                    return <tr key={item.id}><td className="px-3 py-2 font-mono font-semibold text-amber-600">{item.amount.toFixed(2)}</td><td className="px-3 py-2"><div>{item.ref_type}</div><div className="font-mono text-[11px] text-gray-400">{item.ref_id}</div></td><td className="px-3 py-2">{freezeStatusLabel(item.status)}</td><td className="px-3 py-2 text-xs text-gray-500"><div>{formatAdminTime(item.created_at)}</div>{item.released_at ? <div className="mt-0.5 text-emerald-600">释放：{formatAdminTime(item.released_at)}</div> : null}</td></tr>;
+                    return <tr key={item.id}><td className="px-3 py-2 font-mono font-semibold text-amber-600">{fixedNumber(item.amount)}</td><td className="px-3 py-2"><div>{item.ref_type}</div><div className="font-mono text-[11px] text-gray-400">{item.ref_id}</div></td><td className="px-3 py-2">{freezeStatusLabel(item.status)}</td><td className="px-3 py-2 text-xs text-gray-500"><div>{formatAdminTime(item.created_at)}</div>{item.released_at ? <div className="mt-0.5 text-emerald-600">释放：{formatAdminTime(item.released_at)}</div> : null}</td></tr>;
                   }
                   const item = raw as AccountTransactionItem;
-                  return <tr key={item.id}><td className={`px-3 py-2 font-mono font-semibold ${item.direction === "in" ? "text-emerald-600" : "text-red-500"}`}>{item.direction === "in" ? "+" : "-"}{item.amount.toFixed(2)}</td><td className="px-3 py-2 font-mono">{item.balance_after.toFixed(2)}</td><td className="px-3 py-2"><div>{item.type}</div>{item.ref_type || item.ref_id ? <div className="font-mono text-[11px] text-gray-400">{[item.ref_type, item.ref_id].filter(Boolean).join(" · ")}</div> : null}</td><td className="max-w-[260px] truncate px-3 py-2 text-xs text-gray-500" title={item.remark || ""}>{item.remark || "-"}</td><td className="px-3 py-2 text-xs text-gray-500">{formatAdminTime(item.created_at)}</td></tr>;
+                  return <tr key={item.id}><td className={`px-3 py-2 font-mono font-semibold ${item.direction === "in" ? "text-emerald-600" : "text-red-500"}`}>{item.direction === "in" ? "+" : "-"}{fixedNumber(item.amount)}</td><td className="px-3 py-2 font-mono">{fixedNumber(item.balance_after)}</td><td className="px-3 py-2"><div>{item.type}</div>{item.ref_type || item.ref_id ? <div className="font-mono text-[11px] text-gray-400">{[item.ref_type, item.ref_id].filter(Boolean).join(" · ")}</div> : null}</td><td className="max-w-[260px] truncate px-3 py-2 text-xs text-gray-500" title={item.remark || ""}>{item.remark || "-"}</td><td className="px-3 py-2 text-xs text-gray-500">{formatAdminTime(item.created_at)}</td></tr>;
                 })}
               </tbody>
             </table>

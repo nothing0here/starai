@@ -2226,7 +2226,7 @@ func (h *Handler) AdminChangeOwnPassword(c *gin.Context) {
 func (h *Handler) AdminListUsers(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	items, total, err := h.admin.ListUsers(c.Request.Context(), page, pageSize)
+	items, total, err := h.admin.ListUsers(c.Request.Context(), page, pageSize, c.Query("search"), c.Query("status"))
 	if err != nil {
 		util.InternalError(c, err.Error())
 		return

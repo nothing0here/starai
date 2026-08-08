@@ -287,16 +287,43 @@ type UserListItem struct {
 	CreatedAt             string              `json:"created_at"`
 }
 
-func (s *AdminService) ListUsers(ctx context.Context, page, pageSize int) ([]UserListItem, int, error) {
+func (s *AdminService) ListUsers(ctx context.Context, page, pageSize int, search, status string) ([]UserListItem, int, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 {
 		pageSize = 20
 	}
+	search = strings.TrimSpace(search)
+	status = strings.TrimSpace(status)
+	whereParts := make([]string, 0, 2)
+	args := make([]interface{}, 0, 4)
+	if search != "" {
+		args = append(args, "%"+search+"%")
+		placeholder := fmt.Sprintf("$%d", len(args))
+		whereParts = append(whereParts, fmt.Sprintf(`(
+			u.nickname ILIKE %[1]s OR u.public_id ILIKE %[1]s OR u.referral_code ILIKE %[1]s OR
+			CAST(u.id AS TEXT) ILIKE %[1]s OR COALESCE(ru.nickname,'') ILIKE %[1]s OR
+			EXISTS (SELECT 1 FROM auth_identities ai WHERE ai.user_id=u.id AND ai.provider='email' AND ai.identifier ILIKE %[1]s)
+		)`, placeholder))
+	}
+	if status != "" {
+		args = append(args, status)
+		whereParts = append(whereParts, fmt.Sprintf("u.status=$%d", len(args)))
+	}
+	where := ""
+	if len(whereParts) > 0 {
+		where = " WHERE " + strings.Join(whereParts, " AND ")
+	}
 	var total int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&total)
-	rows, err := s.db.Query(ctx, `
+	countSQL := `SELECT COUNT(*) FROM users u LEFT JOIN users ru ON ru.id=u.referrer_id` + where
+	if err := s.db.QueryRow(ctx, countSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	limitPlaceholder := len(args) - 1
+	offsetPlaceholder := len(args)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		SELECT u.id, u.public_id, u.nickname, u.avatar_url, u.status, u.user_level,
 			COALESCE(ml.id,0), COALESCE(ml.name, u.user_level), u.referral_code, u.referrer_id, ru.nickname,
 			(SELECT COUNT(*) FROM users c WHERE c.referrer_id=u.id),
@@ -309,7 +336,8 @@ func (s *AdminService) ListUsers(ctx context.Context, page, pageSize int) ([]Use
 		FROM users u LEFT JOIN wallets w ON w.user_id = u.id
 		LEFT JOIN member_levels ml ON ml.id = u.member_level_id
 		LEFT JOIN users ru ON ru.id = u.referrer_id
-		ORDER BY u.created_at DESC LIMIT $1 OFFSET $2`, pageSize, (page-1)*pageSize)
+		%s
+		ORDER BY u.created_at DESC LIMIT $%d OFFSET $%d`, where, limitPlaceholder, offsetPlaceholder), args...)
 	if err != nil {
 		return nil, 0, err
 	}
