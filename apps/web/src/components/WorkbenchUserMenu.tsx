@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   BadgeDollarSign,
   Bell,
@@ -127,10 +128,10 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
           <QuickEntryIcon />
         </button>
 
-        {open && (
+        {open && typeof document !== "undefined" && createPortal(
           <>
-          <button type="button" aria-label={t("common.close")} className="fixed inset-0 z-20 cursor-default bg-transparent" onClick={() => setOpen(false)} />
-          <div className="fixed left-4 right-4 top-16 z-30 rounded-2xl border border-white/80 bg-white p-3 shadow-xl sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-2 sm:w-[340px] dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
+          <button type="button" aria-label={t("common.close")} className="fixed inset-0 z-[100] cursor-default bg-transparent" onClick={() => setOpen(false)} />
+          <div className="fixed left-4 right-4 top-16 z-[110] rounded-2xl border border-white/80 bg-white p-3 shadow-xl sm:left-auto sm:right-4 sm:w-[340px] dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{user?.nickname || t("common.notLoggedIn")}</div>
@@ -220,12 +221,13 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
               </button>
             </div>
           </div>
-          </>
+          </>,
+          document.body
         )}
       </div>
 
-      {announceOpen && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4" onClick={() => setAnnounceOpen(false)}>
+      {announceOpen && typeof document !== "undefined" && createPortal(
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-4" onClick={() => setAnnounceOpen(false)}>
           <div className="max-h-[70vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-xl dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-lg font-bold text-gray-950 dark:text-gray-100">{t("announcement.title")}</h3>
@@ -249,7 +251,8 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );

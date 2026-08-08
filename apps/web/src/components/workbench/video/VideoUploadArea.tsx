@@ -316,10 +316,11 @@ export function VideoUploadArea({
     onChange({ ...media, reference_images: media.reference_images.filter((_, idx) => idx !== index) });
   };
 
-  if (profile === "veo_reference") {
+  if (profile === "veo_reference" || profile === "omni_reference") {
     const activeMode = mode || "text";
     if (activeMode === "text") return null;
-    const max = Math.min(3, config.reference_images?.max ?? config.max_reference_images ?? 3);
+    const profileLimit = profile === "omni_reference" ? 7 : 3;
+    const max = Math.min(profileLimit, config.reference_images?.max ?? config.max_reference_images ?? profileLimit);
     return (
       <ReferenceImageStack
         images={media.reference_images}

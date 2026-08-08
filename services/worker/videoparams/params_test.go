@@ -119,6 +119,75 @@ func TestBuildVeoReferencePayloadSupportsTextAndReferenceModes(t *testing.T) {
 	}
 }
 
+func TestBuildOmniReferencePayloadUsesUpToSevenImages(t *testing.T) {
+	runtimeRule := map[string]interface{}{
+		"video": map[string]interface{}{"upload_profile": "omni_reference"},
+		"upstream": map[string]interface{}{
+			"adapter": "omni_reference_v1",
+			"include": []interface{}{"generation_mode", "size", "reference_images"},
+		},
+	}
+	references := []interface{}{
+		"https://example.com/1.jpg", "https://example.com/2.jpg", "https://example.com/3.jpg",
+		"https://example.com/4.jpg", "https://example.com/5.jpg", "https://example.com/6.jpg",
+		"https://example.com/7.jpg", "https://example.com/ignored.jpg",
+	}
+
+	payload := BuildUpstreamVideoPayload(
+		"omni-flash", "omni_flash-10s", runtimeRule, nil,
+		map[string]interface{}{
+			"prompt": "product video", "generation_mode": "reference", "duration": float64(10),
+			"size": "1280x720", "reference_images": references,
+		},
+	)
+	payload = SanitizeUpstreamPayload(payload, "/v1/videos")
+	images, ok := payload["images"].([]interface{})
+	if !ok {
+		if stringImages, stringOK := payload["images"].([]string); stringOK {
+			if len(stringImages) != 7 {
+				t.Fatalf("images len = %d, want 7", len(stringImages))
+			}
+		} else {
+			t.Fatalf("images = %#v, want an array", payload["images"])
+		}
+	} else if len(images) != 7 {
+		t.Fatalf("images len = %d, want 7", len(images))
+	}
+	for _, key := range []string{"generation_mode", "duration", "reference_images", "_video_upload_profile"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("%s must not be sent upstream: %#v", key, payload)
+		}
+	}
+}
+
+func TestFramePairProfileAlwaysForwardsReferenceImagesForAliasedVeoModel(t *testing.T) {
+	payload := BuildUpstreamVideoPayload(
+		"partner-video", "partner-fast-fl",
+		map[string]interface{}{
+			"video":    map[string]interface{}{"upload_profile": "frame_pair"},
+			"upstream": map[string]interface{}{"include": []interface{}{"size"}},
+		},
+		nil,
+		map[string]interface{}{
+			"prompt": "keep the subject consistent", "size": "1280x720",
+			"first_frame":      "https://example.com/first.jpg",
+			"last_frame":       "https://example.com/last.jpg",
+			"reference_images": []interface{}{"https://example.com/reference.jpg"},
+		},
+	)
+	payload = SanitizeUpstreamPayload(payload, "/v1/videos")
+	images := mediaURLList(payload["images"])
+	want := []string{"https://example.com/first.jpg", "https://example.com/last.jpg", "https://example.com/reference.jpg"}
+	if len(images) != len(want) {
+		t.Fatalf("images = %#v, want %#v", images, want)
+	}
+	for index := range want {
+		if images[index] != want[index] {
+			t.Fatalf("images[%d] = %q, want %q", index, images[index], want[index])
+		}
+	}
+}
+
 func TestSanitizeUpstreamPayloadUsesImageURLForSora(t *testing.T) {
 	payload := map[string]interface{}{
 		"model":            "sora-2-12s",

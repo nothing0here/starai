@@ -50,6 +50,7 @@ const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
 type SeedanceVariant = "standard" | "fast" | "mini";
 const MINIMAX_H3_TEMPLATE_KEY = "minimax_h3_v2";
 const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
+const OMNI_REFERENCE_TEMPLATE_KEY = "omni_reference_v1";
 
 const buildMiniMaxH3PriceRule = () => ({
   billing_type: "dynamic",
@@ -584,6 +585,8 @@ export default function ModelsPage() {
       setVideoTemplateKey(MINIMAX_H3_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "veo_reference_v1") {
       setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
+    } else if ((m.runtime_rule as any)?.upstream?.adapter === "omni_reference_v1") {
+      setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
     } else {
       setVideoTemplateKey("");
     }
@@ -820,6 +823,7 @@ export default function ModelsPage() {
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
     { value: "frame_pair", label: "首尾帧 + 参考图 (VEO 类)" },
     { value: "veo_reference", label: "参考图 1~3 张 (VEO 类，文生 / 参考图)" },
+    { value: "omni_reference", label: "Omni 参考图 1~7 张 (文生 / 参考图)" },
     { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
     { value: "minimax_h3", label: "MiniMax-H3 V2 多模态组合" },
     { value: "none", label: "不上传图片" },
@@ -1717,6 +1721,100 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
   });
 
+  const applyOmniReferenceV1 = (prev: FormState): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    new_api_model: String(prev.new_api_model || "").toLowerCase().includes("omni")
+      ? prev.new_api_model
+      : "omni_flash-10s",
+    new_api_endpoint: "/v1/videos",
+    new_api_extra_params: setConnection(prev.new_api_extra_params, {
+      protocol: "openai_compatible",
+      auth_type: "bearer",
+      base_url: "https://zexapi.com",
+      api_key_header: "Authorization",
+    }),
+    input_schema: JSON.stringify(
+      {
+        type: "object",
+        properties: {
+          generation_mode: {
+            type: "string",
+            title: "生成模式",
+            enum: ["text", "reference"],
+            enumLabels: { text: "文生视频", reference: "参考图生视频" },
+            default: "text",
+            "x-order": 1,
+            "x-widget": "option_menu",
+            "x-icon": "sparkles",
+            "x-highlight": true,
+          },
+          duration: {
+            type: "integer",
+            title: "视频时长",
+            enum: [10],
+            enumLabels: { "10": "10s（模型固定）" },
+            default: 10,
+            "x-order": 2,
+            "x-widget": "option_menu",
+            "x-icon": "clock",
+          },
+          size: {
+            type: "string",
+            title: "视频尺寸",
+            enum: ["1280x720", "720x1280"],
+            enumLabels: { "1280x720": "横屏 720P", "720x1280": "竖屏 720P" },
+            default: "1280x720",
+            "x-order": 3,
+            "x-widget": "option_menu",
+            "x-icon": "ratio",
+          },
+        },
+      },
+      null,
+      2
+    ),
+    default_params: JSON.stringify(
+      { generation_mode: "text", duration: 10, size: "1280x720" },
+      null,
+      2
+    ),
+    runtime_rule: JSON.stringify(
+      {
+        video: {
+          upload_profile: "omni_reference",
+          min_reference_images: 0,
+          max_reference_images: 7,
+          max_total_images: 7,
+          count_toward_total: true,
+          prompt_required: true,
+          prompt_hint: "描述目标视频；参考图模式支持上传或从资产库引入 1～7 张图片（当前不支持首尾帧）",
+          show_channel: false,
+          show_web_search: false,
+          count_options: [1],
+          count_allow_custom: false,
+          count_max: 1,
+          mode_param: "generation_mode",
+          reference_images: { key: "reference_images", max: 7 },
+        },
+        upstream: {
+          adapter: "omni_reference_v1",
+          include: ["generation_mode", "size", "reference_images"],
+          map: {},
+          poll_path: "/v1/videos/{id}",
+          poll_interval_sec: 10,
+          poll_timeout_sec: 7200,
+          request_timeout_sec: 120,
+        },
+        capabilities: { web_search: false, deep_think: false },
+      },
+      null,
+      2
+    ),
+    price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
+  });
+
   const applyVolcengineSeedance2 = (prev: FormState, variant: SeedanceVariant): FormState => {
     const config = getSeedanceVariantConfig(variant);
     const generationModes = [
@@ -2249,7 +2347,84 @@ export default function ModelsPage() {
       runtimeRule = parsedRuntimeRule;
       effectiveVideoEndpoint = "/v1/videos";
     }
-    if (isSeedance2 || isMiniMaxH3 || isVeoReference) {
+    const isOmniReference =
+      form.category === "video" &&
+      (parsedRuntimeRule?.upstream?.adapter === "omni_reference_v1" ||
+        parsedRuntimeRule?.video?.upload_profile === "omni_reference");
+    if (isOmniReference) {
+      const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      const currentMode = (props.generation_mode ?? {}) as Record<string, any>;
+      const currentModeDefault = ["text", "reference"].includes(String(currentMode.default))
+        ? String(currentMode.default)
+        : "text";
+      props.generation_mode = {
+        ...currentMode,
+        type: "string",
+        title: "生成模式",
+        enum: ["text", "reference"],
+        enumLabels: { ...(currentMode.enumLabels || {}), text: "文生视频", reference: "参考图生视频" },
+        default: currentModeDefault,
+        "x-order": 1,
+        "x-widget": "option_menu",
+        "x-icon": "sparkles",
+        "x-highlight": true,
+      };
+      props.duration = {
+        ...(props.duration || {}),
+        type: "integer",
+        title: "视频时长",
+        enum: [10],
+        enumLabels: { "10": "10s（模型固定）" },
+        default: 10,
+        "x-order": 2,
+        "x-widget": "option_menu",
+        "x-icon": "clock",
+      };
+      props.size = {
+        ...(props.size || {}),
+        type: "string",
+        title: "视频尺寸",
+        enum: ["1280x720", "720x1280"],
+        enumLabels: { "1280x720": "横屏 720P", "720x1280": "竖屏 720P" },
+        default: ["1280x720", "720x1280"].includes(String(props.size?.default)) ? props.size.default : "1280x720",
+        "x-order": 3,
+        "x-widget": "option_menu",
+        "x-icon": "ratio",
+      };
+      parsedInputSchema.properties = props;
+      inputSchema = parsedInputSchema;
+      defaultParams = {
+        ...((defaultParams as Record<string, unknown>) || {}),
+        generation_mode: currentModeDefault,
+        duration: 10,
+        size: ["1280x720", "720x1280"].includes(String((defaultParams as Record<string, unknown>)?.size))
+          ? (defaultParams as Record<string, unknown>).size
+          : "1280x720",
+      };
+      const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
+      const currentUpstream = (parsedRuntimeRule.upstream ?? {}) as Record<string, any>;
+      parsedRuntimeRule.video = {
+        ...currentVideo,
+        upload_profile: "omni_reference",
+        min_reference_images: 0,
+        max_reference_images: 7,
+        max_total_images: 7,
+        mode_param: "generation_mode",
+        reference_images: { ...(currentVideo.reference_images || {}), key: "reference_images", max: 7 },
+      };
+      parsedRuntimeRule.upstream = {
+        ...currentUpstream,
+        adapter: "omni_reference_v1",
+        include: ["generation_mode", "size", "reference_images"],
+        poll_path: "/v1/videos/{id}",
+        poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
+        poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),
+        request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
+      };
+      runtimeRule = parsedRuntimeRule;
+      effectiveVideoEndpoint = "/v1/videos";
+    }
+    if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference) {
       const modeParam = String(parsedRuntimeRule?.video?.mode_param || "generation_mode");
       const modeSchema = parsedInputSchema?.properties?.[modeParam] as Record<string, any> | undefined;
       const schemaDefault = modeSchema?.default;
@@ -3393,11 +3568,14 @@ export default function ModelsPage() {
                           setForm((prev) => applyMiniMaxH3V2(prev));
                         } else if (value === VEO_REFERENCE_TEMPLATE_KEY) {
                           setForm((prev) => applyVeoReferenceV1(prev));
+                        } else if (value === OMNI_REFERENCE_TEMPLATE_KEY) {
+                          setForm((prev) => applyOmniReferenceV1(prev));
                         }
                       }}
                     >
                       <option value="">通用视频接口 / 自定义配置</option>
                       <option value={VEO_REFERENCE_TEMPLATE_KEY}>第三方 OpenAI 兼容 · 参考图（VEO 类）</option>
+                      <option value={OMNI_REFERENCE_TEMPLATE_KEY}>章鱼哥 · Omni 文生 / 参考图</option>
                       <option value={SEEDANCE_VARIANTS.standard.templateKey}>火山方舟 · Doubao Seedance 2.0 Standard</option>
                       <option value={SEEDANCE_VARIANTS.fast.templateKey}>火山方舟 · Doubao Seedance 2.0 Fast</option>
                       <option value={SEEDANCE_VARIANTS.mini.templateKey}>火山方舟 · Doubao Seedance 2.0 Mini</option>
@@ -3405,7 +3583,8 @@ export default function ModelsPage() {
                     </select>
                     {(getSeedanceVariantByTemplateKey(videoTemplateKey) ||
                       videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
-                      videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY) && (
+                      videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY ||
+                      videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) && (
                       <button
                         type="button"
                         className="shrink-0 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-xs font-medium text-cyan-700 hover:bg-cyan-50"
@@ -3417,6 +3596,8 @@ export default function ModelsPage() {
                             setForm((prev) => applyMiniMaxH3V2(prev));
                           } else if (videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY) {
                             setForm((prev) => applyVeoReferenceV1(prev));
+                          } else if (videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) {
+                            setForm((prev) => applyOmniReferenceV1(prev));
                           }
                         }}
                       >
@@ -3425,7 +3606,7 @@ export default function ModelsPage() {
                     )}
                   </div>
                   <div className="mt-2 text-[11px] leading-5 text-gray-500">
-                    VEO 参考图模板固定显示 8 秒，支持文生和 1～3 张参考图，JSON 请求自动映射到 images；时长由上游固定，不额外发送 duration。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
+                    VEO 参考图模板固定显示 8 秒，支持文生和 1～3 张参考图；Omni 模板固定 10 秒 720P，支持文生和 1～7 张参考图，二者的 JSON 请求都会自动映射到 images，且不发送固定时长。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
                   </div>
                 </div>
                 {isSeedanceVideoForm && (
@@ -3553,6 +3734,11 @@ export default function ModelsPage() {
                         if (profile === "veo_reference") {
                           setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
                           setForm((prev) => applyVeoReferenceV1(prev));
+                          return;
+                        }
+                        if (profile === "omni_reference") {
+                          setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
+                          setForm((prev) => applyOmniReferenceV1(prev));
                           return;
                         }
                         setForm((prev) => ({

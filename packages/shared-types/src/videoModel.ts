@@ -5,6 +5,7 @@ export type VideoUploadProfile =
   | "multi_ref"
   | "frame_pair"
   | "veo_reference"
+  | "omni_reference"
   | "seedance_2"
   | "minimax_h3"
   | "none";

@@ -318,6 +318,23 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 		default:
 			return errors.New("VEO 参考图模板仅支持文生或参考图模式")
 		}
+	case "omni_reference":
+		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params[cfg.ModeParam])))
+		switch mode {
+		case "", "text":
+			if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+				return errors.New("文生视频需要填写提示词")
+			}
+		case "reference":
+			if refCount < 1 {
+				return errors.New("Omni 参考图模式至少需要 1 张参考图")
+			}
+			if refCount > 7 || refCount > cfg.MaxReferenceImages {
+				return errors.New("Omni 参考图模式最多支持 7 张参考图")
+			}
+		default:
+			return errors.New("Omni 模板仅支持文生或参考图模式，暂不支持首尾帧")
+		}
 	case "multi_ref":
 		if refCount < cfg.MinReferenceImages {
 			return fmt.Errorf("至少需要 %d 张参考图", cfg.MinReferenceImages)

@@ -856,7 +856,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
   const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
-  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference;
+  const isOmniReference = isVideo && videoConfig.upload_profile === "omni_reference";
+  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference;
   const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
@@ -1563,7 +1564,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       }
     }
     if (
-      isVeoReference &&
+      (isVeoReference || isOmniReference) &&
       videoMaterialMode === "reference" &&
       videoMedia.reference_images.length === 0
     ) {

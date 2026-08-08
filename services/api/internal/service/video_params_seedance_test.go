@@ -167,3 +167,33 @@ func TestValidateVeoReferenceModes(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateOmniReferenceModes(t *testing.T) {
+	cfg := videoRuntimeConfig{
+		UploadProfile:      "omni_reference",
+		MaxReferenceImages: 7,
+		ReferenceImagesKey: "reference_images",
+		ModeParam:          "generation_mode",
+	}
+	seven := []interface{}{
+		"https://example.com/1.jpg", "https://example.com/2.jpg", "https://example.com/3.jpg",
+		"https://example.com/4.jpg", "https://example.com/5.jpg", "https://example.com/6.jpg",
+		"https://example.com/7.jpg",
+	}
+	if err := validateVideoUpload(cfg, map[string]interface{}{
+		"generation_mode": "reference", "reference_images": seven,
+	}); err != nil {
+		t.Fatalf("seven Omni references should be valid: %v", err)
+	}
+	tooMany := append(append([]interface{}{}, seven...), "https://example.com/8.jpg")
+	err := validateVideoUpload(cfg, map[string]interface{}{
+		"generation_mode": "reference", "reference_images": tooMany,
+	})
+	if err == nil || !strings.Contains(err.Error(), "最多支持 7 张") {
+		t.Fatalf("error = %v, want Omni seven-image limit", err)
+	}
+	err = validateVideoUpload(cfg, map[string]interface{}{"generation_mode": "first_last"})
+	if err == nil || !strings.Contains(err.Error(), "暂不支持首尾帧") {
+		t.Fatalf("error = %v, want first/last rejection", err)
+	}
+}

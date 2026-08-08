@@ -44,6 +44,10 @@ func BuildUpstreamVideoPayload(
 			}
 		}
 	}
+	uploadProfile := videoUploadProfile(runtimeRule)
+	if uploadProfile == "frame_pair" {
+		include = appendMissing(include, "first_frame", "last_frame", "reference_images")
+	}
 	for _, key := range include {
 		val, ok := params[key]
 		if !ok || val == nil {
@@ -76,6 +80,12 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "veo_reference_v1") {
 		out = buildVeoReferencePayload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "omni_reference_v1") {
+		out = buildOmniReferencePayload(out, params)
+	}
+	if uploadProfile == "frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
+		out["_video_upload_profile"] = uploadProfile
+	}
 	return SanitizeUpstreamPayload(out, "")
 }
 
@@ -84,6 +94,7 @@ func BuildUpstreamVideoPayload(
 func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[string]interface{} {
 	delete(out, "connection")
 	preserveVideoParams, _ := out["_preserve_video_params"].(bool)
+	uploadProfile := strings.ToLower(strings.TrimSpace(fmt.Sprint(out["_video_upload_profile"])))
 	normalizedEndpoint := strings.ToLower(strings.TrimSpace(endpoint))
 	if strings.Contains(normalizedEndpoint, "/v2/video_generation") ||
 		strings.Contains(normalizedEndpoint, "/contents/generations/tasks") {
@@ -91,6 +102,7 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 	}
 	if endpoint != "" {
 		delete(out, "_preserve_video_params")
+		delete(out, "_video_upload_profile")
 	}
 	platformOnly := []string{
 		"n", "count", "asset_ids", "reference_asset_ids", "file_asset_ids",
@@ -107,7 +119,7 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 	}
 	normalizeAspectRatioField(out)
 	if endpoint == "" || strings.Contains(endpoint, "/v1/videos") {
-		if isVeoVideoModel(out["model"]) {
+		if uploadProfile == "frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" || isVeoVideoModel(out["model"]) {
 			promoteVeoImages(out)
 		} else {
 			promoteSoraImageURL(out)
@@ -525,6 +537,47 @@ func buildVeoReferencePayload(out, params map[string]interface{}) map[string]int
 	}
 	delete(out, "reference_images")
 	return out
+}
+
+func buildOmniReferencePayload(out, params map[string]interface{}) map[string]interface{} {
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
+	for _, key := range []string{"generation_mode", "duration", "first_frame", "last_frame", "image", "image_url"} {
+		delete(out, key)
+	}
+	if mode == "reference" {
+		images := mediaURLList(params["reference_images"])
+		if len(images) > 7 {
+			images = images[:7]
+		}
+		if len(images) > 0 {
+			out["images"] = images
+		} else {
+			delete(out, "images")
+		}
+	} else {
+		delete(out, "images")
+	}
+	delete(out, "reference_images")
+	return out
+}
+
+func videoUploadProfile(runtimeRule map[string]interface{}) string {
+	video, _ := runtimeRule["video"].(map[string]interface{})
+	return strings.ToLower(strings.TrimSpace(fmt.Sprint(video["upload_profile"])))
+}
+
+func appendMissing(values []string, keys ...string) []string {
+	seen := make(map[string]bool, len(values)+len(keys))
+	for _, value := range values {
+		seen[value] = true
+	}
+	for _, key := range keys {
+		if !seen[key] {
+			values = append(values, key)
+			seen[key] = true
+		}
+	}
+	return values
 }
 
 func isValidMiniMaxH3MediaReference(value string) bool {
