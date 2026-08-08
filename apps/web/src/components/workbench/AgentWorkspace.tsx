@@ -1113,8 +1113,8 @@ export function AgentWorkspace({ code }: { code: string }) {
         <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden" onMouseEnter={() => !projectDrawerCollapsed && setComicDrawerCollapsed(true)}>
           <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_10%,rgba(34,211,238,.24),transparent_28%),radial-gradient(circle_at_12%_84%,rgba(20,184,166,.18),transparent_22%)] dark:bg-[radial-gradient(circle_at_76%_10%,rgba(20,184,166,.22),transparent_28%),radial-gradient(circle_at_14%_82%,rgba(6,182,212,.14),transparent_22%)]" />
-          <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-3 pb-4 sm:px-5 lg:min-h-[700px] lg:px-8 lg:py-4">
-            <div className="flex min-h-fit flex-1 flex-col justify-center gap-4 py-4 sm:gap-5 sm:py-5 lg:gap-6 lg:py-6">
+          <div className="scrollbar-none relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2 pb-3 sm:px-5 lg:px-8">
+            <div className="comic-landing-stack flex min-h-0 flex-1 flex-col justify-start gap-2 py-2 sm:gap-3 sm:py-3 lg:gap-3 lg:py-2">
               <div className="shrink-0 text-center">
               <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-[11px] font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200 sm:px-4 sm:text-xs">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" /> {t("comic.superAgent")}
@@ -1138,7 +1138,7 @@ export function AgentWorkspace({ code }: { code: string }) {
               </div>
             </div>
 
-              <div className="agent-showcase min-h-[220px] shrink-0 items-center sm:min-h-[240px] lg:min-h-[260px]">
+              <div className="agent-showcase min-h-[190px] shrink-0 items-center sm:min-h-[210px] lg:min-h-[220px]">
                 <ComicFeatureSelector features={translatedSteps} activeIndex={activeComicFeature} onSelect={setActiveComicFeature} />
                 <ComicFeatureHero features={translatedSteps} activeIndex={activeComicFeature} onSelect={setActiveComicFeature} />
               </div>
@@ -1866,7 +1866,7 @@ function ComicFeatureHero({ features, activeIndex, onSelect }: { features: Displ
   const item = features[activeIndex] || features[0];
   if (!item) return null;
   return (
-    <div className="comic-feature-card group mx-auto flex w-full max-w-[640px] flex-col overflow-y-auto rounded-3xl border border-cyan-300/70 bg-white/65 p-4 shadow-xl shadow-cyan-950/10 backdrop-blur-xl transition duration-300 hover:-translate-y-1 hover:border-cyan-400 hover:bg-white/75 hover:shadow-2xl hover:shadow-cyan-950/15 dark:border-cyan-400/30 dark:bg-transparent dark:shadow-black/30 dark:hover:bg-cyan-400/[0.04] sm:p-6 lg:p-7">
+    <div className="comic-feature-card group mx-auto flex w-full max-w-[640px] flex-col overflow-hidden rounded-3xl border border-cyan-300/70 bg-white/65 p-4 shadow-xl shadow-cyan-950/10 backdrop-blur-xl transition duration-300 hover:-translate-y-1 hover:border-cyan-400 hover:bg-white/75 hover:shadow-2xl hover:shadow-cyan-950/15 dark:border-cyan-400/30 dark:bg-transparent dark:shadow-black/30 dark:hover:bg-cyan-400/[0.04] sm:p-5 lg:p-6">
       <div className="mb-4 flex items-center justify-between lg:mb-5">
         <span className="rounded-xl bg-cyan-500/10 px-3 py-2 text-sm font-black text-cyan-700 dark:text-cyan-200">{String(activeIndex + 1).padStart(2, "0")}</span>
         <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200">{item.tags?.[0] || t("comic.tagControl")}</span>

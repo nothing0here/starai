@@ -867,6 +867,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     (videoConfig.upload_profile === "veo_frame_pair" ||
       videoAdapter === "veo_frame_pair_v1" ||
       isLegacyVeoFlFramePair);
+  const isFramePairUpload =
+    isVideo && (videoConfig.upload_profile === "frame_pair" || isVeoFramePair);
   const videoUploadConfig = isVeoFramePair
     ? {
         ...videoConfig,
@@ -2278,7 +2280,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                   <div className="flex flex-col gap-2.5">
                     <div className="flex items-center gap-2 sm:gap-3">
                       <div className="flex flex-1 min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
-                        {isVeoFramePair ? (
+                        {isFramePairUpload ? (
                           <>
                             <ChatTopTools
                               value={bottom}
@@ -2297,6 +2299,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               value={bottom}
                               onChange={setBottom}
                               showUpload={false}
+                              showRole={isVeoFramePair}
                               referencePickMode
                               referenceImages={veoLastFrameAssets}
                               onReferenceImagesChange={(images) =>
@@ -2305,6 +2308,20 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               maxReferenceImages={1}
                               assetLibraryLabel={`${t("video.lastFrame")} · ${t("asset.library")}`}
                             />
+                            {!isVeoFramePair && maxVideoAssetRefs > 0 ? (
+                              <ChatTopTools
+                                value={bottom}
+                                onChange={setBottom}
+                                showUpload={false}
+                                referencePickMode
+                                referenceImages={videoMedia.reference_images}
+                                onReferenceImagesChange={(images) =>
+                                  setVideoMedia((prev) => ({ ...prev, reference_images: images }))
+                                }
+                                maxReferenceImages={maxVideoAssetRefs}
+                                assetLibraryLabel={`${t("video.referenceImage")} · ${t("asset.library")}`}
+                              />
+                            ) : null}
                           </>
                         ) : (
                           <ChatTopTools

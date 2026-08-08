@@ -395,6 +395,22 @@ body {
   background-clip: content-box;
 }
 
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+@media (min-height: 860px) {
+  .agent-landing-shell,
+  .comic-landing-stack {
+    justify-content: center;
+  }
+}
+
 .dark *::-webkit-scrollbar-thumb {
   background: rgb(75 85 99);
   border: 2px solid rgb(17 24 39);
@@ -508,6 +524,23 @@ body {
   .comic-feature-card {
     max-height: 190px;
     padding: 1rem !important;
+  }
+}
+
+@media (min-width: 1024px) and (max-height: 980px) {
+  .agent-feature-card,
+  .comic-feature-card {
+    min-height: 210px !important;
+    max-height: 240px !important;
+    padding: 1.25rem !important;
+  }
+
+  .agent-feature-list {
+    gap: 0.5rem !important;
+  }
+
+  .agent-feature-list > button {
+    padding: 0.75rem !important;
   }
 }
 
