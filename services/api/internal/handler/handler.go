@@ -230,6 +230,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			adm.POST("/users/:id/adjust-balance", superAdminOnly, h.AdminAdjustBalance)
 			adm.PATCH("/users/:id/status", h.AdminSetUserStatus)
 			adm.GET("/users/:id/transactions", h.AdminListUserTransactions)
+			adm.GET("/users/:id/freezes", h.AdminListUserFreezes)
+			adm.GET("/users/:id/works", h.AdminListUserWorks)
 			adm.GET("/users/:id/detail", h.AdminGetUserDetail)
 			adm.PATCH("/users/:id", superAdminOnly, h.AdminUpdateUser)
 			adm.PATCH("/users/:id/assets/:publicId", h.AdminUpdateUserAsset)
@@ -2379,7 +2381,31 @@ func (h *Handler) AdminListUserTransactions(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	items, total, err := h.admin.ListUserTransactions(c.Request.Context(), id, page, pageSize)
+	items, total, err := h.admin.ListUserAccountTransactions(c.Request.Context(), id, c.DefaultQuery("account", "compute"), page, pageSize)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	util.OK(c, map[string]interface{}{"items": items, "total": total})
+}
+
+func (h *Handler) AdminListUserFreezes(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	items, total, err := h.admin.ListUserFreezes(c.Request.Context(), id, page, pageSize)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	util.OK(c, map[string]interface{}{"items": items, "total": total})
+}
+
+func (h *Handler) AdminListUserWorks(c *gin.Context) {
+	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	items, total, err := h.admin.ListUserWorks(c.Request.Context(), id, page, pageSize)
 	if err != nil {
 		util.InternalError(c, err.Error())
 		return

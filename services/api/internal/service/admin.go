@@ -629,24 +629,37 @@ type UserTransactionDTO struct {
 	Direction    string  `json:"direction"`
 	Amount       float64 `json:"amount"`
 	BalanceAfter float64 `json:"balance_after"`
+	RefType      string  `json:"ref_type"`
+	RefID        string  `json:"ref_id"`
 	Remark       string  `json:"remark"`
 	CreatedAt    string  `json:"created_at"`
 }
 
 // ListUserTransactions returns a user's wallet transactions for the admin user detail view.
 func (s *AdminService) ListUserTransactions(ctx context.Context, userID int64, page, pageSize int) ([]UserTransactionDTO, int, error) {
+	return s.ListUserAccountTransactions(ctx, userID, "compute", page, pageSize)
+}
+
+// ListUserAccountTransactions returns compute or cash ledger entries for an admin user detail view.
+func (s *AdminService) ListUserAccountTransactions(ctx context.Context, userID int64, account string, page, pageSize int) ([]UserTransactionDTO, int, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 || pageSize > 100 {
 		pageSize = 20
 	}
+	table := "wallet_transactions"
+	if account == "cash" {
+		table = "cash_transactions"
+	} else if account != "" && account != "compute" {
+		return nil, 0, fmt.Errorf("无效的账户类型")
+	}
 	var total int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM wallet_transactions WHERE user_id=$1`, userID).Scan(&total)
-	rows, err := s.db.Query(ctx, `
-		SELECT id, type, direction, amount, balance_after, COALESCE(remark,''), created_at
-		FROM wallet_transactions WHERE user_id=$1
-		ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
+	s.db.QueryRow(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE user_id=$1`, table), userID).Scan(&total)
+	rows, err := s.db.Query(ctx, fmt.Sprintf(`
+		SELECT id, type, direction, amount, balance_after, COALESCE(ref_type,''), COALESCE(ref_id,''), COALESCE(remark,''), created_at
+		FROM %s WHERE user_id=$1
+		ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`, table), userID, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -655,13 +668,94 @@ func (s *AdminService) ListUserTransactions(ctx context.Context, userID int64, p
 	for rows.Next() {
 		var t UserTransactionDTO
 		var created time.Time
-		if err := rows.Scan(&t.ID, &t.Type, &t.Direction, &t.Amount, &t.BalanceAfter, &t.Remark, &created); err != nil {
+		if err := rows.Scan(&t.ID, &t.Type, &t.Direction, &t.Amount, &t.BalanceAfter, &t.RefType, &t.RefID, &t.Remark, &created); err != nil {
 			return nil, 0, err
 		}
 		t.CreatedAt = created.Format(time.RFC3339)
 		items = append(items, t)
 	}
 	return items, total, nil
+}
+
+type AdminUserFreezeDTO struct {
+	ID         int64   `json:"id"`
+	Amount     float64 `json:"amount"`
+	RefType    string  `json:"ref_type"`
+	RefID      string  `json:"ref_id"`
+	Status     string  `json:"status"`
+	CreatedAt  string  `json:"created_at"`
+	ReleasedAt *string `json:"released_at,omitempty"`
+}
+
+func (s *AdminService) ListUserFreezes(ctx context.Context, userID int64, page, pageSize int) ([]AdminUserFreezeDTO, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM balance_freezes WHERE user_id=$1`, userID).Scan(&total)
+	rows, err := s.db.Query(ctx, `SELECT id, amount, ref_type, ref_id, status, created_at, released_at
+		FROM balance_freezes WHERE user_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var items []AdminUserFreezeDTO
+	for rows.Next() {
+		var item AdminUserFreezeDTO
+		var created time.Time
+		var released *time.Time
+		if err := rows.Scan(&item.ID, &item.Amount, &item.RefType, &item.RefID, &item.Status, &created, &released); err != nil {
+			return nil, 0, err
+		}
+		item.CreatedAt = created.Format(time.RFC3339)
+		if released != nil {
+			value := released.Format(time.RFC3339)
+			item.ReleasedAt = &value
+		}
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
+}
+
+type AdminUserWorkDTO struct {
+	ID           int64   `json:"id"`
+	PublicID     string  `json:"public_id"`
+	Type         string  `json:"type"`
+	Title        *string `json:"title,omitempty"`
+	Prompt       *string `json:"prompt,omitempty"`
+	ThumbnailURL *string `json:"thumbnail_url,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+func (s *AdminService) ListUserWorks(ctx context.Context, userID int64, page, pageSize int) ([]AdminUserWorkDTO, int, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int
+	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM works WHERE user_id=$1`, userID).Scan(&total)
+	rows, err := s.db.Query(ctx, `SELECT id, public_id, type, title, prompt, thumbnail_url, created_at
+		FROM works WHERE user_id=$1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`, userID, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var items []AdminUserWorkDTO
+	for rows.Next() {
+		var item AdminUserWorkDTO
+		var created time.Time
+		if err := rows.Scan(&item.ID, &item.PublicID, &item.Type, &item.Title, &item.Prompt, &item.ThumbnailURL, &created); err != nil {
+			return nil, 0, err
+		}
+		item.CreatedAt = created.Format(time.RFC3339)
+		items = append(items, item)
+	}
+	return items, total, rows.Err()
 }
 
 type AdminUpdateUserInput struct {

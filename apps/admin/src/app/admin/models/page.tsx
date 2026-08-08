@@ -53,6 +53,14 @@ const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
 const VEO_FRAME_PAIR_TEMPLATE_KEY = "veo_frame_pair_v1";
 const OMNI_REFERENCE_TEMPLATE_KEY = "omni_reference_v1";
 
+function canonicalTemplateVideoSize(value: unknown, fallback = "1280x720") {
+  const raw = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  if (/^\d+x\d+$/.test(raw)) return raw;
+  if (["portrait", "vertical", "9:16"].includes(raw)) return "720x1280";
+  if (["landscape", "horizontal", "16:9"].includes(raw)) return "1280x720";
+  return fallback;
+}
+
 const buildMiniMaxH3PriceRule = () => ({
   billing_type: "dynamic",
   strategy: "minimax_h3_seconds",
@@ -2346,6 +2354,12 @@ export default function ModelsPage() {
         parsedRuntimeRule?.video?.upload_profile === "veo_reference");
     if (isVeoReference) {
       const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      const legacySizeDefault = props.size?.default ?? props.aspect_ratio?.default ?? props.orientation?.default ?? props.ratio?.default
+        ?? (defaultParams as Record<string, unknown>)?.size ?? (defaultParams as Record<string, unknown>)?.aspect_ratio
+        ?? (defaultParams as Record<string, unknown>)?.orientation ?? (defaultParams as Record<string, unknown>)?.ratio;
+      delete props.aspect_ratio;
+      delete props.orientation;
+      delete props.ratio;
       const currentMode = (props.generation_mode ?? {}) as Record<string, any>;
       const currentModeDefault = ["text", "reference"].includes(String(currentMode.default))
         ? String(currentMode.default)
@@ -2362,23 +2376,25 @@ export default function ModelsPage() {
         "x-icon": "sparkles",
         "x-highlight": true,
       };
-      if (!props.size) {
-        props.size = {
-          type: "string",
-          title: "视频尺寸",
-          enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
-          enumLabels: {
-            "1280x720": "横屏 720P",
-            "720x1280": "竖屏 720P",
-            "1920x1080": "横屏 1080P",
-            "1080x1920": "竖屏 1080P",
-          },
-          default: "1280x720",
-          "x-order": 3,
-          "x-widget": "option_menu",
-          "x-icon": "ratio",
-        };
-      }
+      const veoReferenceSize = canonicalTemplateVideoSize(legacySizeDefault);
+      props.size = {
+        ...(props.size || {}),
+        type: "string",
+        title: "视频尺寸",
+        enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+        enumLabels: {
+          "1280x720": "横屏 720P",
+          "720x1280": "竖屏 720P",
+          "1920x1080": "横屏 1080P",
+          "1080x1920": "竖屏 1080P",
+        },
+        default: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(veoReferenceSize)
+          ? veoReferenceSize
+          : "1280x720",
+        "x-order": 3,
+        "x-widget": "option_menu",
+        "x-icon": "ratio",
+      };
       props.duration = {
         ...(props.duration || {}),
         type: "integer",
@@ -2392,17 +2408,21 @@ export default function ModelsPage() {
       };
       parsedInputSchema.properties = props;
       inputSchema = parsedInputSchema;
+      const cleanDefaults = { ...((defaultParams as Record<string, unknown>) || {}) };
+      delete cleanDefaults.aspect_ratio;
+      delete cleanDefaults.orientation;
+      delete cleanDefaults.ratio;
       defaultParams = {
-        ...((defaultParams as Record<string, unknown>) || {}),
+        ...cleanDefaults,
         generation_mode: currentModeDefault,
         duration: 8,
-        size: String((defaultParams as Record<string, unknown>)?.size || props.size.default || "1280x720"),
+        size: canonicalTemplateVideoSize(cleanDefaults.size ?? props.size.default ?? legacySizeDefault),
       };
       const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
       const currentUpstream = (parsedRuntimeRule.upstream ?? {}) as Record<string, any>;
       const include = Array.from(
         new Set([
-          ...(Array.isArray(currentUpstream.include) ? currentUpstream.include.map(String) : []),
+          ...(Array.isArray(currentUpstream.include) ? currentUpstream.include.map(String).filter((key) => !["aspect_ratio", "orientation", "ratio"].includes(key)) : []),
           "generation_mode",
           "size",
           "reference_images",
@@ -2421,6 +2441,7 @@ export default function ModelsPage() {
         ...currentUpstream,
         adapter: "veo_reference_v1",
         include,
+        map: {},
         poll_path: "/v1/videos/{id}",
         poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
         poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),
@@ -2439,8 +2460,14 @@ export default function ModelsPage() {
         return;
       }
       const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      const legacySizeDefault = props.size?.default ?? props.aspect_ratio?.default ?? props.orientation?.default ?? props.ratio?.default
+        ?? (defaultParams as Record<string, unknown>)?.size ?? (defaultParams as Record<string, unknown>)?.aspect_ratio
+        ?? (defaultParams as Record<string, unknown>)?.orientation ?? (defaultParams as Record<string, unknown>)?.ratio;
       delete props.generation_mode;
       delete props.duration;
+      delete props.aspect_ratio;
+      delete props.orientation;
+      delete props.ratio;
       props.size = {
         ...(props.size || {}),
         type: "string",
@@ -2452,8 +2479,8 @@ export default function ModelsPage() {
           "1920x1080": "横屏 1080P",
           "1080x1920": "竖屏 1080P",
         },
-        default: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(String(props.size?.default))
-          ? props.size.default
+        default: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(canonicalTemplateVideoSize(legacySizeDefault))
+          ? canonicalTemplateVideoSize(legacySizeDefault)
           : "1280x720",
         "x-order": 1,
         "x-widget": "option_menu",
@@ -2465,10 +2492,13 @@ export default function ModelsPage() {
       const cleanDefaults = { ...((defaultParams as Record<string, unknown>) || {}) };
       delete cleanDefaults.generation_mode;
       delete cleanDefaults.duration;
+      delete cleanDefaults.aspect_ratio;
+      delete cleanDefaults.orientation;
+      delete cleanDefaults.ratio;
       defaultParams = {
         ...cleanDefaults,
-        size: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(String(cleanDefaults.size))
-          ? cleanDefaults.size
+        size: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(canonicalTemplateVideoSize(cleanDefaults.size ?? legacySizeDefault))
+          ? canonicalTemplateVideoSize(cleanDefaults.size ?? legacySizeDefault)
           : "1280x720",
       };
       const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
@@ -2504,6 +2534,12 @@ export default function ModelsPage() {
         parsedRuntimeRule?.video?.upload_profile === "omni_reference");
     if (isOmniReference) {
       const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      const legacySizeDefault = props.size?.default ?? props.aspect_ratio?.default ?? props.orientation?.default ?? props.ratio?.default
+        ?? (defaultParams as Record<string, unknown>)?.size ?? (defaultParams as Record<string, unknown>)?.aspect_ratio
+        ?? (defaultParams as Record<string, unknown>)?.orientation ?? (defaultParams as Record<string, unknown>)?.ratio;
+      delete props.aspect_ratio;
+      delete props.orientation;
+      delete props.ratio;
       const currentMode = (props.generation_mode ?? {}) as Record<string, any>;
       const currentModeDefault = ["text", "reference"].includes(String(currentMode.default))
         ? String(currentMode.default)
@@ -2537,19 +2573,23 @@ export default function ModelsPage() {
         title: "视频尺寸",
         enum: ["1280x720", "720x1280"],
         enumLabels: { "1280x720": "横屏 720P", "720x1280": "竖屏 720P" },
-        default: ["1280x720", "720x1280"].includes(String(props.size?.default)) ? props.size.default : "1280x720",
+        default: ["1280x720", "720x1280"].includes(canonicalTemplateVideoSize(legacySizeDefault)) ? canonicalTemplateVideoSize(legacySizeDefault) : "1280x720",
         "x-order": 3,
         "x-widget": "option_menu",
         "x-icon": "ratio",
       };
       parsedInputSchema.properties = props;
       inputSchema = parsedInputSchema;
+      const cleanDefaults = { ...((defaultParams as Record<string, unknown>) || {}) };
+      delete cleanDefaults.aspect_ratio;
+      delete cleanDefaults.orientation;
+      delete cleanDefaults.ratio;
       defaultParams = {
-        ...((defaultParams as Record<string, unknown>) || {}),
+        ...cleanDefaults,
         generation_mode: currentModeDefault,
         duration: 10,
-        size: ["1280x720", "720x1280"].includes(String((defaultParams as Record<string, unknown>)?.size))
-          ? (defaultParams as Record<string, unknown>).size
+        size: ["1280x720", "720x1280"].includes(canonicalTemplateVideoSize(cleanDefaults.size ?? legacySizeDefault))
+          ? canonicalTemplateVideoSize(cleanDefaults.size ?? legacySizeDefault)
           : "1280x720",
       };
       const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
@@ -2567,6 +2607,7 @@ export default function ModelsPage() {
         ...currentUpstream,
         adapter: "omni_reference_v1",
         include: ["generation_mode", "size", "reference_images"],
+        map: {},
         poll_path: "/v1/videos/{id}",
         poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
         poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),

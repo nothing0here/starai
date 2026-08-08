@@ -205,6 +205,37 @@ export function buildVideoTaskParams(
   return out;
 }
 
+const SIZE_BASED_VIDEO_PROFILES = new Set(["veo_frame_pair", "veo_reference", "omni_reference"]);
+
+export function isSizeBasedVideoProfile(runtimeRule?: Record<string, unknown>) {
+  const video = asRecord(runtimeRule?.video);
+  const upstream = asRecord(runtimeRule?.upstream);
+  const profile = String(video.upload_profile || "").toLowerCase();
+  const adapter = String(upstream.adapter || "").toLowerCase();
+  return SIZE_BASED_VIDEO_PROFILES.has(profile) || ["veo_frame_pair_v1", "veo_reference_v1", "omni_reference_v1"].includes(adapter);
+}
+
+export function canonicalVideoSize(value: unknown, fallback = "1280x720") {
+  const raw = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  if (/^\d+x\d+$/.test(raw)) return raw;
+  if (["portrait", "vertical", "9:16"].includes(raw)) return "720x1280";
+  if (["landscape", "horizontal", "16:9"].includes(raw)) return "1280x720";
+  return fallback;
+}
+
+// VEO/Omni /v1/videos uses a widthxheight `size`. Remove legacy direction
+// aliases so conflicting defaults can never override the option selected in the workbench.
+export function normalizeSizeBasedVideoParams(params: Record<string, unknown>, runtimeRule?: Record<string, unknown>) {
+  if (!isSizeBasedVideoProfile(runtimeRule)) return params;
+  const next = { ...params };
+  const selected = next.size ?? next.aspect_ratio ?? next.orientation ?? next.ratio;
+  next.size = canonicalVideoSize(selected);
+  delete next.aspect_ratio;
+  delete next.orientation;
+  delete next.ratio;
+  return next;
+}
+
 export function parseCountOptions(raw: unknown): number[] {
   if (Array.isArray(raw) && raw.length) {
     const nums = raw.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n >= 1);

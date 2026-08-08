@@ -25,6 +25,9 @@ import {
   buildAudioTaskParams,
   buildVideoTaskParams,
   EMPTY_VIDEO_MEDIA,
+  canonicalVideoSize,
+  isSizeBasedVideoProfile,
+  normalizeSizeBasedVideoParams,
   parseAudioRuntime,
   parseVideoRuntime,
   schemaDefaultsFromFields,
@@ -117,6 +120,39 @@ function singleResultAudioParams(params: Record<string, unknown>) {
   delete next.count;
   delete next.n;
   return next;
+}
+
+function sizeBasedVideoSchema(schema: Model["input_schema"], runtimeRule: Model["runtime_rule"], defaults: Model["default_params"]) {
+  if (!isSizeBasedVideoProfile(runtimeRule)) return schema;
+  const source = (schema ?? {}) as Record<string, unknown>;
+  const properties = { ...((source.properties as Record<string, any> | undefined) ?? {}) };
+  const profile = String((runtimeRule as any)?.video?.upload_profile || "").toLowerCase();
+  const sizeField = { ...(properties.size || {}) };
+  const legacyField = properties.aspect_ratio || properties.orientation || properties.ratio || {};
+  const defaultSize = canonicalVideoSize(
+    sizeField.default ?? defaults?.size ?? legacyField.default ?? defaults?.aspect_ratio ?? defaults?.orientation ?? defaults?.ratio
+  );
+  delete properties.aspect_ratio;
+  delete properties.orientation;
+  delete properties.ratio;
+  const sizes = profile === "omni_reference"
+    ? ["1280x720", "720x1280"]
+    : ["1280x720", "720x1280", "1920x1080", "1080x1920"];
+  properties.size = {
+    ...sizeField,
+    type: "string",
+    title: "视频尺寸",
+    enum: sizes,
+    enumLabels: {
+      "1280x720": "横屏 720P",
+      "720x1280": "竖屏 720P",
+      ...(profile === "omni_reference" ? {} : { "1920x1080": "横屏 1080P", "1080x1920": "竖屏 1080P" }),
+    },
+    default: sizes.includes(defaultSize) ? defaultSize : sizes[0],
+    "x-widget": "option_menu",
+    "x-icon": "ratio",
+  };
+  return { ...source, properties };
 }
 
 type HistoryItem = {
@@ -832,8 +868,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const activeSummaryCode =
     selectionChannelKey === bottom.channel_key && selectedSummaryCode ? selectedSummaryCode : presetSummaryCodes[0] || "";
   const workbenchInputSchema = useMemo(
-    () => (isAudio ? singleResultAudioSchema(model.input_schema) : model.input_schema),
-    [isAudio, model.input_schema]
+    () => (isAudio ? singleResultAudioSchema(model.input_schema) : sizeBasedVideoSchema(model.input_schema, model.runtime_rule, model.default_params)),
+    [isAudio, model.input_schema, model.runtime_rule, model.default_params]
   );
   const hasSchemaFields = Object.keys(schemaProperties(workbenchInputSchema)).length > 0;
   const tag = CATEGORY_TAG[model.category] || { label: model.category, labelKey: `modelCategory.${model.category}`, className: "bg-gray-100 text-gray-600" };
@@ -892,6 +928,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const videoTaskMedia = useMemo(
     () => (isVeoFramePair ? { ...videoMedia, reference_images: [] } : videoMedia),
     [isVeoFramePair, videoMedia]
+  );
+  const videoRequestParams = useMemo(
+    () => normalizeSizeBasedVideoParams(params, model.runtime_rule),
+    [params, model.runtime_rule]
   );
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
@@ -953,7 +993,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     const selectedReferenceAssets = referenceAssetIds.length ? { reference_asset_ids: referenceAssetIds } : {};
     const languageParams = buildLanguageParams(selectedLanguage);
     const bodyParams = isVideo
-      ? { ...buildVideoTaskParams(params, videoTaskMedia, model.runtime_rule), ...languageParams, ...selectedAssets, ...selectedReferenceAssets }
+      ? { ...buildVideoTaskParams(videoRequestParams, videoTaskMedia, model.runtime_rule), ...languageParams, ...selectedAssets, ...selectedReferenceAssets }
       : isAudio
         ? {
             ...buildAudioTaskParams(singleResultAudioParams(params), prompt, audioSecondaryPrompt, model.runtime_rule),
@@ -998,6 +1038,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   }, [
     model.code,
     params,
+    videoRequestParams,
     videoTaskMedia,
     isVideo,
     isImage,
@@ -1629,7 +1670,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
       const selectedReferenceAssets = referenceAssetIds.length ? { reference_asset_ids: referenceAssetIds } : {};
       const taskParams = isVideo
-        ? { ...buildVideoTaskParams(params, videoTaskMedia, model.runtime_rule), ...buildLanguageParams(selectedLanguage), user_prompt: prompt, ...selectedAssets, ...selectedReferenceAssets }
+        ? { ...buildVideoTaskParams(videoRequestParams, videoTaskMedia, model.runtime_rule), ...buildLanguageParams(selectedLanguage), user_prompt: prompt, ...selectedAssets, ...selectedReferenceAssets }
         : isAudio
           ? {
               ...buildAudioTaskParams(singleResultAudioParams(params), prompt, audioSecondaryPrompt, model.runtime_rule),

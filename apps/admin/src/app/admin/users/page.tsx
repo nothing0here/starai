@@ -73,6 +73,40 @@ interface WithdrawalItem {
   created_at: string;
 }
 
+type UserDetailView = "compute" | "frozen" | "cash" | "works";
+
+interface AccountTransactionItem {
+  id: number;
+  type: string;
+  direction: "in" | "out";
+  amount: number;
+  balance_after: number;
+  ref_type?: string;
+  ref_id?: string;
+  remark?: string;
+  created_at: string;
+}
+
+interface FreezeItem {
+  id: number;
+  amount: number;
+  ref_type: string;
+  ref_id: string;
+  status: string;
+  created_at: string;
+  released_at?: string;
+}
+
+interface WorkItem {
+  id: number;
+  public_id: string;
+  type: string;
+  title?: string;
+  prompt?: string;
+  thumbnail_url?: string;
+  created_at: string;
+}
+
 interface UserDetail extends UserItem {
   locale: string;
   frozen_compute: number;
@@ -309,6 +343,7 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
   const [memberLevelID, setMemberLevelID] = useState(detail.member_level_id || 0);
   const [referrerID, setReferrerID] = useState(detail.referrer_id || 0);
   const [saving, setSaving] = useState(false);
+  const [detailView, setDetailView] = useState<UserDetailView>("compute");
 
   useEffect(() => {
     setEmail(detail.email || "");
@@ -318,6 +353,7 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
     setCashBalance(String(detail.cash_balance ?? 0));
     setMemberLevelID(detail.member_level_id || 0);
     setReferrerID(detail.referrer_id || 0);
+    setDetailView("compute");
   }, [detail]);
 
   const save = async () => {
@@ -368,17 +404,22 @@ function UserDetailModal({ detail, levels, users, editOpen, setEditOpen, onClose
           </div>
         ) : (
           <>
-            <div className="mb-5 grid gap-3 text-sm md:grid-cols-4">
+            <div className="mb-4 grid gap-3 text-sm md:grid-cols-4">
               <Info label="用户ID" value={detail.public_id} />
               <Info label="会员等级" value={detail.member_level || detail.user_level} />
               <Info label="推荐码" value={detail.referral_code} />
               <Info label="上级" value={detail.referrer_name || "无"} />
-              <Info label="算力余额" value={detail.compute_balance.toFixed(2)} />
-              <Info label="冻结算力" value={detail.frozen_compute.toFixed(2)} />
-              <Info label="现金余额" value={`¥${detail.cash_balance.toFixed(2)}`} />
-              <Info label="作品数" value={String(detail.works_count)} />
               <Info label="API Key" value={`${detail.active_api_token_count || 0}/${detail.api_token_count || 0} 启用`} />
             </div>
+
+            <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <DetailMetric label="算力余额" value={detail.compute_balance.toFixed(2)} hint="查看全部算力明细" active={detailView === "compute"} onClick={() => setDetailView("compute")} />
+              <DetailMetric label="冻结算力" value={detail.frozen_compute.toFixed(2)} hint="查看冻结与释放记录" active={detailView === "frozen"} onClick={() => setDetailView("frozen")} />
+              <DetailMetric label="现金余额" value={`¥${detail.cash_balance.toFixed(2)}`} hint="查看全部现金明细" active={detailView === "cash"} onClick={() => setDetailView("cash")} />
+              <DetailMetric label="作品数" value={String(detail.works_count)} hint="查看用户作品记录" active={detailView === "works"} onClick={() => setDetailView("works")} />
+            </div>
+
+            <UserDetailRecords userID={detail.id} view={detailView} />
 
             <Section title={`API Key（${detail.api_tokens?.length || 0}）`}>
               <MiniTable empty="暂无 API Key">
@@ -550,6 +591,106 @@ function Info({ label, value }: { label: string; value: string }) {
       <div className="mt-0.5 break-all text-sm text-gray-900">{value}</div>
     </div>
   );
+}
+
+function DetailMetric({ label, value, hint, active, onClick }: { label: string; value: string; hint: string; active: boolean; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className={`rounded-2xl border px-4 py-3 text-left transition ${active ? "border-primary bg-primary/10 shadow-sm" : "border-gray-100 bg-gray-50 hover:border-primary/40 hover:bg-white"}`}>
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className="mt-1 font-mono text-xl font-semibold text-gray-950">{value}</div>
+      <div className={`mt-1 text-[11px] ${active ? "text-secondary" : "text-gray-400"}`}>{hint} →</div>
+    </button>
+  );
+}
+
+function UserDetailRecords({ userID, view }: { userID: number; view: UserDetailView }) {
+  const [items, setItems] = useState<Array<AccountTransactionItem | FreezeItem | WorkItem>>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const detailPageSize = 10;
+
+  useEffect(() => {
+    setPage(1);
+  }, [userID, view]);
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    const path = view === "frozen"
+      ? `/users/${userID}/freezes?page=${page}&page_size=${detailPageSize}`
+      : view === "works"
+        ? `/users/${userID}/works?page=${page}&page_size=${detailPageSize}`
+        : `/users/${userID}/transactions?account=${view}&page=${page}&page_size=${detailPageSize}`;
+    adminApi<{ items: Array<AccountTransactionItem | FreezeItem | WorkItem>; total: number }>(path)
+      .then((result) => {
+        if (!current) return;
+        setItems(result.items || []);
+        setTotal(result.total || 0);
+      })
+      .catch(() => {
+        if (!current) return;
+        setItems([]);
+        setTotal(0);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => { current = false; };
+  }, [page, userID, view]);
+
+  const title = view === "compute" ? "算力明细" : view === "cash" ? "现金明细" : view === "frozen" ? "冻结算力记录" : "作品记录";
+  return (
+    <Section title={`${title}（共 ${total} 条）`}>
+      <div className="overflow-hidden rounded-xl border">
+        {loading ? (
+          <div className="px-4 py-8 text-center text-xs text-gray-400">明细加载中...</div>
+        ) : items.length === 0 ? (
+          <div className="px-4 py-8 text-center text-xs text-gray-400">暂无记录</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-500">
+                {view === "works" ? (
+                  <tr><th className="px-3 py-2 text-left">作品</th><th className="px-3 py-2 text-left">类型</th><th className="px-3 py-2 text-left">提示词</th><th className="px-3 py-2 text-left">创建时间</th></tr>
+                ) : view === "frozen" ? (
+                  <tr><th className="px-3 py-2 text-left">金额</th><th className="px-3 py-2 text-left">关联业务</th><th className="px-3 py-2 text-left">状态</th><th className="px-3 py-2 text-left">冻结/释放时间</th></tr>
+                ) : (
+                  <tr><th className="px-3 py-2 text-left">变动</th><th className="px-3 py-2 text-left">余额</th><th className="px-3 py-2 text-left">类型 / 关联业务</th><th className="px-3 py-2 text-left">备注</th><th className="px-3 py-2 text-left">时间</th></tr>
+                )}
+              </thead>
+              <tbody className="divide-y">
+                {items.map((raw) => {
+                  if (view === "works") {
+                    const item = raw as WorkItem;
+                    return <tr key={item.id}><td className="px-3 py-2"><div className="font-medium text-gray-900">{item.title || "未命名作品"}</div><div className="font-mono text-[11px] text-gray-400">{item.public_id}</div></td><td className="px-3 py-2">{item.type}</td><td className="max-w-[360px] truncate px-3 py-2 text-xs text-gray-500" title={item.prompt || ""}>{item.prompt || "-"}</td><td className="px-3 py-2 text-xs text-gray-500">{formatAdminTime(item.created_at)}</td></tr>;
+                  }
+                  if (view === "frozen") {
+                    const item = raw as FreezeItem;
+                    return <tr key={item.id}><td className="px-3 py-2 font-mono font-semibold text-amber-600">{item.amount.toFixed(2)}</td><td className="px-3 py-2"><div>{item.ref_type}</div><div className="font-mono text-[11px] text-gray-400">{item.ref_id}</div></td><td className="px-3 py-2">{freezeStatusLabel(item.status)}</td><td className="px-3 py-2 text-xs text-gray-500"><div>{formatAdminTime(item.created_at)}</div>{item.released_at ? <div className="mt-0.5 text-emerald-600">释放：{formatAdminTime(item.released_at)}</div> : null}</td></tr>;
+                  }
+                  const item = raw as AccountTransactionItem;
+                  return <tr key={item.id}><td className={`px-3 py-2 font-mono font-semibold ${item.direction === "in" ? "text-emerald-600" : "text-red-500"}`}>{item.direction === "in" ? "+" : "-"}{item.amount.toFixed(2)}</td><td className="px-3 py-2 font-mono">{item.balance_after.toFixed(2)}</td><td className="px-3 py-2"><div>{item.type}</div>{item.ref_type || item.ref_id ? <div className="font-mono text-[11px] text-gray-400">{[item.ref_type, item.ref_id].filter(Boolean).join(" · ")}</div> : null}</td><td className="max-w-[260px] truncate px-3 py-2 text-xs text-gray-500" title={item.remark || ""}>{item.remark || "-"}</td><td className="px-3 py-2 text-xs text-gray-500">{formatAdminTime(item.created_at)}</td></tr>;
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      {total > detailPageSize ? <AdminPagination page={page} total={total} pageSize={detailPageSize} onPageChange={setPage} /> : null}
+    </Section>
+  );
+}
+
+function formatAdminTime(value?: string) {
+  return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "-";
+}
+
+function freezeStatusLabel(status: string) {
+  if (status === "frozen") return "冻结中";
+  if (status === "released") return "已释放";
+  if (status === "charged") return "已结算";
+  return status;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

@@ -229,6 +229,42 @@ func TestVeoFramePairPayloadOnlySendsOrderedFrames(t *testing.T) {
 	}
 }
 
+func TestSizeBasedVideoAdaptersCanonicalizeDirectionWithoutConflicts(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile string
+		adapter string
+		params  map[string]interface{}
+		want    string
+	}{
+		{name: "veo frame pair portrait", profile: "veo_frame_pair", adapter: "veo_frame_pair_v1", params: map[string]interface{}{"orientation": "portrait"}, want: "720x1280"},
+		{name: "veo reference landscape", profile: "veo_reference", adapter: "veo_reference_v1", params: map[string]interface{}{"aspect_ratio": "16:9"}, want: "1280x720"},
+		{name: "omni portrait", profile: "omni_reference", adapter: "omni_reference_v1", params: map[string]interface{}{"ratio": "9:16"}, want: "720x1280"},
+		{name: "explicit size wins over stale alias", profile: "veo_reference", adapter: "veo_reference_v1", params: map[string]interface{}{"size": "1080x1920", "aspect_ratio": "16:9"}, want: "1080x1920"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := map[string]interface{}{"prompt": "test", "generation_mode": "text"}
+			for key, value := range tt.params {
+				params[key] = value
+			}
+			payload := BuildUpstreamVideoPayload("video-test", "video-test", map[string]interface{}{
+				"video":    map[string]interface{}{"upload_profile": tt.profile},
+				"upstream": map[string]interface{}{"adapter": tt.adapter},
+			}, nil, params)
+			payload = SanitizeUpstreamPayload(payload, "/v1/videos")
+			if payload["size"] != tt.want {
+				t.Fatalf("size = %#v, want %q; payload=%#v", payload["size"], tt.want, payload)
+			}
+			for _, key := range []string{"aspect_ratio", "orientation", "ratio"} {
+				if _, exists := payload[key]; exists {
+					t.Fatalf("conflicting %s must be removed: %#v", key, payload)
+				}
+			}
+		})
+	}
+}
+
 func TestSanitizeUpstreamPayloadUsesImageURLForSora(t *testing.T) {
 	payload := map[string]interface{}{
 		"model":            "sora-2-12s",

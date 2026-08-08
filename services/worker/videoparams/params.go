@@ -516,6 +516,7 @@ func buildMiniMaxH3Payload(out, params map[string]interface{}) map[string]interf
 }
 
 func buildVeoReferencePayload(out, params map[string]interface{}) map[string]interface{} {
+	applyCanonicalVideoSize(out, params)
 	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
 	delete(out, "generation_mode")
 	delete(out, "first_frame")
@@ -543,6 +544,7 @@ func buildVeoReferencePayload(out, params map[string]interface{}) map[string]int
 }
 
 func buildVeoFramePairPayload(out, params map[string]interface{}) map[string]interface{} {
+	applyCanonicalVideoSize(out, params)
 	images := make([]string, 0, 2)
 	if first := firstMediaURL(params["first_frame"]); first != "" {
 		images = append(images, first)
@@ -565,6 +567,7 @@ func buildVeoFramePairPayload(out, params map[string]interface{}) map[string]int
 }
 
 func buildOmniReferencePayload(out, params map[string]interface{}) map[string]interface{} {
+	applyCanonicalVideoSize(out, params)
 	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
 	for _, key := range []string{"generation_mode", "duration", "first_frame", "last_frame", "image", "image_url"} {
 		delete(out, key)
@@ -584,6 +587,42 @@ func buildOmniReferencePayload(out, params map[string]interface{}) map[string]in
 	}
 	delete(out, "reference_images")
 	return out
+}
+
+func applyCanonicalVideoSize(out, params map[string]interface{}) {
+	var selected interface{}
+	for _, key := range []string{"size", "aspect_ratio", "orientation", "ratio"} {
+		if value, ok := params[key]; ok && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			selected = value
+			break
+		}
+	}
+	if selected == nil {
+		for _, key := range []string{"size", "aspect_ratio", "orientation", "ratio"} {
+			if value, ok := out[key]; ok && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				selected = value
+				break
+			}
+		}
+	}
+	value := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fmt.Sprint(selected)), " ", ""))
+	switch value {
+	case "portrait", "vertical", "9:16":
+		value = "720x1280"
+	case "landscape", "horizontal", "16:9":
+		value = "1280x720"
+	}
+	if parts := strings.Split(value, "x"); len(parts) != 2 {
+		value = "1280x720"
+	} else if width, widthErr := strconv.Atoi(parts[0]); widthErr != nil || width <= 0 {
+		value = "1280x720"
+	} else if height, heightErr := strconv.Atoi(parts[1]); heightErr != nil || height <= 0 {
+		value = "1280x720"
+	}
+	out["size"] = value
+	delete(out, "aspect_ratio")
+	delete(out, "orientation")
+	delete(out, "ratio")
 }
 
 func videoUploadProfile(runtimeRule map[string]interface{}) string {
