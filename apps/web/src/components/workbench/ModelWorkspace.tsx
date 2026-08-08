@@ -856,9 +856,18 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
   const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
+  const isVeoFramePair = isVideo && videoConfig.upload_profile === "veo_frame_pair";
   const isOmniReference = isVideo && videoConfig.upload_profile === "omni_reference";
   const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference;
   const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
+  const veoFirstFrameAssets = useMemo(
+    () => (videoMedia.first_frame ? [videoMedia.first_frame] : []),
+    [videoMedia.first_frame]
+  );
+  const veoLastFrameAssets = useMemo(
+    () => (videoMedia.last_frame ? [videoMedia.last_frame] : []),
+    [videoMedia.last_frame]
+  );
   const maxVideoAssetRefs =
     videoConfig.upload_profile === "frame_pair"
       ? videoConfig.reference_images?.max ?? 4
@@ -1563,6 +1572,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         return;
       }
     }
+    if (isVeoFramePair && !videoMedia.first_frame?.url) {
+      alert(t("canvas.node.firstFrameRequired"));
+      return;
+    }
     if (
       (isVeoReference || isOmniReference) &&
       videoMaterialMode === "reference" &&
@@ -2241,17 +2254,47 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                   <div className="flex flex-col gap-2.5">
                     <div className="flex items-center gap-2 sm:gap-3">
                       <div className="flex flex-1 min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
-                        <ChatTopTools
-                          value={bottom}
-                          onChange={setBottom}
-                          showUpload={false}
-                          referencePickMode
-                          referenceImages={videoMedia.reference_images}
-                          onReferenceImagesChange={(imgs) =>
-                            setVideoMedia((prev) => ({ ...prev, reference_images: imgs }))
-                          }
-                          maxReferenceImages={maxVideoAssetRefs}
-                        />
+                        {isVeoFramePair ? (
+                          <>
+                            <ChatTopTools
+                              value={bottom}
+                              onChange={setBottom}
+                              showUpload={false}
+                              showRole={false}
+                              referencePickMode
+                              referenceImages={veoFirstFrameAssets}
+                              onReferenceImagesChange={(images) =>
+                                setVideoMedia((prev) => ({ ...prev, first_frame: images[0] || null }))
+                              }
+                              maxReferenceImages={1}
+                              assetLibraryLabel={`${t("video.firstFrame")} · ${t("asset.library")}`}
+                            />
+                            <ChatTopTools
+                              value={bottom}
+                              onChange={setBottom}
+                              showUpload={false}
+                              referencePickMode
+                              referenceImages={veoLastFrameAssets}
+                              onReferenceImagesChange={(images) =>
+                                setVideoMedia((prev) => ({ ...prev, last_frame: images[0] || null }))
+                              }
+                              maxReferenceImages={1}
+                              assetLibraryLabel={`${t("video.lastFrame")} · ${t("asset.library")}`}
+                            />
+                          </>
+                        ) : (
+                          <ChatTopTools
+                            value={bottom}
+                            onChange={setBottom}
+                            showUpload={false}
+                            referencePickMode
+                            referenceImages={videoMedia.reference_images}
+                            onReferenceImagesChange={(imgs) =>
+                              setVideoMedia((prev) => ({ ...prev, reference_images: imgs }))
+                            }
+                            maxReferenceImages={maxVideoAssetRefs}
+                          />
+                        )}
                         <VideoTopControls
                           schema={workbenchInputSchema}
                           values={params}

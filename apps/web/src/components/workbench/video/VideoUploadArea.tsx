@@ -571,6 +571,30 @@ export function VideoUploadArea({
     );
   }
 
+  if (profile === "veo_frame_pair") {
+    return (
+      <div className="scroll-x-only flex h-16 w-full flex-nowrap items-center gap-2">
+        <FrameSlot
+          label={t("video.firstFrame")}
+          image={media.first_frame}
+          uploading={uploading}
+          onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, first_frame: item }))}
+          onRemove={() => onChange({ ...media, first_frame: null })}
+        />
+        <div className="flex h-16 items-center self-center text-gray-300">
+          <ArrowRight size={16} />
+        </div>
+        <FrameSlot
+          label={t("video.lastFrame")}
+          image={media.last_frame}
+          uploading={uploading}
+          onUpload={(files) => uploadOne(files, (item) => onChange({ ...media, last_frame: item }))}
+          onRemove={() => onChange({ ...media, last_frame: null })}
+        />
+      </div>
+    );
+  }
+
   if (profile === "frame_pair") {
     const firstLabel = t("video.firstFrame");
     const lastLabel = t("video.lastFrame");

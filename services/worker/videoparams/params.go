@@ -45,7 +45,7 @@ func BuildUpstreamVideoPayload(
 		}
 	}
 	uploadProfile := videoUploadProfile(runtimeRule)
-	if uploadProfile == "frame_pair" {
+	if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" {
 		include = appendMissing(include, "first_frame", "last_frame", "reference_images")
 	}
 	for _, key := range include {
@@ -80,10 +80,13 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "veo_reference_v1") {
 		out = buildVeoReferencePayload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "veo_frame_pair_v1") {
+		out = buildVeoFramePairPayload(out, params)
+	}
 	if strings.EqualFold(upCfg.Adapter, "omni_reference_v1") {
 		out = buildOmniReferencePayload(out, params)
 	}
-	if uploadProfile == "frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
+	if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
 		out["_video_upload_profile"] = uploadProfile
 	}
 	return SanitizeUpstreamPayload(out, "")
@@ -119,7 +122,7 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 	}
 	normalizeAspectRatioField(out)
 	if endpoint == "" || strings.Contains(endpoint, "/v1/videos") {
-		if uploadProfile == "frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" || isVeoVideoModel(out["model"]) {
+		if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" || isVeoVideoModel(out["model"]) {
 			promoteVeoImages(out)
 		} else {
 			promoteSoraImageURL(out)
@@ -536,6 +539,28 @@ func buildVeoReferencePayload(out, params map[string]interface{}) map[string]int
 		delete(out, "reference_images")
 	}
 	delete(out, "reference_images")
+	return out
+}
+
+func buildVeoFramePairPayload(out, params map[string]interface{}) map[string]interface{} {
+	images := make([]string, 0, 2)
+	if first := firstMediaURL(params["first_frame"]); first != "" {
+		images = append(images, first)
+	}
+	if last := firstMediaURL(params["last_frame"]); last != "" {
+		images = append(images, last)
+	}
+	if len(images) > 0 {
+		out["images"] = images
+	} else {
+		delete(out, "images")
+	}
+	for _, key := range []string{
+		"generation_mode", "duration", "first_frame", "last_frame",
+		"reference_images", "image", "image_url",
+	} {
+		delete(out, key)
+	}
 	return out
 }
 

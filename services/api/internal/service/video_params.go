@@ -335,6 +335,16 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 		default:
 			return errors.New("Omni 模板仅支持文生或参考图模式，暂不支持首尾帧")
 		}
+	case "veo_frame_pair":
+		if firstCount != 1 {
+			return errors.New("VEO 首尾帧模式至少需要上传 1 张首帧图片")
+		}
+		if lastCount > 1 {
+			return errors.New("VEO 尾帧最多只能上传 1 张")
+		}
+		if refCount > 0 {
+			return errors.New("VEO 首尾帧模板不支持参考图")
+		}
 	case "multi_ref":
 		if refCount < cfg.MinReferenceImages {
 			return fmt.Errorf("至少需要 %d 张参考图", cfg.MinReferenceImages)

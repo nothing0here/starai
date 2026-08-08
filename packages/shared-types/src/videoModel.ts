@@ -4,6 +4,7 @@ export type VideoUploadProfile =
   | "single_ref"
   | "multi_ref"
   | "frame_pair"
+  | "veo_frame_pair"
   | "veo_reference"
   | "omni_reference"
   | "seedance_2"

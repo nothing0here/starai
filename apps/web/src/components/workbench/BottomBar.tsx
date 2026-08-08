@@ -436,6 +436,7 @@ export function ChatTopTools({
   referenceImages = [],
   onReferenceImagesChange,
   maxReferenceImages = 4,
+  assetLibraryLabel,
 }: {
   value: BottomBarState;
   onChange: (next: BottomBarState) => void;
@@ -445,6 +446,7 @@ export function ChatTopTools({
   referenceImages?: ReferenceImagePick[];
   onReferenceImagesChange?: (next: ReferenceImagePick[]) => void;
   maxReferenceImages?: number;
+  assetLibraryLabel?: string;
 }) {
   const { t } = useI18n();
   const kindText = useCallback((k?: string) => {
@@ -811,10 +813,10 @@ export function ChatTopTools({
       <button
         onClick={() => setAssetOpen(true)}
         className="relative h-9 max-sm:w-9 max-sm:px-0 max-sm:justify-center px-2 sm:px-3 rounded-xl bg-white border border-gray-100 text-gray-700 text-sm shadow-sm flex items-center gap-1.5 shrink-0 dark:bg-white/5 dark:border-white/10 dark:text-gray-200"
-        title={t("asset.library")}
+        title={assetLibraryLabel || t("asset.library")}
       >
         <BookOpen size={16} className="text-gray-500 dark:text-gray-400 shrink-0" />
-        <span className="hidden sm:inline whitespace-nowrap">{t("asset.library")}</span>
+        <span className="hidden sm:inline whitespace-nowrap">{assetLibraryLabel || t("asset.library")}</span>
         {referencePickMode
           ? referenceImages.length > 0 && (
               <span className="hidden sm:inline text-xs text-primary whitespace-nowrap">({referenceImages.length})</span>
@@ -1115,18 +1117,18 @@ export function ChatTopTools({
 
       {/* Asset library modal */}
       {assetOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4" onClick={() => setAssetOpen(false)}>
-          <div className="bg-white rounded-2xl w-full max-w-[calc(100vw-2rem)] sm:max-w-[980px] shadow-2xl overflow-hidden dark:bg-gray-900 dark:border dark:border-white/10" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-3 border-b flex items-center justify-between sticky top-0 bg-white z-10 dark:bg-gray-900 dark:border-white/10">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-2 sm:p-4" onClick={() => setAssetOpen(false)}>
+          <div className={clsx("flex w-full max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900", referencePickMode ? "h-[min(680px,calc(100dvh-1rem))] sm:max-w-[900px]" : "sm:max-w-[980px]")} onClick={(e) => e.stopPropagation()}>
+            <div className="z-10 flex shrink-0 items-center justify-between border-b bg-white px-4 py-2 dark:border-white/10 dark:bg-gray-900 sm:px-5">
               <div className="font-bold text-gray-900 text-base dark:text-gray-100">
-                {referencePickMode ? t("asset.selectReferenceFromLibrary") : t("asset.selectFromLibrary")}
+                {referencePickMode ? assetLibraryLabel || t("asset.selectReferenceFromLibrary") : t("asset.selectFromLibrary")}
               </div>
-              <button className="w-9 h-9 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-500 dark:bg-white/5 dark:border-white/10 dark:text-gray-300" onClick={() => setAssetOpen(false)}>
+              <button className="flex h-8 w-8 items-center justify-center rounded-xl border border-gray-200 bg-gray-50 text-gray-500 dark:border-white/10 dark:bg-white/5 dark:text-gray-300" onClick={() => setAssetOpen(false)}>
                 <X size={16} />
               </button>
             </div>
 
-            <div className="p-5 max-h-[78vh] overflow-y-auto">
+            <div className={referencePickMode ? "flex min-h-0 flex-1 flex-col overflow-hidden p-3 sm:p-4" : "max-h-[78vh] overflow-y-auto p-5"}>
               {assetNotice && (
                 <div
                   className={clsx(
@@ -1140,12 +1142,13 @@ export function ChatTopTools({
                 </div>
               )}
               {referencePickMode ? (
-                <>
-                  <div className="flex rounded-2xl bg-gray-100 p-1 dark:bg-white/5">
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex shrink-0 items-center gap-3">
+                  <div className="flex min-w-0 flex-1 rounded-xl bg-gray-100 p-1 dark:bg-white/5">
                     <button
                       type="button"
                       className={clsx(
-                        "flex-1 h-10 rounded-xl text-sm font-medium transition",
+                        "h-8 flex-1 rounded-lg text-sm font-medium transition",
                         assetTab === "mine" ? "bg-primary text-dark shadow-sm" : "text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                       )}
                       onClick={() => setAssetTab("mine")}
@@ -1155,7 +1158,7 @@ export function ChatTopTools({
                     <button
                       type="button"
                       className={clsx(
-                        "flex-1 h-10 rounded-xl text-sm font-medium transition",
+                        "h-8 flex-1 rounded-lg text-sm font-medium transition",
                         assetTab === "gallery" ? "bg-primary text-dark shadow-sm" : "text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-gray-100"
                       )}
                       onClick={() => setAssetTab("gallery")}
@@ -1163,14 +1166,14 @@ export function ChatTopTools({
                       {t("gallery.title")}
                     </button>
                   </div>
-
-                  <p className="mt-3 text-[12px] text-gray-400 leading-relaxed">
+                  <p className="hidden max-w-[46%] text-[11px] leading-4 text-gray-400 lg:block">
                     {t("asset.freeGalleryOnly")}
                   </p>
+                  </div>
 
-                  <div className="flex items-center gap-4 mt-4">
+                  <div className="mt-2 flex shrink-0 items-center gap-2">
                     <input
-                      className="flex-1 px-4 py-2.5 border rounded-2xl text-sm dark:bg-gray-900 dark:border-white/10 dark:text-gray-100 dark:placeholder:text-gray-500"
+                      className="h-9 min-w-0 flex-1 rounded-xl border px-3 text-sm dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 dark:placeholder:text-gray-500"
                       placeholder={assetTab === "gallery" ? t("asset.searchGallery") : t("asset.searchAssets")}
                       value={assetTab === "gallery" ? galleryQuery : assetQuery}
                       onChange={(e) => (assetTab === "gallery" ? setGalleryQuery(e.target.value) : setAssetQuery(e.target.value))}
@@ -1179,7 +1182,7 @@ export function ChatTopTools({
                       <button
                         type="button"
                         onClick={openUploadAsset}
-                        className="h-10 px-4 rounded-2xl bg-white border border-gray-200 text-sm text-gray-700 flex items-center gap-2 shrink-0 dark:bg-gray-900 dark:border-white/10 dark:text-gray-100"
+                        className="flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-700 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100"
                       >
                         <span className="text-gray-500">+</span>
                       {t("asset.uploadImage")}
@@ -1188,7 +1191,7 @@ export function ChatTopTools({
                   </div>
 
                   {assetTab === "mine" && (
-                    <div className="flex items-center gap-2 mt-4 flex-wrap">
+                    <div className="scroll-x-only mt-2 flex shrink-0 flex-nowrap items-center gap-1.5 pb-0.5">
                       <button className={pill(assetType === "all")} onClick={() => setAssetType("all")}>{t("asset.all")}</button>
                       <button className={pill(assetType === "role")} onClick={() => setAssetType("role")}>{t("asset.role")}</button>
                       <button className={pill(assetType === "scene")} onClick={() => setAssetType("scene")}>{t("asset.scene")}</button>
@@ -1196,7 +1199,7 @@ export function ChatTopTools({
                     </div>
                   )}
 
-                  <div className="mt-4 h-[44vh] bg-gray-50 rounded-2xl border border-gray-100 overflow-hidden dark:bg-white/5 dark:border-white/10">
+                  <div className="mt-2 min-h-[220px] flex-1 overflow-hidden rounded-xl border border-gray-100 bg-gray-50 dark:border-white/10 dark:bg-white/5">
                     {assetTab === "mine" ? (
                       imageAssetItems.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-gray-400">
@@ -1206,7 +1209,7 @@ export function ChatTopTools({
                           <div className="text-lg font-semibold text-gray-500">{t("asset.noAssets")}</div>
                         </div>
                       ) : (
-                        <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 overflow-y-auto h-full content-start">
+                        <div className="grid h-full grid-cols-3 content-start gap-2 overflow-y-auto p-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
                           {imageAssetItems.map((a) => {
                             const selected = pickedRefs.some((x) => x.url === a.url);
                             return (
@@ -1233,7 +1236,7 @@ export function ChatTopTools({
                         <div className="text-lg font-semibold text-gray-500">暂无灵感作品</div>
                       </div>
                     ) : (
-                      <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 overflow-y-auto h-full content-start">
+                      <div className="grid h-full grid-cols-3 content-start gap-2 overflow-y-auto p-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
                         {filteredGalleryItems.map((item) => {
                           const pricing = galleryPricing(item);
                           const selected = !!item.cover_url && pickedRefs.some((x) => x.url === item.cover_url);
@@ -1259,22 +1262,18 @@ export function ChatTopTools({
                   </div>
 
                   {pickedRefs.length > 0 && (
-                    <div className="mt-4">
-                      <div className="text-xs text-gray-500 mb-2">{t("asset.selectedReferences")}</div>
-                      <div className="flex items-center gap-2 overflow-x-auto pb-2">
+                    <div className="mt-2 flex shrink-0 items-center gap-2 overflow-x-auto">
+                      <div className="shrink-0 text-xs text-gray-500">{t("asset.selectedReferences")}</div>
                         {pickedRefs.map((img) => (
-                          <div key={img.url} className="min-w-[160px] bg-white border border-gray-100 rounded-2xl p-2 flex items-center gap-2 dark:bg-white/5 dark:border-white/10">
-                            <div className="w-12 h-14 rounded-xl bg-gray-50 border border-gray-200 overflow-hidden shrink-0 dark:bg-white/10 dark:border-white/10">
+                          <div key={img.url} className="flex h-10 min-w-[130px] max-w-[180px] items-center gap-1.5 rounded-xl border border-gray-100 bg-white p-1 dark:border-white/10 dark:bg-white/5">
+                            <div className="h-8 w-8 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/10">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img src={img.url} alt={img.name} className="w-full h-full object-cover" />
                             </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="text-sm font-semibold text-gray-900 truncate dark:text-gray-100">{img.name}</div>
-                              <div className="text-[11px] text-gray-400 mt-0.5">参考图</div>
-                            </div>
+                            <div className="min-w-0 flex-1 truncate text-xs font-medium text-gray-900 dark:text-gray-100">{img.name}</div>
                             <button
                               type="button"
-                              className="w-8 h-8 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-100 dark:bg-white/10 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/15"
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/10"
                               onClick={() => toggleRefPick(img)}
                               aria-label="移除"
                               title="移除"
@@ -1283,25 +1282,24 @@ export function ChatTopTools({
                             </button>
                           </div>
                         ))}
-                      </div>
                     </div>
                   )}
 
-                  <div className="mt-5 flex items-center justify-between">
-                    <div className="text-sm text-gray-500">
+                  <div className="mt-2 flex shrink-0 items-center justify-between gap-2 border-t border-gray-100 pt-2 dark:border-white/10">
+                    <div className="min-w-0 truncate text-xs text-gray-500 sm:text-sm">
                       {t("asset.selectedCount", { count: pickedRefs.length, max: maxReferenceImages })}
                       {maxReferenceImages <= 1 && <span className="ml-2 text-xs text-gray-400">{t("asset.singleReferenceHint")}</span>}
                     </div>
-                    <div className="flex items-center gap-3">
-                      <button type="button" className="h-11 px-6 rounded-2xl bg-gray-100 text-gray-600 dark:bg-white/10 dark:text-gray-300" onClick={() => setAssetOpen(false)}>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button type="button" className="h-9 rounded-xl bg-gray-100 px-4 text-sm text-gray-600 dark:bg-white/10 dark:text-gray-300" onClick={() => setAssetOpen(false)}>
                         {t("common.cancel")}
                       </button>
-                      <button type="button" className="h-11 px-6 rounded-2xl bg-primary text-dark font-semibold" onClick={confirmAssetSelection}>
+                      <button type="button" className="h-9 rounded-xl bg-primary px-4 text-sm font-semibold text-dark" onClick={confirmAssetSelection}>
                         {t("asset.confirmSelection")}
                       </button>
                     </div>
                   </div>
-                </>
+                </div>
               ) : (
                 <>
               <div className="flex items-center gap-4">
@@ -1605,4 +1603,3 @@ export function ChatTopTools({
     </div>
   );
 }
-

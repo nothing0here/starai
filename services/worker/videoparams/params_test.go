@@ -188,6 +188,47 @@ func TestFramePairProfileAlwaysForwardsReferenceImagesForAliasedVeoModel(t *test
 	}
 }
 
+func TestVeoFramePairPayloadOnlySendsOrderedFrames(t *testing.T) {
+	payload := BuildUpstreamVideoPayload(
+		"veo-frame-pair", "veo_3_1-fl",
+		map[string]interface{}{
+			"video": map[string]interface{}{"upload_profile": "veo_frame_pair"},
+			"upstream": map[string]interface{}{
+				"adapter": "veo_frame_pair_v1",
+				"include": []interface{}{"size", "first_frame", "last_frame"},
+			},
+		},
+		nil,
+		map[string]interface{}{
+			"prompt": "transition from day to night", "size": "1280x720",
+			"first_frame": "https://example.com/first.jpg",
+			"last_frame":  "https://example.com/last.jpg",
+			"reference_images": []interface{}{
+				"https://example.com/must-not-be-sent.jpg",
+			},
+		},
+	)
+	payload = SanitizeUpstreamPayload(payload, "/v1/videos")
+	images := mediaURLList(payload["images"])
+	want := []string{"https://example.com/first.jpg", "https://example.com/last.jpg"}
+	if len(images) != len(want) {
+		t.Fatalf("images = %#v, want %#v", images, want)
+	}
+	for index := range want {
+		if images[index] != want[index] {
+			t.Fatalf("images[%d] = %q, want %q", index, images[index], want[index])
+		}
+	}
+	for _, key := range []string{"first_frame", "last_frame", "reference_images", "duration", "generation_mode"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("%s must not be sent upstream: %#v", key, payload)
+		}
+	}
+	if payload["model"] != "veo_3_1-fl" {
+		t.Fatalf("model = %#v, want veo_3_1-fl", payload["model"])
+	}
+}
+
 func TestSanitizeUpstreamPayloadUsesImageURLForSora(t *testing.T) {
 	payload := map[string]interface{}{
 		"model":            "sora-2-12s",

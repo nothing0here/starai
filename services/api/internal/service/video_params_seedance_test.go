@@ -197,3 +197,34 @@ func TestValidateOmniReferenceModes(t *testing.T) {
 		t.Fatalf("error = %v, want first/last rejection", err)
 	}
 }
+
+func TestValidateVeoFramePairRejectsReferenceImages(t *testing.T) {
+	cfg := videoRuntimeConfig{
+		UploadProfile:      "veo_frame_pair",
+		FirstFrameKey:      "first_frame",
+		LastFrameKey:       "last_frame",
+		ReferenceImagesKey: "reference_images",
+	}
+	if err := validateVideoUpload(cfg, map[string]interface{}{
+		"first_frame": "https://example.com/first.jpg",
+	}); err != nil {
+		t.Fatalf("first-frame-only request should be valid: %v", err)
+	}
+	if err := validateVideoUpload(cfg, map[string]interface{}{
+		"first_frame": "https://example.com/first.jpg",
+		"last_frame":  "https://example.com/last.jpg",
+	}); err != nil {
+		t.Fatalf("first/last-frame request should be valid: %v", err)
+	}
+	err := validateVideoUpload(cfg, map[string]interface{}{
+		"first_frame":      "https://example.com/first.jpg",
+		"reference_images": []interface{}{"https://example.com/reference.jpg"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "不支持参考图") {
+		t.Fatalf("error = %v, want reference-image rejection", err)
+	}
+	err = validateVideoUpload(cfg, map[string]interface{}{})
+	if err == nil || !strings.Contains(err.Error(), "首帧") {
+		t.Fatalf("error = %v, want required first frame", err)
+	}
+}

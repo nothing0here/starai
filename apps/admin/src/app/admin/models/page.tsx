@@ -50,6 +50,7 @@ const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
 type SeedanceVariant = "standard" | "fast" | "mini";
 const MINIMAX_H3_TEMPLATE_KEY = "minimax_h3_v2";
 const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
+const VEO_FRAME_PAIR_TEMPLATE_KEY = "veo_frame_pair_v1";
 const OMNI_REFERENCE_TEMPLATE_KEY = "omni_reference_v1";
 
 const buildMiniMaxH3PriceRule = () => ({
@@ -585,6 +586,8 @@ export default function ModelsPage() {
       setVideoTemplateKey(MINIMAX_H3_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "veo_reference_v1") {
       setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
+    } else if ((m.runtime_rule as any)?.upstream?.adapter === "veo_frame_pair_v1") {
+      setVideoTemplateKey(VEO_FRAME_PAIR_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "omni_reference_v1") {
       setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
     } else {
@@ -822,6 +825,7 @@ export default function ModelsPage() {
     { value: "single_ref", label: "单参考图 (Sora 类)" },
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
     { value: "frame_pair", label: "首尾帧 + 参考图 (VEO 类)" },
+    { value: "veo_frame_pair", label: "VEO 首尾帧 1~2 张（无参考图）" },
     { value: "veo_reference", label: "参考图 1~3 张 (VEO 类，文生 / 参考图)" },
     { value: "omni_reference", label: "Omni 参考图 1~7 张 (文生 / 参考图)" },
     { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
@@ -1721,6 +1725,84 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
   });
 
+  const applyVeoFramePairV1 = (prev: FormState): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    // fast-fl is frequently unavailable on the distributor; use the documented
+    // standard first/last-frame slug and let administrators opt into other -fl tiers.
+    new_api_model: "veo_3_1-fl",
+    new_api_endpoint: "/v1/videos",
+    new_api_extra_params: setConnection(prev.new_api_extra_params, {
+      protocol: "openai_compatible",
+      auth_type: "bearer",
+      base_url: "https://zexapi.com",
+      api_key_header: "Authorization",
+    }),
+    input_schema: JSON.stringify(
+      {
+        type: "object",
+        properties: {
+          size: {
+            type: "string",
+            title: "视频尺寸",
+            enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+            enumLabels: {
+              "1280x720": "横屏 720P",
+              "720x1280": "竖屏 720P",
+              "1920x1080": "横屏 1080P",
+              "1080x1920": "竖屏 1080P",
+            },
+            default: "1280x720",
+            "x-order": 1,
+            "x-widget": "option_menu",
+            "x-icon": "ratio",
+            "x-highlight": true,
+          },
+        },
+      },
+      null,
+      2
+    ),
+    default_params: JSON.stringify({ size: "1280x720" }, null, 2),
+    runtime_rule: JSON.stringify(
+      {
+        video: {
+          upload_profile: "veo_frame_pair",
+          min_reference_images: 0,
+          max_reference_images: 0,
+          max_total_images: 2,
+          count_toward_total: true,
+          prompt_required: true,
+          prompt_hint: "上传 1 张首帧，或同时上传首帧和尾帧；本模板不支持参考图",
+          show_channel: false,
+          show_web_search: false,
+          count_options: [1],
+          count_allow_custom: false,
+          count_max: 1,
+          frames: {
+            first: { key: "first_frame", label: "首帧", max: 1 },
+            last: { key: "last_frame", label: "尾帧（可选）", max: 1 },
+          },
+          reference_images: { key: "reference_images", max: 0 },
+        },
+        upstream: {
+          adapter: "veo_frame_pair_v1",
+          include: ["size", "first_frame", "last_frame"],
+          map: {},
+          poll_path: "/v1/videos/{id}",
+          poll_interval_sec: 10,
+          poll_timeout_sec: 7200,
+          request_timeout_sec: 120,
+        },
+        capabilities: { web_search: false, deep_think: false },
+      },
+      null,
+      2
+    ),
+    price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
+  });
+
   const applyOmniReferenceV1 = (prev: FormState): FormState => ({
     ...prev,
     category: "video",
@@ -2339,6 +2421,75 @@ export default function ModelsPage() {
         ...currentUpstream,
         adapter: "veo_reference_v1",
         include,
+        poll_path: "/v1/videos/{id}",
+        poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
+        poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),
+        request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
+      };
+      runtimeRule = parsedRuntimeRule;
+      effectiveVideoEndpoint = "/v1/videos";
+    }
+    const isVeoFramePair =
+      form.category === "video" &&
+      (parsedRuntimeRule?.upstream?.adapter === "veo_frame_pair_v1" ||
+        parsedRuntimeRule?.video?.upload_profile === "veo_frame_pair");
+    if (isVeoFramePair) {
+      if (!String(form.new_api_model || "").toLowerCase().includes("-fl")) {
+        setErr("VEO 首尾帧模板必须使用带 -fl 的模型，例如 veo_3_1-fl");
+        return;
+      }
+      const props = (parsedInputSchema.properties ?? {}) as Record<string, any>;
+      delete props.generation_mode;
+      delete props.duration;
+      props.size = {
+        ...(props.size || {}),
+        type: "string",
+        title: "视频尺寸",
+        enum: ["1280x720", "720x1280", "1920x1080", "1080x1920"],
+        enumLabels: {
+          "1280x720": "横屏 720P",
+          "720x1280": "竖屏 720P",
+          "1920x1080": "横屏 1080P",
+          "1080x1920": "竖屏 1080P",
+        },
+        default: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(String(props.size?.default))
+          ? props.size.default
+          : "1280x720",
+        "x-order": 1,
+        "x-widget": "option_menu",
+        "x-icon": "ratio",
+        "x-highlight": true,
+      };
+      parsedInputSchema.properties = props;
+      inputSchema = parsedInputSchema;
+      const cleanDefaults = { ...((defaultParams as Record<string, unknown>) || {}) };
+      delete cleanDefaults.generation_mode;
+      delete cleanDefaults.duration;
+      defaultParams = {
+        ...cleanDefaults,
+        size: ["1280x720", "720x1280", "1920x1080", "1080x1920"].includes(String(cleanDefaults.size))
+          ? cleanDefaults.size
+          : "1280x720",
+      };
+      const currentVideo = (parsedRuntimeRule.video ?? {}) as Record<string, any>;
+      const currentUpstream = (parsedRuntimeRule.upstream ?? {}) as Record<string, any>;
+      parsedRuntimeRule.video = {
+        ...currentVideo,
+        upload_profile: "veo_frame_pair",
+        min_reference_images: 0,
+        max_reference_images: 0,
+        max_total_images: 2,
+        frames: {
+          first: { key: "first_frame", label: "首帧", max: 1 },
+          last: { key: "last_frame", label: "尾帧（可选）", max: 1 },
+        },
+        reference_images: { key: "reference_images", max: 0 },
+      };
+      parsedRuntimeRule.upstream = {
+        ...currentUpstream,
+        adapter: "veo_frame_pair_v1",
+        include: ["size", "first_frame", "last_frame"],
+        map: {},
         poll_path: "/v1/videos/{id}",
         poll_interval_sec: Number(currentUpstream.poll_interval_sec || 10),
         poll_timeout_sec: Number(currentUpstream.poll_timeout_sec || 7200),
@@ -3568,12 +3719,15 @@ export default function ModelsPage() {
                           setForm((prev) => applyMiniMaxH3V2(prev));
                         } else if (value === VEO_REFERENCE_TEMPLATE_KEY) {
                           setForm((prev) => applyVeoReferenceV1(prev));
+                        } else if (value === VEO_FRAME_PAIR_TEMPLATE_KEY) {
+                          setForm((prev) => applyVeoFramePairV1(prev));
                         } else if (value === OMNI_REFERENCE_TEMPLATE_KEY) {
                           setForm((prev) => applyOmniReferenceV1(prev));
                         }
                       }}
                     >
                       <option value="">通用视频接口 / 自定义配置</option>
+                      <option value={VEO_FRAME_PAIR_TEMPLATE_KEY}>章鱼哥 · VEO 首尾帧（无参考图）</option>
                       <option value={VEO_REFERENCE_TEMPLATE_KEY}>第三方 OpenAI 兼容 · 参考图（VEO 类）</option>
                       <option value={OMNI_REFERENCE_TEMPLATE_KEY}>章鱼哥 · Omni 文生 / 参考图</option>
                       <option value={SEEDANCE_VARIANTS.standard.templateKey}>火山方舟 · Doubao Seedance 2.0 Standard</option>
@@ -3583,6 +3737,7 @@ export default function ModelsPage() {
                     </select>
                     {(getSeedanceVariantByTemplateKey(videoTemplateKey) ||
                       videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
+                      videoTemplateKey === VEO_FRAME_PAIR_TEMPLATE_KEY ||
                       videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY ||
                       videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) && (
                       <button
@@ -3596,6 +3751,8 @@ export default function ModelsPage() {
                             setForm((prev) => applyMiniMaxH3V2(prev));
                           } else if (videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY) {
                             setForm((prev) => applyVeoReferenceV1(prev));
+                          } else if (videoTemplateKey === VEO_FRAME_PAIR_TEMPLATE_KEY) {
+                            setForm((prev) => applyVeoFramePairV1(prev));
                           } else if (videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) {
                             setForm((prev) => applyOmniReferenceV1(prev));
                           }
@@ -3606,7 +3763,7 @@ export default function ModelsPage() {
                     )}
                   </div>
                   <div className="mt-2 text-[11px] leading-5 text-gray-500">
-                    VEO 参考图模板固定显示 8 秒，支持文生和 1～3 张参考图；Omni 模板固定 10 秒 720P，支持文生和 1～7 张参考图，二者的 JSON 请求都会自动映射到 images，且不发送固定时长。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
+                    VEO 首尾帧模板默认使用当前更通用的 veo_3_1-fl，只接收 1 张首帧或“首帧 + 尾帧”，不提供参考图槽位；VEO 参考图模板则固定显示 8 秒，支持文生和 1～3 张参考图。Omni 模板固定 10 秒 720P，支持文生和 1～7 张参考图。三者的 JSON 图片都会自动映射到 images，固定时长不发送上游。Seedance 三个模板会分别写入官方模型 ID、分辨率和 Token 价格。MiniMax-H3 V2 会写入 V2 创建/查询接口、五种素材组合、4–15 秒、2K 和参考素材动态计费。API Key 仍需管理员填写。
                   </div>
                 </div>
                 {isSeedanceVideoForm && (
@@ -3734,6 +3891,11 @@ export default function ModelsPage() {
                         if (profile === "veo_reference") {
                           setVideoTemplateKey(VEO_REFERENCE_TEMPLATE_KEY);
                           setForm((prev) => applyVeoReferenceV1(prev));
+                          return;
+                        }
+                        if (profile === "veo_frame_pair") {
+                          setVideoTemplateKey(VEO_FRAME_PAIR_TEMPLATE_KEY);
+                          setForm((prev) => applyVeoFramePairV1(prev));
                           return;
                         }
                         if (profile === "omni_reference") {
