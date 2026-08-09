@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 func TestResolveImageGenerationInputFallsBackUnsupportedBananaRatio(t *testing.T) {
 	input := map[string]interface{}{
@@ -73,5 +77,63 @@ func TestGeminiNativePayloadImageSizeOnlyForFlash(t *testing.T) {
 	proCfg := pro["generationConfig"].(map[string]interface{})["imageConfig"].(map[string]interface{})
 	if _, ok := proCfg["imageSize"]; ok {
 		t.Fatalf("pro payload should not include imageSize: %#v", proCfg)
+	}
+}
+
+func TestBuildVideoImagePayloadIncludesBananaReferenceImages(t *testing.T) {
+	input := map[string]interface{}{
+		"reference_images": []string{
+			"data:image/png;base64,Zmlyc3Q=",
+			"data:image/jpeg;base64,c2Vjb25k",
+		},
+	}
+
+	payload := buildVideoImagePayload(context.Background(), nil, "/v1/videos", "nano_banana_2", "", "prompt", input)
+	images, ok := payload["images"].([]string)
+	if !ok {
+		t.Fatalf("images type = %T, want []string; payload=%#v", payload["images"], payload)
+	}
+	if len(images) != 2 || images[0] != "data:image/png;base64,Zmlyc3Q=" || images[1] != "data:image/jpeg;base64,c2Vjb25k" {
+		t.Fatalf("images = %#v, want both uploaded references", images)
+	}
+}
+
+func TestBuildVideoImagePayloadFallsBackToImageURL(t *testing.T) {
+	input := map[string]interface{}{
+		"image_url": "data:image/png;base64,cGhvbmU=",
+	}
+
+	payload := buildVideoImagePayload(context.Background(), nil, "/v1/videos", "nano_banana_2", "", "prompt", input)
+	images, ok := payload["images"].([]string)
+	if !ok || len(images) != 1 || images[0] != "data:image/png;base64,cGhvbmU=" {
+		t.Fatalf("image_url was not forwarded as Nano Banana images: %#v", payload)
+	}
+}
+
+func TestAgentPromptLocksUploadedReferenceSubject(t *testing.T) {
+	prompt := agentPromptWithScene("create a premium product shot", map[string]interface{}{
+		"image_url": "https://cdn.example/phone.png",
+	})
+
+	for _, required := range []string{"REFERENCE IMAGE HARD REQUIREMENT", "authoritative subject", "never turn a phone into a drone"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("prompt does not contain %q: %s", required, prompt)
+		}
+	}
+}
+
+func TestAgentPromptDoesNotAddReferenceLockWithoutReference(t *testing.T) {
+	prompt := agentPromptWithScene("create a premium product shot", map[string]interface{}{})
+	if strings.Contains(prompt, "REFERENCE IMAGE HARD REQUIREMENT") {
+		t.Fatalf("reference lock added without a reference: %s", prompt)
+	}
+}
+
+func TestAgentPromptDoesNotTreatComicStyleCoverAsSubjectReference(t *testing.T) {
+	prompt := agentPromptWithScene("create a premium product shot", map[string]interface{}{
+		"comic_style": map[string]interface{}{"cover_url": "https://cdn.example/style-cover.png"},
+	})
+	if strings.Contains(prompt, "REFERENCE IMAGE HARD REQUIREMENT") {
+		t.Fatalf("style cover incorrectly locked as the generated subject: %s", prompt)
 	}
 }

@@ -740,6 +740,7 @@ export function AgentWorkspace({ code }: { code: string }) {
             count: Number((videoParams as any).count ?? (imageParams as any).count ?? params.count ?? count),
             n: Number((videoParams as any).count ?? (imageParams as any).n ?? params.count ?? count),
             image_url: imageURL || undefined,
+            ...(!isVideoGeneration && imageURL ? { reference_images: [imageURL] } : {}),
             reference_asset_ids: referenceAssetIds,
             _mode: !enableStepConfirm || mode === "auto" ? "auto" : "step",
           },

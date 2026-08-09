@@ -813,6 +813,12 @@ func buildVideoImagePayload(ctx context.Context, runtimeRule map[string]interfac
 	if len(refs) == 0 {
 		refs = collectBananaReferenceImages(ctx, input["image"])
 	}
+	if len(refs) == 0 {
+		refs = collectBananaReferenceImages(ctx, input["image_url"])
+	}
+	if len(refs) == 0 {
+		refs = collectBananaReferenceImages(ctx, input["reference_image"])
+	}
 	if len(refs) > 5 {
 		refs = refs[:5]
 	}

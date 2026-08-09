@@ -38,6 +38,7 @@ const SUBPAGE_LINKS = [
 type Section = "models" | "agents" | "gallery";
 const INFINITE_CANVAS_CODE = "infinite_canvas";
 const VIRAL_REMAKE_CODE = "viral_remake";
+const VIDEO_REMAKE_CODE = "video_remake";
 
 const MOBILE_SUBPAGE_LINKS = [
   { href: "/app", label: "工作台", icon: Home },
@@ -876,6 +877,13 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                     authenticated={Boolean(user)}
                     workflowCode={VIRAL_REMAKE_CODE}
                     initialTemplateID="viral-remake"
+                  />
+                ) : activeAgentCode === VIDEO_REMAKE_CODE ? (
+                  <InfiniteCanvasWorkspace
+                    key={activeAgentCode}
+                    authenticated={Boolean(user)}
+                    workflowCode={VIDEO_REMAKE_CODE}
+                    initialTemplateID="video-remake"
                   />
                 ) : (
                   <AgentWorkspace key={activeAgentCode} code={activeAgentCode} />

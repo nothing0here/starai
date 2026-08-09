@@ -1645,6 +1645,9 @@ func runAgentAnalysis(ctx context.Context, pool *pgxpool.Pool, baseURL, token, m
 	sceneLabel := firstNonEmpty(stringAny(inputs["creative_scene_label"]), agentCreativeSceneLabel(sceneCode))
 	system := buildAgentAnalysisSystemPrompt(category, stringAny(runtimeCfg["preset_code"]), intAny(runtimeCfg["candidate_count"]), sceneCode)
 	content := fmt.Sprintf("用户需求：%s\n参考图URL：%s\n出图场景：%s\n当前生成参数：%s\n请补全创作方案。", firstUserPrompt(inputs), firstImageURL(inputs), sceneLabel, agentGenerationParamSummary(inputs))
+	if hasSubjectReferenceImage(inputs) {
+		content += "\n参考图是生成主体的唯一视觉真值。不得猜测、替换或重新发明主体品类；如果无法从 URL 直接识别图片内容，候选提示词必须写成严格保持参考图主体，不得擅自写成手机、无人机或其他具体品类。"
+	}
 	bodyMap := copyLLMExtraParams(extraParams)
 	bodyMap["model"] = firstNonEmpty(upstreamModel, modelCode)
 	setLLMRequestContent(bodyMap, requestMode, system, content)
@@ -1886,10 +1889,17 @@ func agentPromptWithScene(prompt string, inputs map[string]interface{}) string {
 	sceneCode := stringAny(inputs["creative_scene"])
 	sceneLabel := firstNonEmpty(stringAny(inputs["creative_scene_label"]), agentCreativeSceneLabel(sceneCode))
 	sceneInstruction := agentCreativeSceneInstruction(sceneCode)
-	if strings.TrimSpace(sceneInstruction) == "" {
-		return applyGenerationLanguage(prompt, inputs)
+	sections := make([]string, 0, 3)
+	if strings.TrimSpace(sceneInstruction) != "" {
+		sections = append(sections, fmt.Sprintf("SCENE HARD REQUIREMENT: %s (%s)\n%s\nThe final media MUST visibly follow this scene. If the user prompt or AI analysis conflicts, obey this scene requirement.\n当前生成参数：%s", sceneLabel, sceneCode, sceneInstruction, agentGenerationParamSummary(inputs)))
 	}
-	return applyGenerationLanguage(fmt.Sprintf("SCENE HARD REQUIREMENT: %s (%s)\n%s\nThe final media MUST visibly follow this scene. If the user prompt or AI analysis conflicts, obey this scene requirement.\n当前生成参数：%s\n\n%s", sceneLabel, sceneCode, sceneInstruction, agentGenerationParamSummary(inputs), strings.TrimSpace(prompt)), inputs)
+	if hasSubjectReferenceImage(inputs) {
+		sections = append(sections, "REFERENCE IMAGE HARD REQUIREMENT: The uploaded reference image is the authoritative subject. Preserve its object category, identity, silhouette, structure, proportions, materials, colors, visible details, branding and logo placement. Never replace it with another object (for example, never turn a phone into a drone). If the user prompt or AI analysis conflicts with the reference subject, obey the reference image. Only change the scene, composition, lighting or presentation requested by the user.")
+	}
+	if cleanPrompt := strings.TrimSpace(prompt); cleanPrompt != "" {
+		sections = append(sections, cleanPrompt)
+	}
+	return applyGenerationLanguage(strings.Join(sections, "\n\n"), inputs)
 }
 
 func generationLanguageLabel(inputs map[string]interface{}) string {
@@ -3031,6 +3041,31 @@ func referenceImageURLs(inputs map[string]interface{}) []string {
 		}
 	}
 	return items
+}
+
+func hasSubjectReferenceImage(inputs map[string]interface{}) bool {
+	for _, key := range []string{"image_url", "product_image", "reference_image", "first_frame", "last_frame"} {
+		if isSupportedMediaReference(stringAny(inputs[key])) {
+			return true
+		}
+	}
+	for _, key := range []string{"reference_images", "images"} {
+		switch values := inputs[key].(type) {
+		case []interface{}:
+			for _, value := range values {
+				if isSupportedMediaReference(stringAny(value)) {
+					return true
+				}
+			}
+		case []string:
+			for _, value := range values {
+				if isSupportedMediaReference(value) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func comicAssetReferenceURLs(inputs map[string]interface{}) []string {

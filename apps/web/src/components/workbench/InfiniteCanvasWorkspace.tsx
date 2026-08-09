@@ -136,7 +136,8 @@ type CanvasNodeData = Record<string, unknown> & {
   storyVoiceAssignments?: Record<string, string>;
   storyVoiceOverrides?: Record<string, string>;
   viralGroupID?: string;
-  viralRole?: "brief" | "reference" | "brand" | "analysis" | "keyframe" | "video" | "final";
+  viralRole?: "brief" | "reference" | "brand" | "audio" | "analysis" | "keyframe" | "video" | "final";
+  viralVariant?: "viral" | "video";
   viralSegmentIndex?: number;
   viralSegmentCount?: number;
   viralSegmentDuration?: number;
@@ -253,6 +254,7 @@ const NODE_TEMPLATES = [
   { id: "image-video", icon: Boxes, titleKey: "canvas.template.imageVideo", descKey: "canvas.template.imageVideoDesc", tone: "violet" },
   { id: "story-short-video", icon: FileImage, titleKey: "canvas.template.storyVideo", descKey: "canvas.template.storyVideoDesc", tone: "blue" },
   { id: "viral-remake", icon: RotateCcw, titleKey: "canvas.template.viralRemake", descKey: "canvas.template.viralRemakeDesc", tone: "orange" },
+  { id: "video-remake", icon: Film, titleKey: "canvas.template.videoRemake", descKey: "canvas.template.videoRemakeDesc", tone: "violet" },
 ] as const;
 
 const LIBRARY_TEMPLATES = [
@@ -290,6 +292,7 @@ const DEFAULT_TEMPLATE_ZH: Record<string, { name: string; description: string }>
   "photo-restoration": { name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图" },
   "story-short-video": { name: "故事短视频", description: "故事拆分为多关键帧、多视频片段并合成为完整成片" },
   "viral-remake": { name: "爆款复刻", description: "多模态拆解爆款参考，生成多关键帧、多片段并合成为原创短视频" },
+  "video-remake": { name: "视频复刻", description: "智能拆镜、替换商品或主体、分段生成并合成原片节奏的新视频" },
 };
 
 const TEMPLATE_TONES: Record<string, string> = {
@@ -2844,14 +2847,15 @@ function CanvasEditor({
         const group = nodesRef.current.filter((item) => item.data.viralGroupID === groupID);
         const reference = group.find((item) => item.data.viralRole === "reference");
         const brand = group.find((item) => item.data.viralRole === "brand");
+        const isVideoRemake = node.data.viralVariant === "video";
         const hasAssets = (item?: CanvasNode) => Boolean(
           item?.data.assetUrl
           || (Array.isArray(item?.data.assetUrls) && item.data.assetUrls.length > 0)
         );
         return !hasAssets(reference)
-          ? { node, reason: t("canvas.viral.referenceRequired") }
+          ? { node, reason: t(isVideoRemake ? "canvas.videoRemake.referenceRequired" : "canvas.viral.referenceRequired") }
           : !hasAssets(brand)
-            ? { node, reason: t("canvas.viral.brandRequired") }
+            ? { node, reason: t(isVideoRemake ? "canvas.videoRemake.brandRequired" : "canvas.viral.brandRequired") }
             : null;
       })
       .find((item): item is { node: CanvasNode; reason: string } => Boolean(item));
@@ -3205,12 +3209,14 @@ function CanvasEditor({
     const briefNode = nodesRef.current.find((node) => node.id === id && node.data.viralRole === "brief");
     const groupID = String(briefNode?.data.viralGroupID || "");
     if (!briefNode || !groupID) return;
+    const isVideoRemake = briefNode.data.viralVariant === "video";
     const segmentCount = VIRAL_SEGMENT_COUNT_OPTIONS.includes(requestedCount as (typeof VIRAL_SEGMENT_COUNT_OPTIONS)[number])
       ? requestedCount
       : 3;
     const groupNodes = nodesRef.current.filter((node) => node.data.viralGroupID === groupID);
     const referenceNode = groupNodes.find((node) => node.data.viralRole === "reference");
     const brandNode = groupNodes.find((node) => node.data.viralRole === "brand");
+    const existingAudioNode = groupNodes.find((node) => node.data.viralRole === "audio");
     const analysisNode = groupNodes.find((node) => node.data.viralRole === "analysis");
     const finalNode = groupNodes.find((node) => node.data.viralRole === "final");
     if (!referenceNode || !brandNode || !analysisNode || !finalNode) return;
@@ -3243,14 +3249,31 @@ function CanvasEditor({
     resetBrief.position = { x: baseX, y: baseY };
     const resetReference = { ...referenceNode, position: { x: baseX, y: baseY + 330 } };
     const resetBrand = { ...brandNode, position: { x: baseX, y: baseY + 660 } };
+    const resetAudio: CanvasNode | null = isVideoRemake
+      ? existingAudioNode
+        ? { ...existingAudioNode, position: { x: baseX, y: baseY + 990 } }
+        : {
+            id: newNodeID(),
+            type: "imageInput",
+            position: { x: baseX, y: baseY + 990 },
+            data: {
+              label: t("canvas.node.videoRemakeAudio"),
+              prompt: t("canvas.videoRemake.audioNote"),
+              mediaKind: "audio",
+              viralGroupID: groupID,
+              viralRole: "audio",
+              viralVariant: "video",
+            },
+          }
+      : null;
     const resetAnalysis = storyNodeNeedsReset(analysisNode, {
       ...sharedPatch,
-      prompt: t("canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
+      prompt: t(isVideoRemake ? "canvas.videoRemake.analysisPrompt" : "canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
     });
     resetAnalysis.position = { x: baseX + 400, y: baseY + 220 };
     const resetFinal = storyNodeNeedsReset(finalNode, {
       ...sharedPatch,
-      composeMode: "concat",
+      composeMode: isVideoRemake ? "auto" : "concat",
       outputSize: "keep",
     });
     resetFinal.position = { x: baseX + 1640, y: baseY + Math.max(160, (segmentCount - 1) * gap / 2) };
@@ -3274,15 +3297,16 @@ function CanvasEditor({
           data: { label: "", mediaKind: "image", status: "idle" },
         },
         {
-          label: t("canvas.viral.keyframeIndexed", { index, count: segmentCount }),
+          label: t(isVideoRemake ? "canvas.videoRemake.keyframeIndexed" : "canvas.viral.keyframeIndexed", { index, count: segmentCount }),
           mediaKind: "image",
           modelCode: imageModel?.code || "",
           params: imageParams,
           viralGroupID: groupID,
           viralRole: "keyframe",
+          viralVariant: isVideoRemake ? "video" : "viral",
           viralSegmentIndex: index,
           ...sharedPatch,
-          prompt: t("canvas.viral.keyframePrompt", { index, count: segmentCount }),
+          prompt: t(isVideoRemake ? "canvas.videoRemake.keyframePrompt" : "canvas.viral.keyframePrompt", { index, count: segmentCount }),
           referenceImageLabel: t("canvas.node.brandMaterial"),
         }
       );
@@ -3312,15 +3336,16 @@ function CanvasEditor({
           data: { label: "", mediaKind: "video", status: "idle" },
         },
         {
-          label: t("canvas.viral.videoIndexed", { index, count: segmentCount }),
+          label: t(isVideoRemake ? "canvas.videoRemake.videoIndexed" : "canvas.viral.videoIndexed", { index, count: segmentCount }),
           mediaKind: "video",
           modelCode: videoModel?.code || "",
           params: videoParams,
           viralGroupID: groupID,
           viralRole: "video",
+          viralVariant: isVideoRemake ? "video" : "viral",
           viralSegmentIndex: index,
           ...sharedPatch,
-          prompt: t("canvas.viral.videoPrompt", { index, count: segmentCount, duration: segmentDuration }),
+          prompt: t(isVideoRemake ? "canvas.videoRemake.videoPrompt" : "canvas.viral.videoPrompt", { index, count: segmentCount, duration: segmentDuration }),
           referenceImageLabel: t("canvas.node.avatarAndFirstFrame"),
         }
       );
@@ -3333,6 +3358,7 @@ function CanvasEditor({
       resetBrief.id,
       resetReference.id,
       resetBrand.id,
+      ...(resetAudio ? [resetAudio.id] : []),
       resetAnalysis.id,
       resetFinal.id,
       ...keyframes.map((node) => node.id),
@@ -3367,13 +3393,16 @@ function CanvasEditor({
       if (index > 0) internalEdges.push(connectViral(keyframes[index - 1], keyframe));
       internalEdges.push(connectViral(resetAnalysis, videos[index]));
       internalEdges.push(connectViral(keyframe, videos[index]));
+      if (resetAudio) internalEdges.push(connectViral(resetAudio, videos[index]));
       internalEdges.push(connectViral(videos[index], resetFinal));
     });
+    if (resetAudio) internalEdges.push(connectViral(resetAudio, resetFinal));
     nodesRef.current = [
       ...unrelatedNodes,
       resetBrief,
       resetReference,
       resetBrand,
+      ...(resetAudio ? [resetAudio] : []),
       resetAnalysis,
       ...keyframes,
       ...videos,
@@ -3382,7 +3411,7 @@ function CanvasEditor({
     edgesRef.current = [...retainedExternalEdges, ...internalEdges];
     setNodes(nodesRef.current);
     setEdges(edgesRef.current);
-    setNotice(t("canvas.viral.structureUpdated", {
+    setNotice(t(isVideoRemake ? "canvas.videoRemake.structureUpdated" : "canvas.viral.structureUpdated", {
       count: segmentCount,
       duration: segmentDuration,
       total: segmentCount * segmentDuration,
@@ -3747,7 +3776,8 @@ function CanvasEditor({
         connect(narrationNode, finalNode),
       ];
       storyBootstrap = { inputID: textNode.id, segmentCount, segmentDuration };
-    } else if (templateID === "viral-remake") {
+    } else if (templateID === "viral-remake" || templateID === "video-remake") {
+      const isVideoRemake = templateID === "video-remake";
       const viralGroupID = `viral_${crypto.randomUUID()}`;
       const viralVideoModel = preferredVideoModel(videoModels);
       const durationOptions = storyDurationOptions(viralVideoModel);
@@ -3759,11 +3789,15 @@ function CanvasEditor({
       const segmentDuration = durationOptions.includes(configuredDuration)
         ? configuredDuration
         : preferredStoryDuration(viralVideoModel);
-      const briefNode = text(t("canvas.viral.defaultBrief"), t("canvas.node.viralRemakeBrief"));
+      const briefNode = text(
+        t(isVideoRemake ? "canvas.videoRemake.defaultBrief" : "canvas.viral.defaultBrief"),
+        t(isVideoRemake ? "canvas.node.videoRemakeBrief" : "canvas.node.viralRemakeBrief")
+      );
       briefNode.data = {
         ...briefNode.data,
         viralGroupID,
         viralRole: "brief",
+        viralVariant: isVideoRemake ? "video" : "viral",
         viralSegmentCount: segmentCount,
         viralSegmentDuration: segmentDuration,
         viralDurationOptions: durationOptions.length ? durationOptions : [segmentDuration],
@@ -3773,11 +3807,12 @@ function CanvasEditor({
         type: "imageInput",
         position: { x: originX, y: originY + 330 },
         data: {
-          label: t("canvas.node.viralReference"),
-          prompt: t("canvas.viral.referenceNote"),
+          label: t(isVideoRemake ? "canvas.node.videoRemakeReference" : "canvas.node.viralReference"),
+          prompt: t(isVideoRemake ? "canvas.videoRemake.referenceNote" : "canvas.viral.referenceNote"),
           mediaKind: "video",
           viralGroupID,
           viralRole: "reference",
+          viralVariant: isVideoRemake ? "video" : "viral",
         },
       };
       const brandNode: CanvasNode = {
@@ -3786,13 +3821,27 @@ function CanvasEditor({
         position: { x: originX, y: originY + 660 },
         data: {
           label: t("canvas.node.brandMaterial"),
-          prompt: t("canvas.viral.brandNote"),
+          prompt: t(isVideoRemake ? "canvas.videoRemake.brandNote" : "canvas.viral.brandNote"),
           mediaKind: "image",
           viralGroupID,
           viralRole: "brand",
+          viralVariant: isVideoRemake ? "video" : "viral",
         },
       };
-      const analysisNode = generator("text", 0, t("canvas.node.viralAnalysis"));
+      const audioNode: CanvasNode | null = isVideoRemake ? {
+        id: newNodeID(),
+        type: "imageInput",
+        position: { x: originX, y: originY + 990 },
+        data: {
+          label: t("canvas.node.videoRemakeAudio"),
+          prompt: t("canvas.videoRemake.audioNote"),
+          mediaKind: "audio",
+          viralGroupID,
+          viralRole: "audio",
+          viralVariant: "video",
+        },
+      } : null;
+      const analysisNode = generator("text", 0, t(isVideoRemake ? "canvas.node.videoRemakeAnalysis" : "canvas.node.viralAnalysis"));
       const analysisModel = preferredMultimodalChatModel(chatModels);
       analysisNode.data = {
         ...analysisNode.data,
@@ -3800,21 +3849,23 @@ function CanvasEditor({
         params: canvasModelDefaults("text", analysisModel),
         viralGroupID,
         viralRole: "analysis",
+        viralVariant: isVideoRemake ? "video" : "viral",
         viralSegmentCount: segmentCount,
         viralSegmentDuration: segmentDuration,
-        prompt: t("canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
+        prompt: t(isVideoRemake ? "canvas.videoRemake.analysisPrompt" : "canvas.viral.analysisPrompt", { count: segmentCount, duration: segmentDuration }),
       };
-      const finalNode = compositor(100, t("canvas.viral.finalVideo"));
+      const finalNode = compositor(100, t(isVideoRemake ? "canvas.videoRemake.finalVideo" : "canvas.viral.finalVideo"));
       finalNode.data = {
         ...finalNode.data,
         viralGroupID,
         viralRole: "final",
+        viralVariant: isVideoRemake ? "video" : "viral",
         viralSegmentCount: segmentCount,
         viralSegmentDuration: segmentDuration,
-        composeMode: "concat",
+        composeMode: isVideoRemake ? "auto" : "concat",
         outputSize: "keep",
       };
-      nextNodes = [briefNode, referenceNode, brandNode, analysisNode, finalNode];
+      nextNodes = [briefNode, referenceNode, brandNode, ...(audioNode ? [audioNode] : []), analysisNode, finalNode];
       nextEdges = [
         connect(briefNode, analysisNode),
         connect(referenceNode, analysisNode),
