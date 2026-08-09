@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -289,45 +290,149 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 	billingType, _ := model.PriceRule["billing_type"].(string)
 	switch billingType {
 	case "per_image":
-		unitPrice, _ := model.PriceRule["unit_price"].(float64)
-		n := 1.0
-		if v, ok := params["n"].(float64); ok {
-			n = v
+		unitPrice := floatValue(model.PriceRule["unit_price"])
+		n := floatValue(params["n"])
+		if n <= 0 {
+			n = floatValue(params["count"])
+		}
+		if n <= 0 {
+			n = 1
 		}
 		return unitPrice * n
 	case "per_token":
-		inPrice := perTokenPrice(model.PriceRule, "input_price")
-		outPrice := perTokenPrice(model.PriceRule, "output_price")
-		if promptTokens == 0 {
-			promptTokens = 500
-		}
-		if outputTokens == 0 {
-			outputTokens = 1000
-		}
-		cost := float64(promptTokens)*inPrice + float64(outputTokens)*outPrice
-		// Platform surcharge per 1M tokens on top of real token cost.
-		if surcharge, ok := model.PriceRule["surcharge_per_m"].(float64); ok && surcharge > 0 {
-			cost += float64(promptTokens+outputTokens) / 1_000_000 * surcharge
-		}
-		return cost
+		promptTokens, outputTokens = estimatedTokenCounts(model.PriceRule, params, promptTokens, outputTokens)
+		return tokenCostFromRule(model.PriceRule, promptTokens, outputTokens, 0, 0) * modelTokenItemCount(model, params)
 	case "per_request":
-		unitPrice, _ := model.PriceRule["unit_price"].(float64)
-		return unitPrice
+		return floatValue(model.PriceRule["unit_price"])
 	case "per_second":
-		unitPrice, _ := model.PriceRule["unit_price"].(float64)
+		unitPrice := floatValue(model.PriceRule["unit_price"])
 		duration := parseDurationSeconds(params)
-		n := 1.0
-		if v, ok := params["count"].(float64); ok && v > 0 {
-			n = v
-		} else if v, ok := params["n"].(float64); ok && v > 0 {
-			n = v
-		}
-		return unitPrice * duration * n
+		return unitPrice * duration * billingItemCount(params)
 	case "dynamic":
 		return estimateDynamicCost(model.PriceRule, params)
 	default:
-		return 0.01
+		return 0
 	}
+}
+
+func (s *ModelService) EstimateCostWithTokenDetails(model *ModelFull, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
+	if stringValue(model.PriceRule["billing_type"]) != "per_token" {
+		return s.EstimateCost(model, params, promptTokens, outputTokens)
+	}
+	if promptTokens <= 0 && outputTokens <= 0 {
+		promptTokens, outputTokens = estimatedTokenCounts(model.PriceRule, params, promptTokens, outputTokens)
+	} else if promptTokens <= 0 {
+		promptTokens, _ = estimatedTokenCounts(model.PriceRule, params, promptTokens, 1)
+	}
+	return tokenCostFromRule(model.PriceRule, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens) * modelTokenItemCount(model, params)
+}
+
+func modelTokenItemCount(model *ModelFull, params map[string]interface{}) float64 {
+	if model != nil && model.Category == "audio" {
+		return billingItemCount(params)
+	}
+	return 1
+}
+
+func billingItemCount(params map[string]interface{}) float64 {
+	count := floatValue(params["count"])
+	if count <= 0 {
+		count = floatValue(params["n"])
+	}
+	if count <= 0 {
+		return 1
+	}
+	return count
+}
+
+func tokenCostFromRule(rule map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	if outputTokens < 0 {
+		outputTokens = 0
+	}
+	if cacheReadTokens < 0 {
+		cacheReadTokens = 0
+	}
+	if cacheWriteTokens < 0 {
+		cacheWriteTokens = 0
+	}
+	if cacheReadTokens+cacheWriteTokens > promptTokens {
+		overflow := cacheReadTokens + cacheWriteTokens - promptTokens
+		if cacheWriteTokens >= overflow {
+			cacheWriteTokens -= overflow
+		} else {
+			cacheReadTokens = promptTokens - cacheWriteTokens
+		}
+	}
+	uncachedInput := promptTokens - cacheReadTokens - cacheWriteTokens
+	inputPrice := perTokenPrice(rule, "input_price")
+	outputPrice := perTokenPrice(rule, "output_price")
+	cacheReadPrice := perTokenPrice(rule, "cache_read_price")
+	if cacheReadPrice <= 0 {
+		cacheReadPrice = inputPrice
+	}
+	cacheWritePrice := perTokenPrice(rule, "cache_write_price")
+	if cacheWritePrice <= 0 {
+		cacheWritePrice = inputPrice
+	}
+	cost := float64(uncachedInput)*inputPrice + float64(cacheReadTokens)*cacheReadPrice + float64(cacheWriteTokens)*cacheWritePrice + float64(outputTokens)*outputPrice
+	if surcharge := floatValue(rule["surcharge_per_m"]); surcharge > 0 {
+		cost += float64(promptTokens+outputTokens) / 1_000_000 * surcharge
+	}
+	return cost
+}
+
+func estimatedTokenCounts(rule, params map[string]interface{}, promptTokens, outputTokens int) (int, int) {
+	if promptTokens <= 0 {
+		promptTokens = firstPositiveIntValue(params, "_estimated_input_tokens", "estimated_input_tokens")
+		if promptTokens <= 0 {
+			promptTokens = firstPositiveIntValue(rule, "estimated_input_tokens")
+		}
+		if promptTokens <= 0 {
+			promptTokens = estimateTextTokens(stringValue(params["prompt"]))
+		}
+		if promptTokens <= 0 {
+			promptTokens = 500
+		}
+	}
+	if outputTokens <= 0 {
+		outputTokens = firstPositiveIntValue(params, "_estimated_output_tokens", "max_completion_tokens", "max_tokens")
+		if outputTokens <= 0 {
+			outputTokens = firstPositiveIntValue(rule, "estimated_output_tokens")
+		}
+		if outputTokens <= 0 {
+			outputTokens = 1000
+		}
+	}
+	return promptTokens, outputTokens
+}
+
+func firstPositiveIntValue(values map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		if value := int(math.Ceil(floatValue(values[key]))); value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func estimateTextTokens(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	runes := []rune(text)
+	weighted := 0.0
+	for _, r := range runes {
+		if r <= 127 {
+			weighted += 0.25
+		} else {
+			weighted += 0.75
+		}
+	}
+	return int(math.Ceil(weighted)) + 8
 }
 
 func estimateDynamicCost(rule map[string]interface{}, params map[string]interface{}) float64 {
@@ -1064,6 +1169,9 @@ func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*Mod
 	if err := validateModelConnection(input); err != nil {
 		return nil, err
 	}
+	if err := validateModelPriceRule(input.PriceRule); err != nil {
+		return nil, err
+	}
 	input.NewAPIEndpoint = normalizeModelEndpoint(input.NewAPIEndpoint)
 	tags, _ := json.Marshal(input.Tags)
 	runtime, _ := json.Marshal(input.RuntimeRule)
@@ -1110,6 +1218,9 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 	if err := validateModelConnection(input); err != nil {
 		return nil, err
 	}
+	if err := validateModelPriceRule(input.PriceRule); err != nil {
+		return nil, err
+	}
 	input.NewAPIEndpoint = normalizeModelEndpoint(input.NewAPIEndpoint)
 	tags, _ := json.Marshal(input.Tags)
 	runtime, _ := json.Marshal(input.RuntimeRule)
@@ -1127,6 +1238,35 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 		return nil, err
 	}
 	return s.GetByID(ctx, id)
+}
+
+func validateModelPriceRule(rule map[string]interface{}) error {
+	billingType := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
+	allowed := map[string]bool{"per_token": true, "per_image": true, "per_request": true, "per_second": true, "dynamic": true}
+	if !allowed[billingType] {
+		return fmt.Errorf("不支持的计费类型：%s", billingType)
+	}
+	for _, key := range []string{"unit_price", "input_price", "output_price", "cache_read_price", "cache_write_price", "input_price_per_m", "output_price_per_m", "cache_read_price_per_m", "cache_write_price_per_m", "surcharge_per_m", "fallback_cost"} {
+		if floatValue(rule[key]) < 0 {
+			return fmt.Errorf("计费字段 %s 不能为负数", key)
+		}
+	}
+	switch billingType {
+	case "per_token":
+		if perTokenPrice(rule, "input_price") <= 0 && perTokenPrice(rule, "output_price") <= 0 {
+			return errors.New("Token 计费至少需要配置输入或输出单价")
+		}
+	case "per_image", "per_request", "per_second":
+		if _, exists := rule["unit_price"]; !exists {
+			return errors.New("按次、按图或按秒计费必须配置 unit_price")
+		}
+	case "dynamic":
+		strategy := strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"])))
+		if strategy != "seedance_2_tokens" && strategy != "minimax_h3_seconds" && floatValue(rule["fallback_cost"]) <= 0 {
+			return errors.New("动态计费策略无效，且未配置 fallback_cost")
+		}
+	}
+	return nil
 }
 
 func (s *ModelService) preserveExistingModelSecrets(ctx context.Context, id int64, input *CreateModelInput) error {

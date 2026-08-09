@@ -255,10 +255,12 @@ func (s *OAuthService) loginOrRegister(ctx context.Context, provider string, ide
 	if _, err = tx.Exec(ctx, `INSERT INTO wallets (user_id) VALUES ($1)`, userID); err != nil {
 		return nil, err
 	}
+	if err = s.auth.grantSignupBonusTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.auth.GrantSignupBonus(ctx, userID)
 	return s.auth.issueToken(userID, publicID, nickname, avatarVal, "normal", "普通会员", memberLevelID, userReferralCode, referrerID, nil, "zh-CN")
 }
 

@@ -766,8 +766,11 @@ func (h *Handler) EstimateModel(c *gin.Context) {
 			}
 		}
 		codes := append([]string{}, answerCodes...)
-		codes = append(codes, summaryCodes...)
+		if len(summaryCodes) > 0 {
+			codes = append(codes, summaryCodes[0])
+		}
 		cost := h.chat.EstimateModelsCost(c.Request.Context(), codes, req.Params)
+		cost += h.models.EstimateCost(m, req.Params, 0, 0)
 		if cost <= 0 {
 			util.BadRequest(c, "multi-collab channel has no priced models")
 			return
@@ -1378,8 +1381,7 @@ func (h *Handler) chatStream(c *gin.Context, userID int64, input service.Complet
 }
 
 func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.CompletionInput, model *service.ModelFull) {
-	estimated := h.models.EstimateCost(model, input.Params, 0, 0)
-	requestID, ch, err := h.chat.CompletionStream(c.Request.Context(), userID, input)
+	requestID, ch, estimated, err := h.chat.CompletionStream(c.Request.Context(), userID, input)
 	if err != nil {
 		if failChatBalance(c, err) {
 			return
@@ -1401,8 +1403,11 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 
 	for chunk := range ch {
 		if chunk.Error != nil {
-			h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated)
-			c.Writer.Write([]byte(runtime.FormatSSE("error", map[string]string{"message": "模型服务异常"})))
+			message := "模型服务异常"
+			if unfreezeErr := h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated); unfreezeErr != nil {
+				message = "模型服务异常，且冻结额度释放失败，请联系客服核对账单"
+			}
+			c.Writer.Write([]byte(runtime.FormatSSE("error", map[string]string{"message": message})))
 			flusher.Flush()
 			return
 		}
@@ -1418,7 +1423,12 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			break
 		}
 	}
-	convID, _ := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, usage, estimated)
+	convID, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, usage, estimated)
+	if finalizeErr != nil {
+		c.Writer.Write([]byte(runtime.FormatSSE("error", map[string]string{"message": "费用结算失败，请联系客服核对账单"})))
+		flusher.Flush()
+		return
+	}
 	c.Writer.Write([]byte(runtime.FormatSSE("done", map[string]interface{}{"content": fullContent, "request_id": requestID, "conversation_id": convID})))
 	flusher.Flush()
 }
@@ -1497,7 +1507,9 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 	}
 
 	estimatedModelCodes := append([]string{}, modelCodes...)
-	estimatedModelCodes = append(estimatedModelCodes, summaryModelCodes...)
+	if len(summaryModelCodes) > 0 {
+		estimatedModelCodes = append(estimatedModelCodes, summaryModelCodes[0])
+	}
 	requestID, estimated, err := h.chat.BeginMultiChat(c.Request.Context(), userID, input, estimatedModelCodes)
 	if err != nil {
 		if failChatBalance(c, err) {
@@ -1535,14 +1547,22 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 	results := make([]modelOut, 0, len(modelCodes))
 	var combined string
 	var actualCost float64
+	var collaborationCost float64
+	if collaborationModel, modelErr := h.models.GetFullByCode(c.Request.Context(), input.ModelCode); modelErr == nil && collaborationModel.Category == "multi_collab" {
+		collaborationCost = h.models.EstimateCost(collaborationModel, input.Params, 0, 0)
+	}
 	var promptTokens, completionTokens, totalTokens int
+	successfulModels := 0
 
 	for idx, code := range modelCodes {
 		model, err := h.models.GetFullByCode(c.Request.Context(), code)
 		if err != nil {
 			if !fallbackEnabled {
-				h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated)
-				c.Writer.Write([]byte(runtime.FormatSSE("mm_error", map[string]interface{}{"request_id": requestID, "message": "模型不存在", "model_code": code})))
+				message := "模型不存在"
+				if unfreezeErr := h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated); unfreezeErr != nil {
+					message = "模型不存在，且冻结额度释放失败，请联系客服核对账单"
+				}
+				c.Writer.Write([]byte(runtime.FormatSSE("mm_error", map[string]interface{}{"request_id": requestID, "message": message, "model_code": code})))
 				flusher.Flush()
 				return
 			}
@@ -1580,7 +1600,10 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 			})))
 			flusher.Flush()
 			if !fallbackEnabled {
-				h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated)
+				if unfreezeErr := h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated); unfreezeErr != nil {
+					c.Writer.Write([]byte(runtime.FormatSSE("mm_error", map[string]interface{}{"request_id": requestID, "message": "冻结额度释放失败，请联系客服核对账单", "model_code": code})))
+					flusher.Flush()
+				}
 				return
 			}
 			results = append(results, modelOut{ModelCode: model.Code, Display: model.DisplayName, IconURL: ptrString(model.IconURL), Content: "", Error: pe})
@@ -1592,7 +1615,8 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 			content = resp.Choices[0].Message.Content
 		}
 		if resp != nil {
-			actualCost += h.models.EstimateCost(model, input.Params, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+			successfulModels++
+			actualCost += h.models.EstimateCostWithTokenDetails(model, input.Params, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedInputTokens(), resp.Usage.CacheCreationInputTokens)
 			promptTokens += resp.Usage.PromptTokens
 			completionTokens += resp.Usage.CompletionTokens
 			totalTokens += resp.Usage.TotalTokens
@@ -1614,6 +1638,9 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 			"model_code": model.Code,
 		})))
 		flusher.Flush()
+	}
+	if successfulModels > 0 {
+		actualCost += collaborationCost
 	}
 
 	summary := strings.TrimSpace(combined)
@@ -1637,7 +1664,11 @@ func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.Co
 	if convID != "" && len(input.Messages) > 0 {
 		h.chat.SaveMultiMessages(context.Background(), convID, userID, input.Messages, results, summary)
 	}
-	h.chat.FinalizeMultiChat(context.Background(), userID, requestID, input.ModelCode, estimated, actualCost, promptTokens, completionTokens, totalTokens)
+	if err := h.chat.FinalizeMultiChat(context.Background(), userID, requestID, input.ModelCode, estimated, actualCost, promptTokens, completionTokens, totalTokens); err != nil {
+		c.Writer.Write([]byte(runtime.FormatSSE("mm_error", map[string]interface{}{"request_id": requestID, "message": "费用结算失败，请联系客服核对账单"})))
+		flusher.Flush()
+		return
+	}
 
 	c.Writer.Write([]byte(runtime.FormatSSE("mm_done", map[string]interface{}{
 		"request_id":      requestID,
@@ -1684,7 +1715,7 @@ func (h *Handler) runSummaryModel(ctx context.Context, modelCode string, inputMe
 	if err != nil || resp == nil || len(resp.Choices) == 0 {
 		return "", 0, 0, 0, 0
 	}
-	cost := h.models.EstimateCost(model, params, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	cost := h.models.EstimateCostWithTokenDetails(model, params, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.CachedInputTokens(), resp.Usage.CacheCreationInputTokens)
 	return strings.TrimSpace(resp.Choices[0].Message.Content), cost, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -286,18 +287,17 @@ func (s *PaymentService) createMockOrder(ctx context.Context, userID int64, amou
 	}
 	orderNo := fmt.Sprintf("ord_%d_%s", time.Now().UnixMilli(), util.NewPublicID("")[1:5])
 
-	_, err := s.db.Exec(ctx,
-		`INSERT INTO orders (order_no, user_id, channel, amount, currency, compute_credited, status, paid_at, payment_package_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,'paid',now(),$7)`,
-		orderNo, userID, channel, amount, currency, credited, packageID)
-	if err != nil {
+	if err := s.billing.CreditWithFinalize(ctx, userID, credited, "online_recharge", "order", orderNo, "在线充值", func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO orders (order_no, user_id, channel, amount, currency, compute_credited, status, paid_at, payment_package_id)
+			 VALUES ($1,$2,$3,$4,$5,$6,'paid',now(),$7)`,
+			orderNo, userID, channel, amount, currency, credited, packageID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	if err := s.billing.Credit(ctx, userID, credited, "online_recharge", "order", orderNo, "在线充值"); err != nil {
-		return nil, err
-	}
-	if err := s.billing.AwardReferralOnRecharge(ctx, userID, credited, "order", orderNo); err != nil {
-		return nil, err
+	if err := s.billing.AwardReferralOnRecharge(ctx, userID, amount, credited, "order", orderNo); err != nil {
+		log.Printf("order %s credited; referral reward deferred: %v", orderNo, err)
 	}
 	now := time.Now().Format(time.RFC3339)
 	return &OrderDTO{
@@ -545,8 +545,8 @@ func (s *PaymentService) completeOrder(ctx context.Context, orderNo, channel, pr
 		if err := tx.Commit(ctx); err != nil {
 			return nil, err
 		}
-		if err := s.billing.AwardReferralOnRecharge(ctx, userID, credited, "order", orderNo); err != nil {
-			return nil, fmt.Errorf("订单已入账，但推荐奖励处理失败: %w", err)
+		if err := s.billing.AwardReferralOnRecharge(ctx, userID, amount, credited, "order", orderNo); err != nil {
+			log.Printf("order %s already credited; referral reward deferred: %v", orderNo, err)
 		}
 		return result, nil
 	}
@@ -583,8 +583,8 @@ func (s *PaymentService) completeOrder(ctx context.Context, orderNo, channel, pr
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if err := s.billing.AwardReferralOnRecharge(ctx, userID, credited, "order", orderNo); err != nil {
-		return nil, fmt.Errorf("订单已入账，但推荐奖励处理失败: %w", err)
+	if err := s.billing.AwardReferralOnRecharge(ctx, userID, amount, credited, "order", orderNo); err != nil {
+		log.Printf("order %s credited; referral reward deferred: %v", orderNo, err)
 	}
 	return result, nil
 }

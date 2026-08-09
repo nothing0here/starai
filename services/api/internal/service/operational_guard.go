@@ -77,7 +77,7 @@ func (s *OpsService) OperationalOverview(ctx context.Context, workerHeartbeat *t
 func (s *OpsService) operationalStats(ctx context.Context, workerHeartbeat *time.Time) (*OperationalStats, error) {
 	var st OperationalStats
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*), COALESCE(SUM(amount),0) FROM balance_freezes WHERE status='frozen'`).Scan(&st.FrozenCount, &st.FrozenAmount)
-	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM balance_freezes WHERE status='frozen' AND ref_type='chat' AND created_at < now() - interval '30 minutes'`).Scan(&st.StaleChatFreezes)
+	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM balance_freezes WHERE status='frozen' AND ref_type='chat' AND created_at < now() - interval '6 hours'`).Scan(&st.StaleChatFreezes)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE status='pending'`).Scan(&st.PendingTasks)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE status='running'`).Scan(&st.RunningTasks)
 	_ = s.db.QueryRow(ctx, `SELECT COUNT(*) FROM tasks WHERE status IN ('pending','running') AND created_at < now() - interval '6 hours'`).Scan(&st.StaleTasks)
@@ -157,6 +157,12 @@ func (s *OpsService) ReleaseFrozenBalance(ctx context.Context, freezeID int64) (
 
 	var item FrozenBalanceItem
 	var created time.Time
+	if err = tx.QueryRow(ctx, `SELECT user_id FROM balance_freezes WHERE id=$1`, freezeID).Scan(&item.UserID); err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, item.UserID); err != nil {
+		return nil, err
+	}
 	err = tx.QueryRow(ctx, `SELECT id, user_id, amount, ref_type, ref_id, status, created_at FROM balance_freezes WHERE id=$1 FOR UPDATE`, freezeID).
 		Scan(&item.ID, &item.UserID, &item.Amount, &item.RefType, &item.RefID, &item.Status, &created)
 	if err != nil {
@@ -220,7 +226,7 @@ func (s *OpsService) ReconcileFrozenBalances(ctx context.Context) (*ReconcileRes
 func (s *OpsService) releaseStaleChatFreezes(ctx context.Context) (int, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id FROM balance_freezes
-		WHERE status='frozen' AND ref_type='chat' AND created_at < now() - interval '30 minutes'
+		WHERE status='frozen' AND ref_type='chat' AND created_at < now() - interval '6 hours'
 		ORDER BY created_at ASC LIMIT 200`)
 	if err != nil {
 		return 0, err
@@ -240,7 +246,7 @@ func (s *OpsService) releaseStaleChatFreezes(ctx context.Context) (int, error) {
 
 func (s *OpsService) failStaleTasks(ctx context.Context) (int, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT f.id, f.user_id, f.amount, f.ref_id
+		SELECT f.id, f.user_id, f.amount, f.ref_id, t.id
 		FROM balance_freezes f
 		JOIN tasks t ON t.task_no=f.ref_id
 		WHERE f.status='frozen' AND f.ref_type='task'
@@ -253,10 +259,10 @@ func (s *OpsService) failStaleTasks(ctx context.Context) (int, error) {
 	defer rows.Close()
 	n := 0
 	for rows.Next() {
-		var freezeID, userID int64
+		var freezeID, userID, taskID int64
 		var amount float64
 		var taskNo string
-		if err := rows.Scan(&freezeID, &userID, &amount, &taskNo); err != nil {
+		if err := rows.Scan(&freezeID, &userID, &amount, &taskNo, &taskID); err != nil {
 			return n, err
 		}
 		tx, err := s.db.Begin(ctx)
@@ -264,6 +270,19 @@ func (s *OpsService) failStaleTasks(ctx context.Context) (int, error) {
 			return n, err
 		}
 		var status string
+		var lockAvailable bool
+		if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, -taskID).Scan(&lockAvailable); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
+		if !lockAvailable {
+			tx.Rollback(ctx)
+			continue
+		}
+		if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
 		if err = tx.QueryRow(ctx, `SELECT status FROM balance_freezes WHERE id=$1 FOR UPDATE`, freezeID).Scan(&status); err != nil {
 			tx.Rollback(ctx)
 			return n, err
@@ -293,7 +312,7 @@ func (s *OpsService) failStaleTasks(ctx context.Context) (int, error) {
 
 func (s *OpsService) failStaleWorkflows(ctx context.Context) (int, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT f.id, f.user_id, f.amount, f.ref_id
+		SELECT f.id, f.user_id, f.amount, f.ref_id, p.id
 		FROM balance_freezes f
 		JOIN workflow_projects p ON p.public_id=f.ref_id
 		WHERE f.status='frozen' AND f.ref_type='workflow'
@@ -309,10 +328,10 @@ func (s *OpsService) failStaleWorkflows(ctx context.Context) (int, error) {
 	defer rows.Close()
 	n := 0
 	for rows.Next() {
-		var freezeID, userID int64
+		var freezeID, userID, projectID int64
 		var amount float64
 		var publicID string
-		if err := rows.Scan(&freezeID, &userID, &amount, &publicID); err != nil {
+		if err := rows.Scan(&freezeID, &userID, &amount, &publicID, &projectID); err != nil {
 			return n, err
 		}
 		tx, err := s.db.Begin(ctx)
@@ -320,6 +339,19 @@ func (s *OpsService) failStaleWorkflows(ctx context.Context) (int, error) {
 			return n, err
 		}
 		var status string
+		var lockAvailable bool
+		if err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, projectID).Scan(&lockAvailable); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
+		if !lockAvailable {
+			tx.Rollback(ctx)
+			continue
+		}
+		if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
 		if err = tx.QueryRow(ctx, `SELECT status FROM balance_freezes WHERE id=$1 FOR UPDATE`, freezeID).Scan(&status); err != nil {
 			tx.Rollback(ctx)
 			return n, err

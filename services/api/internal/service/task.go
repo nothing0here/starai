@@ -187,19 +187,16 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 	taskNo := util.NewTaskNo()
 
 	inputJSON, _ := json.Marshal(params)
-	if err := s.billing.Freeze(ctx, userID, estimated, "task", taskNo); err != nil {
+	var taskID int64
+	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
+			VALUES ($1,$2,$3,$4,'pending',$5,$6) RETURNING id`,
+			taskNo, userID, model.ID, taskType, inputJSON, estimated).Scan(&taskID)
+	}); err != nil {
 		if errors.Is(err, billing.ErrInsufficientBalance) {
 			return s.createBalanceFailedTask(ctx, userID, model.ID, taskType, taskNo, inputJSON, estimated)
 		}
-		return nil, err
-	}
-	var taskID int64
-	err = s.db.QueryRow(ctx, `
-		INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
-		VALUES ($1,$2,$3,$4,'pending',$5,$6) RETURNING id`,
-		taskNo, userID, model.ID, taskType, inputJSON, estimated).Scan(&taskID)
-	if err != nil {
-		s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
 		return nil, err
 	}
 
@@ -209,7 +206,9 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 		TaskNo: taskNo, UserID: userID, ModelID: model.ID, ModelCode: model.Code, Input: params,
 	}
 	if err := queue.EnqueueImageTask(s.queue, payload); err != nil {
-		s.FailTask(ctx, taskNo, "QUEUE_ERROR", "任务入队失败")
+		if cleanupErr := s.FailTask(ctx, taskNo, "QUEUE_ERROR", "任务入队失败"); cleanupErr != nil {
+			return nil, fmt.Errorf("任务入队失败: %v；回滚冻结额度失败: %w", err, cleanupErr)
+		}
 		return nil, err
 	}
 
@@ -444,40 +443,56 @@ func scanTasks(rows pgx.Rows, total int) ([]TaskDTO, int, error) {
 }
 
 func (s *TaskService) Cancel(ctx context.Context, userID int64, taskNo string) error {
-	var status string
-	var estimated float64
-	err := s.db.QueryRow(ctx, `SELECT status, estimated_cost FROM tasks WHERE task_no=$1 AND user_id=$2`, taskNo, userID).Scan(&status, &estimated)
-	if err != nil {
-		return err
-	}
-	if status != "pending" && status != "running" {
-		return errors.New("任务无法取消")
-	}
-	_, err = s.db.Exec(ctx, `UPDATE tasks SET status='cancelled', finished_at=now(), updated_at=now() WHERE task_no=$1`, taskNo)
-	if err != nil {
-		return err
-	}
-	return s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
+	return s.cancelTask(ctx, taskNo, &userID, false)
 }
 
 func (s *TaskService) CancelByAdmin(ctx context.Context, taskNo string) error {
-	var userID int64
-	var status string
+	return s.cancelTask(ctx, taskNo, nil, true)
+}
+
+func (s *TaskService) cancelTask(ctx context.Context, taskNo string, expectedUserID *int64, byAdmin bool) error {
+	var taskID, userID int64
 	var estimated float64
-	var taskID int64
-	err := s.db.QueryRow(ctx, `SELECT id, user_id, status, estimated_cost FROM tasks WHERE task_no=$1`, taskNo).Scan(&taskID, &userID, &status, &estimated)
+	err := s.db.QueryRow(ctx, `SELECT id, user_id, estimated_cost FROM tasks WHERE task_no=$1`, taskNo).Scan(&taskID, &userID, &estimated)
 	if err != nil {
 		return err
 	}
-	if status != "pending" && status != "running" {
-		return errors.New("任务无法取消")
+	if expectedUserID != nil && userID != *expectedUserID {
+		return pgx.ErrNoRows
 	}
-	_, err = s.db.Exec(ctx, `UPDATE tasks SET status='cancelled', finished_at=now(), updated_at=now() WHERE task_no=$1`, taskNo)
+	err = s.billing.UnfreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
+		var status string
+		if err := tx.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1 FOR UPDATE`, taskID).Scan(&status); err != nil {
+			return err
+		}
+		if status != "pending" && status != "running" {
+			return errors.New("任务无法取消")
+		}
+		var lockAvailable bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, -taskID).Scan(&lockAvailable); err != nil {
+			return err
+		}
+		if !lockAvailable {
+			return errors.New("任务正在生成，暂时无法安全取消")
+		}
+		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='cancelled', finished_at=now(), updated_at=now() WHERE id=$1 AND status IN ('pending','running')`, taskID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("任务无法取消")
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	s.addEvent(ctx, taskID, "cancelled", map[string]interface{}{"by": "admin"})
-	return s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
+	by := "user"
+	if byAdmin {
+		by = "admin"
+	}
+	s.addEvent(ctx, taskID, "cancelled", map[string]interface{}{"by": by})
+	return nil
 }
 
 func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
@@ -492,26 +507,45 @@ func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
 		return errors.New("仅失败任务可重试")
 	}
 	var params map[string]interface{}
-	json.Unmarshal(input, &params)
+	if err := json.Unmarshal(input, &params); err != nil {
+		return err
+	}
 	var modelCode string
-	s.db.QueryRow(ctx, `SELECT code FROM models WHERE id=$1`, modelID).Scan(&modelCode)
-	model, _ := s.models.GetFullByCode(ctx, modelCode)
+	if err := s.db.QueryRow(ctx, `SELECT code FROM models WHERE id=$1`, modelID).Scan(&modelCode); err != nil {
+		return err
+	}
+	model, err := s.models.GetFullByCode(ctx, modelCode)
+	if err != nil {
+		return err
+	}
 	estimated := s.models.EstimateCost(model, params, 0, 0)
-	if err := s.billing.Freeze(ctx, userID, estimated, "task", taskNo); err != nil {
+	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
+		var lockedStatus string
+		if err := tx.QueryRow(ctx, `SELECT status FROM tasks WHERE task_no=$1 FOR UPDATE`, taskNo).Scan(&lockedStatus); err != nil {
+			return err
+		}
+		if lockedStatus != "failed" {
+			return errors.New("仅失败任务可重试")
+		}
+		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='pending', estimated_cost=$1, actual_cost=0, error_code=NULL, error_message=NULL, finished_at=NULL, retry_count=retry_count+1, updated_at=now() WHERE task_no=$2 AND status='failed'`, estimated, taskNo)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("仅失败任务可重试")
+		}
+		return nil
+	}); err != nil {
 		if errors.Is(err, billing.ErrInsufficientBalance) {
 			return errors.New(billing.InsufficientBalanceMsg)
 		}
 		return err
 	}
-	_, err = s.db.Exec(ctx, `UPDATE tasks SET status='pending', error_code=NULL, error_message=NULL, retry_count=retry_count+1, updated_at=now() WHERE task_no=$1`, taskNo)
-	if err != nil {
-		_ = s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
-		return err
-	}
 	payload := queue.ImageTaskPayload{TaskNo: taskNo, UserID: userID, ModelID: modelID, ModelCode: modelCode, Input: params}
 	if err := queue.EnqueueImageTask(s.queue, payload); err != nil {
-		_ = s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
-		_, _ = s.db.Exec(ctx, `UPDATE tasks SET status='failed', error_code='QUEUE_ERROR', error_message='Task enqueue failed during retry', finished_at=now(), updated_at=now() WHERE task_no=$1`, taskNo)
+		if cleanupErr := s.FailTask(ctx, taskNo, "QUEUE_ERROR", "Task enqueue failed during retry"); cleanupErr != nil {
+			return fmt.Errorf("任务重试入队失败: %v；回滚冻结额度失败: %w", err, cleanupErr)
+		}
 		return err
 	}
 	return nil
@@ -520,14 +554,22 @@ func (s *TaskService) Retry(ctx context.Context, taskNo string) error {
 func (s *TaskService) FailTask(ctx context.Context, taskNo, errCode, errMsg string) error {
 	var userID int64
 	var estimated float64
-	s.db.QueryRow(ctx, `SELECT user_id, estimated_cost FROM tasks WHERE task_no=$1`, taskNo).Scan(&userID, &estimated)
-	_, err := s.db.Exec(ctx, `
-		UPDATE tasks SET status='failed', error_code=$1, error_message=$2, finished_at=now(), updated_at=now() WHERE task_no=$3`,
-		errCode, errMsg, taskNo)
-	if err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT user_id, estimated_cost FROM tasks WHERE task_no=$1`, taskNo).Scan(&userID, &estimated); err != nil {
 		return err
 	}
-	return s.billing.Unfreeze(ctx, userID, estimated, "task", taskNo)
+	return s.billing.UnfreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE tasks SET status='failed', error_code=$1, error_message=$2, finished_at=now(), updated_at=now()
+			WHERE task_no=$3 AND status='pending'`,
+			errCode, errMsg, taskNo)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("任务状态已变化，未释放冻结额度")
+		}
+		return nil
+	})
 }
 
 func (s *TaskService) addEvent(ctx context.Context, taskID int64, eventType string, payload map[string]interface{}) {

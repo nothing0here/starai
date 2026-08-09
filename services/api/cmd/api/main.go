@@ -53,6 +53,7 @@ func main() {
 	contentI18nSvc := service.NewContentI18nService(pool)
 	rtClient := runtime.NewClient(cfg.NewAPIBaseURL, cfg.NewAPIToken, cfg.NewAPITimeoutSec, cfg.NewAPIStreamTimeoutSec)
 	opsSvc := service.NewOpsService(pool, billingSvc, cfg.AdminJWT)
+	startBillingReconciler(ctx, opsSvc, billingSvc)
 	chatSvc := service.NewChatService(pool, modelSvc, billingSvc, rtClient, opsSvc)
 	taskSvc := service.NewTaskService(pool, modelSvc, billingSvc, qClient, opsSvc)
 	worksSvc := service.NewWorksService(pool)
@@ -206,6 +207,40 @@ func startExpiredWorksCleaner(ctx context.Context, worksSvc *service.WorksServic
 	go func() {
 		run()
 		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				run()
+			}
+		}
+	}()
+}
+
+func startBillingReconciler(ctx context.Context, opsSvc *service.OpsService, billingSvc *billing.Service) {
+	run := func() {
+		result, err := opsSvc.ReconcileFrozenBalances(ctx)
+		if err != nil {
+			log.Printf("billing reconciliation failed: %v", err)
+		} else if result.ReleasedChatFreezes+result.FailedTasks+result.FailedWorkflows > 0 {
+			log.Printf("billing reconciliation released chats=%d failed tasks=%d failed workflows=%d", result.ReleasedChatFreezes, result.FailedTasks, result.FailedWorkflows)
+		}
+		if rewarded, rewardErr := billingSvc.ReconcileReferralRewards(ctx, 100); rewardErr != nil {
+			log.Printf("referral reward reconciliation failed: %v", rewardErr)
+		} else if rewarded > 0 {
+			log.Printf("referral reward reconciliation processed=%d", rewarded)
+		}
+		if mismatches, auditErr := billingSvc.CountLedgerMismatches(ctx); auditErr != nil {
+			log.Printf("wallet ledger audit failed: %v", auditErr)
+		} else if mismatches > 0 {
+			log.Printf("warning: wallet ledger mismatches=%d", mismatches)
+		}
+	}
+	go func() {
+		run()
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {

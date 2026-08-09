@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -430,8 +431,8 @@ func (s *WalletService) RedeemCardAtomic(ctx context.Context, userID int64, code
 	if err = tx.Commit(ctx); err != nil {
 		return 0, err
 	}
-	if err = s.billing.AwardReferralOnRecharge(ctx, userID, value, "card", hash); err != nil {
-		return 0, err
+	if err = s.billing.AwardReferralOnRecharge(ctx, userID, value, value, "card", hash); err != nil {
+		log.Printf("card %s credited; referral reward deferred: %v", hash, err)
 	}
 	return value, nil
 }

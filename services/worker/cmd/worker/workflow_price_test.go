@@ -93,3 +93,48 @@ func TestApplyAgentModelDefaultsInfersSeedanceMode(t *testing.T) {
 		t.Fatalf("explicit generation mode should be preserved: %#v", explicit)
 	}
 }
+
+func TestSelectWorkflowActualCostDoesNotDoubleChargeFlatPrice(t *testing.T) {
+	if got := selectWorkflowActualCost(0.15, 0.15, 0.12); got != 0.15 {
+		t.Fatalf("cost = %v, want flat price 0.15", got)
+	}
+}
+
+func TestWorkerTokenReservationUsesRequestedMaxTokens(t *testing.T) {
+	rule := map[string]interface{}{
+		"billing_type":       "per_token",
+		"input_price_per_m":  float64(2),
+		"output_price_per_m": float64(8),
+	}
+	got := estimatePriceRuleCostWorker(rule, map[string]interface{}{
+		"_estimated_input_tokens": float64(1000),
+		"max_tokens":              float64(4000),
+	}, 0, 0)
+	want := float64(1000)*2/1_000_000 + float64(4000)*8/1_000_000
+	if math.Abs(got-want) > 0.000000001 {
+		t.Fatalf("cost = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestIncrementalWorkflowChargeDoesNotDoubleChargeSettledCost(t *testing.T) {
+	if got := incrementalChargeAmount(1.25, 0.4); math.Abs(got-0.85) > 0.000000001 {
+		t.Fatalf("incremental charge = %v, want 0.85", got)
+	}
+	if got := incrementalChargeAmount(0.4, 0.4); got != 0 {
+		t.Fatalf("incremental charge = %v, want 0", got)
+	}
+}
+
+func TestWorkerPerSecondPricingSupportsSecondsString(t *testing.T) {
+	rule := map[string]interface{}{"billing_type": "per_second", "unit_price": float64(0.5)}
+	if got := estimatePriceRuleCostWorker(rule, map[string]interface{}{"seconds": "8s"}, 0, 0); got != 4 {
+		t.Fatalf("cost = %v, want 4", got)
+	}
+}
+
+func TestUpstreamUsageTokensSupportsNestedUsage(t *testing.T) {
+	prompt, output := upstreamUsageTokens([]byte(`{"data":{"result":{"usage":{"input_tokens":120,"output_tokens":45}}}}`))
+	if prompt != 120 || output != 45 {
+		t.Fatalf("usage = %d/%d, want 120/45", prompt, output)
+	}
+}

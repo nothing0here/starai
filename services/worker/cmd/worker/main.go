@@ -188,13 +188,45 @@ func startWorkerHeartbeat(ctx context.Context, redisURL string) {
 
 func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p ImageTaskPayload) error {
 	var err error
-	pool.Exec(ctx, `UPDATE tasks SET status='running', started_at=now(), updated_at=now() WHERE task_no=$1`, p.TaskNo)
+	var claimedTaskID int64
+	var currentStatus string
+	if err := pool.QueryRow(ctx, `SELECT id, status FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&claimedTaskID, &currentStatus); err != nil {
+		return err
+	}
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer lockConn.Release()
+	var locked bool
+	if err := lockConn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, -claimedTaskID).Scan(&locked); err != nil {
+		return err
+	}
+	if !locked {
+		log.Printf("Task %s is already being processed; duplicate delivery ignored", p.TaskNo)
+		return nil
+	}
+	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, -claimedTaskID) }()
+	if err := pool.QueryRow(ctx, `SELECT status FROM tasks WHERE id=$1`, claimedTaskID).Scan(&currentStatus); err != nil {
+		return err
+	}
+	if currentStatus != "pending" && currentStatus != "running" {
+		log.Printf("Task %s has terminal/non-runnable status %s; delivery ignored", p.TaskNo, currentStatus)
+		return nil
+	}
+	if currentStatus == "pending" {
+		if _, err := pool.Exec(ctx, `UPDATE tasks SET status='running', started_at=COALESCE(started_at,now()), updated_at=now() WHERE id=$1 AND status='pending'`, claimedTaskID); err != nil {
+			return err
+		}
+	}
 
 	var requestMode, endpoint, newAPIModel string
 	var extraParamsRaw, runtimeRuleRaw []byte
 	var retentionDays int
-	pool.QueryRow(ctx, `SELECT request_mode, new_api_model, new_api_endpoint, new_api_extra_params, runtime_rule, retention_days FROM models WHERE id=$1`, p.ModelID).
-		Scan(&requestMode, &newAPIModel, &endpoint, &extraParamsRaw, &runtimeRuleRaw, &retentionDays)
+	if err := pool.QueryRow(ctx, `SELECT request_mode, new_api_model, new_api_endpoint, new_api_extra_params, runtime_rule, retention_days FROM models WHERE id=$1`, p.ModelID).
+		Scan(&requestMode, &newAPIModel, &endpoint, &extraParamsRaw, &runtimeRuleRaw, &retentionDays); err != nil {
+		return failTask(ctx, pool, p, "MODEL_NOT_FOUND", "生成模型不存在或已被删除")
+	}
 	isVideo := requestMode == "video"
 	isAudio := requestMode == "audio"
 	isImage := !isVideo && !isAudio
@@ -230,10 +262,9 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		if endpoint == "" {
 			endpoint = "/v1/images/generations"
 		}
-		if v, ok := p.Input["n"].(float64); ok {
-			generationCount = int(v)
-		} else if v, ok := p.Input["count"].(float64); ok {
-			generationCount = int(v)
+		generationCount = intAny(p.Input["n"])
+		if generationCount <= 0 {
+			generationCount = intAny(p.Input["count"])
 		}
 		if generationCount < 1 {
 			generationCount = 1
@@ -308,6 +339,7 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", msg)
 	}
 
+	promptTokens, outputTokens := upstreamUsageTokens(respBody)
 	if !(isImage && isVideoImageAPI(endpoint, newAPIModel)) {
 		resultData, upstreamID = parseUpstreamMedia(respBody)
 		if upstreamID != "" {
@@ -316,10 +348,14 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		if len(resultData) == 0 && upstreamID != "" {
 			pollCfg := parsePollConfig(runtimeRule, endpoint)
 			log.Printf("Task %s upstream async id=%s poll=%s interval=%s timeout=%s", p.TaskNo, upstreamID, pollCfg.Path, pollCfg.Interval, pollCfg.Timeout)
-			resultData, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, p.TaskNo)
+			var pollPromptTokens, pollOutputTokens int
+			resultData, pollPromptTokens, pollOutputTokens, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, p.TaskNo)
 			if err != nil {
 				log.Printf("Task %s poll failed: %v", p.TaskNo, err)
 				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
+			}
+			if pollPromptTokens > 0 || pollOutputTokens > 0 {
+				promptTokens, outputTokens = pollPromptTokens, pollOutputTokens
 			}
 		}
 	}
@@ -342,6 +378,9 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	var estimated float64
 	pool.QueryRow(ctx, `SELECT id, estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&taskID, &estimated)
 	actualCost := estimated
+	if promptTokens > 0 || outputTokens > 0 {
+		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, p.Input, promptTokens, outputTokens)
+	}
 
 	var output, meta []byte
 	workType := "image"
@@ -450,16 +489,25 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	} else if isAudio {
 		txType, remark = "audio_usage", "音频生成"
 	}
-	if !boolInput(p.Input, "_skip_billing") {
-		if err := chargeBilling(ctx, pool, p.UserID, estimated, actualCost, "task", p.TaskNo, txType, remark); err != nil {
-			return fmt.Errorf("task %s billing: %w", p.TaskNo, err)
+	if boolInput(p.Input, "_skip_billing") {
+		if _, err := pool.Exec(ctx, `
+			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$3`,
+			output, actualCost, p.TaskNo); err != nil {
+			return fmt.Errorf("task %s finalize: %w", p.TaskNo, err)
 		}
-	}
-
-	if _, err := pool.Exec(ctx, `
-		UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$3`,
-		output, actualCost, p.TaskNo); err != nil {
-		return fmt.Errorf("task %s finalize: %w", p.TaskNo, err)
+	} else if err := chargeBillingWithFinalize(ctx, pool, p.UserID, estimated, actualCost, "task", p.TaskNo, txType, remark, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$3 AND status='running'`,
+			output, actualCost, p.TaskNo)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("task is no longer running")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("task %s billing/finalize: %w", p.TaskNo, err)
 	}
 
 	publicID := fmt.Sprintf("work_%d", time.Now().UnixNano())
@@ -1142,7 +1190,7 @@ func runBananaImageBatch(ctx context.Context, pool *pgxpool.Pool, conn connectio
 		}
 		if len(items) == 0 && upstreamID != "" {
 			log.Printf("Task %s banana image #%d/%d async id=%s poll=%s", taskNo, i+1, count, upstreamID, pollCfg.Path)
-			items, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, taskNo)
+			items, _, _, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, taskNo)
 			if err != nil {
 				return nil, strings.Join(upstreamIDs, ","), err
 			}
@@ -2156,7 +2204,7 @@ func parseProgressPercent(raw string) int {
 	return -1
 }
 
-func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, error) {
+func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, int, int, error) {
 	escapedID := url.PathEscape(upstreamID)
 	pollURL := conn.BaseURL + strings.Replace(cfg.Path, "{id}", escapedID, 1)
 	deadline := time.Now().Add(cfg.Timeout)
@@ -2177,7 +2225,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			continue
 		}
 		if statusCode == 404 {
-			return nil, fmt.Errorf("上游任务不存在(404)，请检查 poll_path 与任务 ID")
+			return nil, 0, 0, fmt.Errorf("上游任务不存在(404)，请检查 poll_path 与任务 ID")
 		}
 		if statusCode >= 400 {
 			consecutiveErrors++
@@ -2185,7 +2233,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 				log.Printf("Task %s poll #%d HTTP %d: %s", taskNo, attempt, statusCode, truncateText(string(body), 300))
 			}
 			if consecutiveErrors >= 12 {
-				return nil, fmt.Errorf("上游轮询持续失败(HTTP %d): %s", statusCode, truncateText(upstreamErrorMessage(body), 200))
+				return nil, 0, 0, fmt.Errorf("上游轮询持续失败(HTTP %d): %s", statusCode, truncateText(upstreamErrorMessage(body), 200))
 			}
 			time.Sleep(cfg.Interval)
 			continue
@@ -2223,18 +2271,20 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			if msg == "" || msg == "模型服务异常" {
 				msg = "上游任务失败"
 			}
-			return nil, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
+			return nil, 0, 0, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
 		case "succeeded", "success", "completed", "done", "finished":
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
-				return nil, fmt.Errorf("%s", failMsg)
+				return nil, 0, 0, fmt.Errorf("%s", failMsg)
 			}
 			if items := extractMediaItems(raw); len(items) > 0 {
 				log.Printf("Task %s poll #%d got %d media item(s)", taskNo, attempt, len(items))
-				return items, nil
+				promptTokens, outputTokens := upstreamUsageTokens(body)
+				return items, promptTokens, outputTokens, nil
 			}
 			if mediaURL := firstSuccessMediaURL(raw, upstreamID, conn); mediaURL != "" {
 				log.Printf("Task %s poll #%d got media url: %s", taskNo, attempt, truncateText(mediaURL, 100))
-				return []mediaItem{{URL: mediaURL}}, nil
+				promptTokens, outputTokens := upstreamUsageTokens(body)
+				return []mediaItem{{URL: mediaURL}}, promptTokens, outputTokens, nil
 			}
 			successPolls++
 			if successPolls < maxSuccessWait {
@@ -2247,7 +2297,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 				time.Sleep(cfg.Interval)
 				continue
 			}
-			return nil, fmt.Errorf("上游未返回可下载的视频地址，请稍后重试: %s", truncateText(string(body), 400))
+			return nil, 0, 0, fmt.Errorf("上游未返回可下载的视频地址，请稍后重试: %s", truncateText(string(body), 400))
 		case "queued", "in_progress", "processing", "pending", "running", "not_start", "":
 			// keep polling
 		default:
@@ -2257,7 +2307,32 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 		}
 		time.Sleep(cfg.Interval)
 	}
-	return nil, fmt.Errorf("生成超时（已轮询 %s），请稍后重试", cfg.Timeout)
+	return nil, 0, 0, fmt.Errorf("生成超时（已轮询 %s），请稍后重试", cfg.Timeout)
+}
+
+func upstreamUsageTokens(body []byte) (int, int) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return 0, 0
+	}
+	queue := []map[string]interface{}{raw}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if usage, ok := current["usage"].(map[string]interface{}); ok {
+			prompt := intAny(firstNonNil(usage["prompt_tokens"], usage["input_tokens"], usage["text_tokens"]))
+			output := intAny(firstNonNil(usage["completion_tokens"], usage["output_tokens"], usage["audio_tokens"]))
+			if prompt > 0 || output > 0 {
+				return prompt, output
+			}
+		}
+		for _, key := range []string{"data", "result", "output", "task"} {
+			if child, ok := current[key].(map[string]interface{}); ok {
+				queue = append(queue, child)
+			}
+		}
+	}
+	return 0, 0
 }
 
 func upstreamErrorMessage(body []byte) string {
@@ -2313,11 +2388,21 @@ func redactSensitiveLogText(s string) string {
 
 func failTask(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, code, msg string) error {
 	var estimated float64
-	pool.QueryRow(ctx, `SELECT estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&estimated)
-	pool.Exec(ctx, `
-		UPDATE tasks SET status='failed', error_code=$1, error_message=$2, finished_at=now(), updated_at=now() WHERE task_no=$3`,
-		code, msg, p.TaskNo)
-	if err := unfreezeBilling(ctx, pool, p.UserID, estimated, "task", p.TaskNo); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&estimated); err != nil {
+		return err
+	}
+	if err := unfreezeBillingWithFinalize(ctx, pool, p.UserID, estimated, "task", p.TaskNo, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE tasks SET status='failed', error_code=$1, error_message=$2, finished_at=now(), updated_at=now()
+			WHERE task_no=$3 AND status IN ('pending','running')`, code, msg, p.TaskNo)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("task is no longer active")
+		}
+		return nil
+	}); err != nil {
 		return fmt.Errorf("task %s release billing: %w", p.TaskNo, err)
 	}
 	insertNotification(ctx, pool, p.UserID, "生成失败",
@@ -2338,73 +2423,80 @@ func insertNotification(ctx context.Context, pool *pgxpool.Pool, userID int64, t
 		userID, title, content, typ)
 }
 
-func chargeBilling(ctx context.Context, pool *pgxpool.Pool, userID int64, freezeAmount, actualAmount float64, refType, refID, txType, remark string) error {
+func chargeBillingWithFinalize(ctx context.Context, pool *pgxpool.Pool, userID int64, freezeAmount, actualAmount float64, refType, refID, txType, remark string, finalize func(pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	lockedAmount, err := lockedFreezeAmount(ctx, tx, userID, refType, refID)
-	if err != nil {
-		return err
-	}
-	if lockedAmount <= 0 {
-		return nil
-	}
-	if freezeAmount <= 0 || freezeAmount > lockedAmount {
-		freezeAmount = lockedAmount
-	}
 	var balance, frozen float64
 	if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance, &frozen); err != nil {
 		return err
 	}
-	charge := actualAmount
-	if charge < 0 {
-		charge = 0
-	}
-	if charge > freezeAmount {
-		charge = freezeAmount
-	}
-	newBalance := balance - charge
-	newFrozen := frozen - freezeAmount
-	if newFrozen < 0 {
-		newFrozen = 0
-	}
-	if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, newBalance, newFrozen, userID); err != nil {
+	lockedAmount, err := lockedFreezeAmount(ctx, tx, userID, refType, refID)
+	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='charged', released_at=now() WHERE user_id=$1 AND ref_type=$2 AND ref_id=$3 AND status='frozen'`, userID, refType, refID); err != nil {
-		return err
+	if lockedAmount <= 0 && actualAmount > 0 {
+		return fmt.Errorf("active billing reservation not found for %s/%s", refType, refID)
 	}
-	if charge > 0 {
-		if _, err = tx.Exec(ctx, `INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark) VALUES ($1,$2,'out',$3,$4,$5,$6,$7)`, userID, txType, charge, newBalance, refType, refID, remark); err != nil {
+	if lockedAmount > 0 {
+		_ = freezeAmount
+		charge := actualAmount
+		if charge < 0 {
+			charge = 0
+		}
+		newBalance := balance - charge
+		newFrozen := frozen - lockedAmount
+		if newFrozen < 0 {
+			newFrozen = 0
+		}
+		if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, newBalance, newFrozen, userID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='charged', released_at=now() WHERE user_id=$1 AND ref_type=$2 AND ref_id=$3 AND status='frozen'`, userID, refType, refID); err != nil {
+			return err
+		}
+		if charge > 0 {
+			if _, err = tx.Exec(ctx, `INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark) VALUES ($1,$2,'out',$3,$4,$5,$6,$7)`, userID, txType, charge, newBalance, refType, refID, remark); err != nil {
+				return err
+			}
+		}
+	}
+	if finalize != nil {
+		if err = finalize(tx); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
 }
 
-func unfreezeBilling(ctx context.Context, pool *pgxpool.Pool, userID int64, amount float64, refType, refID string) error {
+func unfreezeBillingWithFinalize(ctx context.Context, pool *pgxpool.Pool, userID int64, amount float64, refType, refID string, finalize func(pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+		return err
+	}
 	lockedAmount, err := lockedFreezeAmount(ctx, tx, userID, refType, refID)
 	if err != nil {
 		return err
 	}
-	if lockedAmount <= 0 {
-		return nil
+	if lockedAmount > 0 {
+		_ = amount
+		if _, err = tx.Exec(ctx, `UPDATE wallets SET frozen_compute = GREATEST(frozen_compute - $1, 0), updated_at=now() WHERE user_id=$2`, lockedAmount, userID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='released', released_at=now() WHERE user_id=$1 AND ref_type=$2 AND ref_id=$3 AND status='frozen'`, userID, refType, refID); err != nil {
+			return err
+		}
 	}
-	if amount <= 0 || amount > lockedAmount {
-		amount = lockedAmount
-	}
-	if _, err = tx.Exec(ctx, `UPDATE wallets SET frozen_compute = GREATEST(frozen_compute - $1, 0), updated_at=now() WHERE user_id=$2`, amount, userID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='released', released_at=now() WHERE user_id=$1 AND ref_type=$2 AND ref_id=$3 AND status='frozen'`, userID, refType, refID); err != nil {
-		return err
+	if finalize != nil {
+		if err = finalize(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }

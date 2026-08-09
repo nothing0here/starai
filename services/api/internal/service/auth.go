@@ -104,24 +104,40 @@ func (s *AuthService) Register(ctx context.Context, email, password, nickname, r
 	if err != nil {
 		return nil, err
 	}
+	if err = s.grantSignupBonusTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.GrantSignupBonus(ctx, userID)
 	return s.issueToken(userID, publicID, nickname, nil, "normal", "普通会员", memberLevelID, referral, referrerID, nil, "zh-CN")
 }
 
-// GrantSignupBonus credits the configured signup bonus (system_configs.signup_bonus) to a new user.
-func (s *AuthService) GrantSignupBonus(ctx context.Context, userID int64) {
+func (s *AuthService) grantSignupBonusTx(ctx context.Context, tx pgx.Tx, userID int64) error {
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `SELECT value FROM system_configs WHERE key='signup_bonus'`).Scan(&raw); err != nil {
-		return
+	if err := tx.QueryRow(ctx, `SELECT value FROM system_configs WHERE key='signup_bonus'`).Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
 	}
 	var bonus float64
 	if json.Unmarshal(raw, &bonus) != nil || bonus <= 0 {
-		return
+		return nil
 	}
-	s.billing.Credit(ctx, userID, bonus, "signup_bonus", "user", fmt.Sprintf("%d", userID), "注册赠送算力")
+	var balance float64
+	if err := tx.QueryRow(ctx, `SELECT compute_balance FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance); err != nil {
+		return err
+	}
+	newBalance := balance + bonus
+	if _, err := tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, updated_at=now() WHERE user_id=$2`, newBalance, userID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark)
+		VALUES ($1,'signup_bonus','in',$2,$3,'user',$4,'注册赠送算力')`,
+		userID, bonus, newBalance, fmt.Sprintf("%d", userID))
+	return err
 }
 
 func (s *AuthService) LoginPassword(ctx context.Context, email, password string) (*AuthResult, error) {

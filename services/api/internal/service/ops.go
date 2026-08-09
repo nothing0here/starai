@@ -251,16 +251,21 @@ func (s *OpsService) Checkin(ctx context.Context, userID int64) (float64, error)
 		return 0, errors.New("签到功能未开启")
 	}
 	reward := s.configFloat(ctx, "daily_checkin_reward", 5)
-	ct, err := s.db.Exec(ctx,
-		`INSERT INTO daily_checkins (user_id, checkin_date, reward) VALUES ($1, CURRENT_DATE, $2)
-		 ON CONFLICT (user_id, checkin_date) DO NOTHING`, userID, reward)
-	if err != nil {
-		return 0, err
+	if reward <= 0 {
+		return 0, errors.New("签到奖励配置无效")
 	}
-	if ct.RowsAffected() == 0 {
-		return 0, errors.New("今日已签到")
-	}
-	if err := s.billing.Credit(ctx, userID, reward, "daily_checkin", "checkin", time.Now().Format("2006-01-02"), "每日签到奖励"); err != nil {
+	if err := s.billing.CreditWithFinalize(ctx, userID, reward, "daily_checkin", "checkin", time.Now().Format("2006-01-02"), "每日签到奖励", func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx,
+			`INSERT INTO daily_checkins (user_id, checkin_date, reward) VALUES ($1, CURRENT_DATE, $2)
+			 ON CONFLICT (user_id, checkin_date) DO NOTHING`, userID, reward)
+		if err != nil {
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return errors.New("今日已签到")
+		}
+		return nil
+	}); err != nil {
 		return 0, err
 	}
 	_ = s.CreateNotification(ctx, userID, "签到成功", fmt.Sprintf("每日签到获得 %.2f 算力", reward), "reward")

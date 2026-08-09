@@ -244,42 +244,53 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 			return nil, err
 		}
 	}
-	estimated := 0.0
-	if v, ok := def.PriceRule["unit_price"].(float64); ok {
-		estimated = v
+	nodeEstimate := 0.0
+	for _, node := range def.Nodes {
+		nodeEstimate += node.Cost
 	}
-	if estimated == 0 {
-		for _, n := range def.Nodes {
-			estimated += n.Cost
-		}
-	}
-	estimated += s.estimateAgentRuntimeCost(ctx, def.RuntimeConfig, inputs)
+	runtimeEstimate := s.estimateAgentRuntimeCost(ctx, def.RuntimeConfig, inputs)
+	estimated := estimateAgentProjectCost(def.PriceRule, nodeEstimate, runtimeEstimate)
 	publicID := util.NewPublicID("wfp")
 	inputsJSON, _ := json.Marshal(inputs)
-	if err := s.billing.Freeze(ctx, userID, estimated, "workflow", publicID); err != nil {
+	var projectID int64
+	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO workflow_projects (public_id, user_id, workflow_id, status, inputs, estimated_cost)
+			VALUES ($1,$2,$3,'pending',$4,$5) RETURNING id`,
+			publicID, userID, wfID, inputsJSON, estimated).Scan(&projectID)
+	}); err != nil {
 		if errors.Is(err, billing.ErrInsufficientBalance) {
 			return s.createBalanceFailedProject(ctx, userID, wfID, publicID, inputsJSON, estimated)
 		}
-		return nil, err
-	}
-	var projectID int64
-	err = s.db.QueryRow(ctx, `
-		INSERT INTO workflow_projects (public_id, user_id, workflow_id, status, inputs, estimated_cost)
-		VALUES ($1,$2,$3,'pending',$4,$5) RETURNING id`,
-		publicID, userID, wfID, inputsJSON, estimated).Scan(&projectID)
-	if err != nil {
-		s.billing.Unfreeze(ctx, userID, estimated, "workflow", publicID)
 		return nil, err
 	}
 	if stringValue(def.RuntimeConfig["agent_mode"]) == "comic_drama" {
 		s.attachWorkflowToComicProject(ctx, userID, projectID, inputs)
 	}
 	if err := queue.EnqueueWorkflowTask(s.queue, queue.WorkflowTaskPayload{ProjectID: projectID, UserID: userID}); err != nil {
-		s.db.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message='入队失败' WHERE id=$1`, projectID)
-		s.billing.Unfreeze(ctx, userID, estimated, "workflow", publicID)
+		cleanupErr := s.billing.UnfreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
+			_, updateErr := tx.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message='入队失败', finished_at=now(), updated_at=now() WHERE id=$1`, projectID)
+			return updateErr
+		})
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("工作流入队失败: %v；回滚冻结额度失败: %w", err, cleanupErr)
+		}
 		return nil, err
 	}
 	return s.GetProject(ctx, userID, publicID)
+}
+
+func estimateAgentProjectCost(priceRule map[string]interface{}, nodeEstimate, runtimeEstimate float64) float64 {
+	if stringValue(priceRule["billing_type"]) == "per_request" && floatValue(priceRule["unit_price"]) > 0 {
+		return floatValue(priceRule["unit_price"])
+	}
+	if runtimeEstimate > 0 {
+		return runtimeEstimate
+	}
+	if nodeEstimate > 0 {
+		return nodeEstimate
+	}
+	return 0
 }
 
 func mergeVideoUpscaleRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
@@ -1420,11 +1431,16 @@ func normalizeComicVideoResolution(value string) string {
 
 func (s *AgentService) estimateModelCostByCode(ctx context.Context, code string, params map[string]interface{}, promptTokens, outputTokens int) float64 {
 	var raw []byte
-	if err := s.db.QueryRow(ctx, `SELECT price_rule FROM models WHERE code=$1 AND is_enabled=true`, code).Scan(&raw); err != nil {
+	var category string
+	if err := s.db.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE code=$1 AND is_enabled=true`, code).Scan(&raw, &category); err != nil {
 		return 0
 	}
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
+	if category == "audio" {
+		params = copyAgentMap(params)
+		params["_billing_item_count"] = billingItemCount(params)
+	}
 	return estimateCostFromPriceRule(rule, params, promptTokens, outputTokens)
 }
 
@@ -1444,17 +1460,16 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 	case "per_token":
 		inPrice := perAgentTokenPrice(rule, "input_price")
 		outPrice := perAgentTokenPrice(rule, "output_price")
-		if promptTokens <= 0 {
-			promptTokens = 500
-		}
-		if outputTokens <= 0 {
-			outputTokens = 1000
-		}
+		promptTokens, outputTokens = estimatedTokenCounts(rule, params, promptTokens, outputTokens)
 		cost := float64(promptTokens)*inPrice + float64(outputTokens)*outPrice
 		if surcharge := floatValue(rule["surcharge_per_m"]); surcharge > 0 {
 			cost += float64(promptTokens+outputTokens) / 1_000_000 * surcharge
 		}
-		return cost
+		multiplier := floatValue(params["_billing_item_count"])
+		if multiplier <= 0 {
+			multiplier = 1
+		}
+		return cost * multiplier
 	case "per_second":
 		unit := floatValue(rule["unit_price"])
 		duration := parseDurationSeconds(params)
@@ -1498,21 +1513,45 @@ func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID 
 	if status != "failed" {
 		return errors.New("仅失败的项目可重试")
 	}
-	if err := s.billing.Freeze(ctx, userID, estimated, "workflow", publicID); err != nil {
+	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
+		var currentStatus string
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow_projects WHERE id=$1 FOR UPDATE`, projectID).Scan(&currentStatus); err != nil {
+			return err
+		}
+		if currentStatus != "failed" {
+			return errors.New("仅失败的项目可重试")
+		}
+		var locked bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, projectID).Scan(&locked); err != nil {
+			return err
+		}
+		if !locked {
+			return errors.New("项目正在处理中，请稍后重试")
+		}
+		result, err := tx.Exec(ctx, `UPDATE workflow_projects SET status='pending', error_message=NULL, finished_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, projectID)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return errors.New("项目状态已变化，请刷新后重试")
+		}
+		return nil
+	}); err != nil {
 		if errors.Is(err, billing.ErrInsufficientBalance) {
 			return errors.New(billing.InsufficientBalanceMsg)
 		}
 		return err
 	}
-	if _, err := s.db.Exec(ctx, `UPDATE workflow_projects SET status='pending', error_message=NULL, finished_at=NULL, updated_at=now() WHERE id=$1`, projectID); err != nil {
-		_ = s.billing.Unfreeze(ctx, userID, estimated, "workflow", publicID)
-		return err
-	}
 	// 保留既有节点记录。工作流会复用 outputs 中已成功的阶段；保留记录还能让
 	// 最终结算包含失败前已经实际发生的媒体成本，并为运营排障留下审计轨迹。
 	if err := queue.EnqueueWorkflowTask(s.queue, queue.WorkflowTaskPayload{ProjectID: projectID, UserID: userID}); err != nil {
-		_, _ = s.db.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message='重试入队失败', finished_at=now(), updated_at=now() WHERE id=$1`, projectID)
-		_ = s.billing.Unfreeze(ctx, userID, estimated, "workflow", publicID)
+		cleanupErr := s.billing.UnfreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
+			_, updateErr := tx.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message='重试入队失败', finished_at=now(), updated_at=now() WHERE id=$1 AND status='pending'`, projectID)
+			return updateErr
+		})
+		if cleanupErr != nil {
+			return fmt.Errorf("工作流重试入队失败: %v；回滚冻结额度失败: %w", err, cleanupErr)
+		}
 		return err
 	}
 	return nil
@@ -1602,27 +1641,68 @@ func (s *AgentService) ReplaceComicProjectMedia(ctx context.Context, userID int6
 
 func (s *AgentService) CancelProject(ctx context.Context, userID int64, publicID string) error {
 	var projectID int64
-	var status string
 	var estimated float64
 	if err := s.db.QueryRow(ctx,
-		`SELECT id, status, estimated_cost FROM workflow_projects WHERE public_id=$1 AND user_id=$2`, publicID, userID).
-		Scan(&projectID, &status, &estimated); err != nil {
+		`SELECT id, estimated_cost FROM workflow_projects WHERE public_id=$1 AND user_id=$2`, publicID, userID).
+		Scan(&projectID, &estimated); err != nil {
 		return err
 	}
-	if status != "pending" && status != "waiting_confirm" {
-		return errors.New("仅排队中或待确认的项目可取消")
-	}
-	tag, err := s.db.Exec(ctx, `
-		UPDATE workflow_projects
-		SET status='canceled', error_message='用户已取消', finished_at=now(), updated_at=now()
-		WHERE id=$1 AND status IN ('pending','waiting_confirm')`, projectID)
+	cumulativeCost, chargeCost, err := s.accruedWorkflowCost(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return errors.New("项目状态已变化，请刷新后重试")
+	finalize := func(tx pgx.Tx) error {
+		var lockAvailable bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, projectID).Scan(&lockAvailable); err != nil {
+			return err
+		}
+		if !lockAvailable {
+			return errors.New("项目正在执行，暂时无法安全取消")
+		}
+		tag, err := tx.Exec(ctx, `
+			UPDATE workflow_projects
+			SET status='canceled', actual_cost=$2, error_message='用户已取消', finished_at=now(), updated_at=now()
+			WHERE id=$1 AND status IN ('pending','waiting_confirm')`, projectID, cumulativeCost)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return errors.New("仅排队中或待确认的项目可取消")
+		}
+		return nil
 	}
-	return s.billing.Unfreeze(ctx, userID, estimated, "workflow", publicID)
+	if chargeCost > 0 {
+		return s.billing.ChargeWithFinalize(ctx, userID, estimated, chargeCost, "workflow", publicID, "workflow_usage", "工作流取消前已完成步骤", finalize)
+	}
+	return s.billing.UnfreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, finalize)
+}
+
+func (s *AgentService) accruedWorkflowCost(ctx context.Context, projectID int64) (float64, float64, error) {
+	var raw []byte
+	var nodeCost, settledCost float64
+	if err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(w.price_rule, '{}'::jsonb),
+		       COALESCE((SELECT SUM(n.cost) FROM workflow_node_runs n WHERE n.project_id=p.id), 0),
+		       p.actual_cost
+		FROM workflow_projects p
+		JOIN workflow_definitions w ON w.id=p.workflow_id
+		WHERE p.id=$1`, projectID).Scan(&raw, &nodeCost, &settledCost); err != nil {
+		return 0, 0, err
+	}
+	rule := map[string]interface{}{}
+	_ = json.Unmarshal(raw, &rule)
+	cumulativeCost := nodeCost
+	if unitPrice := floatValue(rule["unit_price"]); stringValue(rule["billing_type"]) == "per_request" && nodeCost > 0 && unitPrice > 0 {
+		cumulativeCost = unitPrice
+	}
+	if cumulativeCost < 0 {
+		cumulativeCost = 0
+	}
+	chargeCost := cumulativeCost - settledCost
+	if chargeCost < 0 {
+		chargeCost = 0
+	}
+	return cumulativeCost, chargeCost, nil
 }
 
 func pruneWorkflowOutputsForRetry(outputs map[string]interface{}, nodeID string) {
@@ -1778,6 +1858,9 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 			}
 		}
 	}
+	if err := validateWorkflowPriceRule(in.PriceRule); err != nil {
+		return err
+	}
 	nodes, _ := json.Marshal(in.Nodes)
 	if len(in.Nodes) == 0 {
 		nodes = []byte("[]")
@@ -1800,6 +1883,17 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 		  name=$2, description=$3, icon=$4, category=$5, nodes=$6, input_schema=$7, price_rule=$8, display_config=$9, runtime_config=$10, is_enabled=$11, sort_order=$12, updated_at=now()`,
 		in.Code, in.Name, desc, icon, in.Category, nodes, schema, price, display, runtime, in.IsEnabled, in.SortOrder)
 	return err
+}
+
+func validateWorkflowPriceRule(rule map[string]interface{}) error {
+	billingType := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
+	if billingType != "per_request" && billingType != "model_actual" && billingType != "dynamic" {
+		return fmt.Errorf("不支持的工作流计费类型：%s", billingType)
+	}
+	if floatValue(rule["unit_price"]) < 0 {
+		return errors.New("工作流单价不能为负数")
+	}
+	return nil
 }
 
 func normalizeVideoRedrawAgentInput(in AgentUpsertInput) AgentUpsertInput {

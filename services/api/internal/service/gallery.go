@@ -165,11 +165,14 @@ func (s *GalleryService) Clone(ctx context.Context, publicID string, userID int6
 	if err != nil {
 		return nil, err
 	}
-	if item.IsPaid && item.Price > 0 {
+	charged := false
+	paid := item.IsPaid && item.Price > 0
+	if paid {
 		if userID <= 0 {
 			return nil, errors.New("请先登录后再使用付费作品")
 		}
-		if err := s.chargePaidClone(ctx, userID, item.Price, publicID); err != nil {
+		charged, err = s.chargePaidClone(ctx, userID, item.Price, publicID)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -177,7 +180,8 @@ func (s *GalleryService) Clone(ctx context.Context, publicID string, userID int6
 	return map[string]interface{}{
 		"model_code": item.ModelCode,
 		"prompt":     item.Prompt,
-		"charged":    item.IsPaid && item.Price > 0,
+		"charged":    charged,
+		"purchased":  paid,
 		"price":      item.Price,
 	}, nil
 }
@@ -312,33 +316,50 @@ func (s *GalleryService) ListAdminWithID(ctx context.Context, status string, pag
 	return items, total, nil
 }
 
-func (s *GalleryService) chargePaidClone(ctx context.Context, userID int64, amount float64, publicID string) error {
+func (s *GalleryService) chargePaidClone(ctx context.Context, userID int64, amount float64, publicID string) (bool, error) {
 	if amount <= 0 {
-		return nil
+		return false, nil
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback(ctx)
 	var balance, frozen float64
 	if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance, &frozen); err != nil {
-		return err
+		return false, err
+	}
+	var purchased bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM gallery_purchases WHERE user_id=$1 AND gallery_public_id=$2)`, userID, publicID).Scan(&purchased); err != nil {
+		return false, err
+	}
+	if purchased {
+		if err = tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	if balance-frozen < amount {
-		return errors.New("账户余额不足")
+		return false, errors.New("账户余额不足")
 	}
 	nextBalance := balance - amount
 	if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, updated_at=now() WHERE user_id=$2`, nextBalance, userID); err != nil {
-		return err
+		return false, err
 	}
-	if _, err = tx.Exec(ctx, `
+	var transactionID int64
+	if err = tx.QueryRow(ctx, `
 		INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark)
-		VALUES ($1,'gallery_paid_clone','out',$2,$3,'gallery',$4,'灵感广场付费同款')`,
-		userID, amount, nextBalance, publicID); err != nil {
-		return err
+		VALUES ($1,'gallery_paid_clone','out',$2,$3,'gallery',$4,'灵感广场付费同款') RETURNING id`,
+		userID, amount, nextBalance, publicID).Scan(&transactionID); err != nil {
+		return false, err
 	}
-	return tx.Commit(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO gallery_purchases (user_id, gallery_public_id, amount, wallet_transaction_id) VALUES ($1,$2,$3,$4)`, userID, publicID, amount, transactionID); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func applyGalleryMedia(g *GalleryItemDTO, metaRaw []byte, workThumb *string) {

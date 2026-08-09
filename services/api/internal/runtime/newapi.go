@@ -56,16 +56,33 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model       string      `json:"model"`
-	Messages    interface{} `json:"messages"`
-	Stream      bool        `json:"stream"`
-	Temperature float64     `json:"temperature,omitempty"`
+	Model         string             `json:"model"`
+	Messages      interface{}        `json:"messages"`
+	Stream        bool               `json:"stream"`
+	StreamOptions *ChatStreamOptions `json:"stream_options,omitempty"`
+	Temperature   float64            `json:"temperature,omitempty"`
+}
+
+type ChatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type ChatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens             int `json:"prompt_tokens"`
+	CompletionTokens         int `json:"completion_tokens"`
+	TotalTokens              int `json:"total_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	PromptTokensDetails      struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+func (u ChatUsage) CachedInputTokens() int {
+	if u.CacheReadInputTokens > 0 {
+		return u.CacheReadInputTokens
+	}
+	return u.PromptTokensDetails.CachedTokens
 }
 
 type ChatResponse struct {
@@ -120,6 +137,13 @@ func (c *Client) ChatCompletionStream(ctx context.Context, endpoint string, req 
 
 func (c *Client) ChatCompletionStreamWithConfig(ctx context.Context, endpoint string, req ChatRequest, cfg map[string]interface{}) (<-chan StreamChunk, error) {
 	req.Stream = true
+	includeUsage := true
+	if configured, ok := cfg["stream_include_usage"].(bool); ok {
+		includeUsage = configured
+	}
+	if includeUsage {
+		req.StreamOptions = &ChatStreamOptions{IncludeUsage: true}
+	}
 	if endpoint == "" {
 		endpoint = "/v1/chat/completions"
 	}

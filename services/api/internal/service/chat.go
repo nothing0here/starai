@@ -141,6 +141,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	if err != nil {
 		return nil, err
 	}
+	prepareChatBillingParams(&input)
 	estimated := s.models.EstimateCost(model, input.Params, 0, 0)
 	requestID := util.NewRequestID()
 
@@ -164,7 +165,10 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	resp, err := s.runtime.ChatCompletionWithConfig(ctx, model.NewAPIEndpoint, req, model.NewAPIExtraParams)
 	duration := int(time.Since(start).Milliseconds())
 	if err != nil {
-		s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
+		if unfreezeErr := s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID); unfreezeErr != nil {
+			s.logCall(ctx, requestID, userID, model.ID, nil, 0, 0, 0, 0, "billing_failed", unfreezeErr, duration)
+			return nil, fmt.Errorf("模型调用失败: %v；释放冻结额度失败: %w", err, unfreezeErr)
+		}
 		s.logCall(ctx, requestID, userID, model.ID, nil, 0, 0, 0, 0, "failed", err, duration)
 		return nil, err
 	}
@@ -172,9 +176,13 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	if len(resp.Choices) > 0 {
 		content = resp.Choices[0].Message.Content
 	}
-	actualCost := s.models.EstimateCost(model, input.Params, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费")
-	s.logCall(ctx, requestID, userID, model.ID, nil, resp.Usage.PromptTokens, resp.Usage.CompletionTokens, resp.Usage.TotalTokens, actualCost, "success", nil, duration)
+	usage := normalizedChatUsage(resp.Usage, input, content)
+	actualCost := s.models.EstimateCostWithTokenDetails(model, input.Params, usage.PromptTokens, usage.CompletionTokens, usage.CachedInputTokens(), usage.CacheCreationInputTokens)
+	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
+		s.logCall(ctx, requestID, userID, model.ID, nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, 0, "billing_failed", err, duration)
+		return nil, fmt.Errorf("对话结算失败: %w", err)
+	}
+	s.logCall(ctx, requestID, userID, model.ID, nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, actualCost, "success", nil, duration)
 
 	convID := input.ConversationID
 	if !input.Ephemeral {
@@ -190,18 +198,19 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, Cost: actualCost}, nil
 }
 
-func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input CompletionInput) (string, <-chan runtime.StreamChunk, error) {
+func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input CompletionInput) (string, <-chan runtime.StreamChunk, float64, error) {
 	model, err := s.ResolveInputModel(ctx, &input)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
+	prepareChatBillingParams(&input)
 	estimated := s.models.EstimateCost(model, input.Params, 0, 0)
 	requestID := util.NewRequestID()
 	if err := s.billing.Freeze(ctx, userID, estimated, "chat", requestID); err != nil {
 		if errors.Is(err, billing.ErrInsufficientBalance) {
-			return "", nil, s.balanceError(ctx, userID, input, requestID)
+			return "", nil, 0, s.balanceError(ctx, userID, input, requestID)
 		}
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	temp := 0.7
 	if v, ok := input.Params["temperature"].(float64); ok {
@@ -216,10 +225,12 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 	}
 	ch, err := s.runtime.ChatCompletionStreamWithConfig(ctx, model.NewAPIEndpoint, req, model.NewAPIExtraParams)
 	if err != nil {
-		s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
-		return "", nil, err
+		if unfreezeErr := s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID); unfreezeErr != nil {
+			return "", nil, 0, fmt.Errorf("模型流启动失败: %v；释放冻结额度失败: %w", err, unfreezeErr)
+		}
+		return "", nil, 0, err
 	}
-	return requestID, ch, nil
+	return requestID, ch, estimated, nil
 }
 
 func chatRequestMessages(messages []runtime.ChatMessage, params map[string]interface{}) interface{} {
@@ -282,13 +293,17 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	if err != nil {
 		return "", err
 	}
-	prompt, completion, total := 0, 0, 0
+	normalized := runtime.ChatUsage{}
 	if usage != nil {
-		prompt, completion, total = usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens
+		normalized = *usage
 	}
-	actualCost := s.models.EstimateCost(model, input.Params, prompt, completion)
-	s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费")
-	s.logCall(ctx, requestID, userID, model.ID, nil, prompt, completion, total, actualCost, "success", nil, 0)
+	normalized = normalizedChatUsage(normalized, input, fullContent)
+	actualCost := s.models.EstimateCostWithTokenDetails(model, input.Params, normalized.PromptTokens, normalized.CompletionTokens, normalized.CachedInputTokens(), normalized.CacheCreationInputTokens)
+	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
+		s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, 0, "billing_failed", err, 0)
+		return "", fmt.Errorf("对话结算失败: %w", err)
+	}
+	s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, actualCost, "success", nil, 0)
 
 	convID := input.ConversationID
 	if convID == "" && len(input.Messages) > 0 {
@@ -303,8 +318,8 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	return convID, nil
 }
 
-func (s *ChatService) UnfreezeStream(ctx context.Context, userID int64, requestID string, estimated float64) {
-	s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
+func (s *ChatService) UnfreezeStream(ctx context.Context, userID int64, requestID string, estimated float64) error {
+	return s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
 }
 
 func (s *ChatService) EstimateModelsCost(ctx context.Context, modelCodes []string, params map[string]interface{}) float64 {
@@ -320,6 +335,7 @@ func (s *ChatService) EstimateModelsCost(ctx context.Context, modelCodes []strin
 }
 
 func (s *ChatService) BeginMultiChat(ctx context.Context, userID int64, input CompletionInput, modelCodes []string) (requestID string, estimated float64, err error) {
+	prepareChatBillingParams(&input)
 	requestID = util.NewRequestID()
 	if len(modelCodes) == 0 {
 		model, mErr := s.ResolveInputModel(ctx, &input)
@@ -329,6 +345,9 @@ func (s *ChatService) BeginMultiChat(ctx context.Context, userID int64, input Co
 		estimated = s.models.EstimateCost(model, input.Params, 0, 0)
 	} else {
 		estimated = s.EstimateModelsCost(ctx, modelCodes, input.Params)
+		if collaborationModel, modelErr := s.models.GetFullByCode(ctx, input.ModelCode); modelErr == nil && collaborationModel.Category == "multi_collab" {
+			estimated += s.models.EstimateCost(collaborationModel, input.Params, 0, 0)
+		}
 	}
 	if freezeErr := s.billing.Freeze(ctx, userID, estimated, "chat", requestID); freezeErr != nil {
 		if errors.Is(freezeErr, billing.ErrInsufficientBalance) {
@@ -339,14 +358,49 @@ func (s *ChatService) BeginMultiChat(ctx context.Context, userID int64, input Co
 	return requestID, estimated, nil
 }
 
-func (s *ChatService) FinalizeMultiChat(ctx context.Context, userID int64, requestID string, modelCode string, estimated, actualCost float64, promptTokens, completionTokens, totalTokens int) {
+func (s *ChatService) FinalizeMultiChat(ctx context.Context, userID int64, requestID string, modelCode string, estimated, actualCost float64, promptTokens, completionTokens, totalTokens int) error {
 	model, err := s.models.GetFullByCode(ctx, modelCode)
 	if err != nil {
-		s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
-		return
+		return s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID)
 	}
-	s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "多模型协作消费")
+	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "多模型协作消费"); err != nil {
+		s.logCall(ctx, requestID, userID, model.ID, nil, promptTokens, completionTokens, totalTokens, 0, "billing_failed", err, 0)
+		return err
+	}
 	s.logCall(ctx, requestID, userID, model.ID, nil, promptTokens, completionTokens, totalTokens, actualCost, "success", nil, 0)
+	return nil
+}
+
+func prepareChatBillingParams(input *CompletionInput) {
+	if input.Params == nil {
+		input.Params = map[string]interface{}{}
+	}
+	if firstPositiveIntValue(input.Params, "_estimated_input_tokens") <= 0 {
+		parts := make([]string, 0, len(input.Messages)*2)
+		for _, message := range input.Messages {
+			parts = append(parts, message.Role, message.Content)
+		}
+		input.Params["_estimated_input_tokens"] = estimateTextTokens(strings.Join(parts, "\n"))
+	}
+	if firstPositiveIntValue(input.Params, "_estimated_output_tokens") <= 0 {
+		if output := firstPositiveIntValue(input.Params, "max_completion_tokens", "max_tokens"); output > 0 {
+			input.Params["_estimated_output_tokens"] = output
+		}
+	}
+}
+
+func normalizedChatUsage(usage runtime.ChatUsage, input CompletionInput, content string) runtime.ChatUsage {
+	if usage.PromptTokens <= 0 {
+		prepareChatBillingParams(&input)
+		usage.PromptTokens = firstPositiveIntValue(input.Params, "_estimated_input_tokens")
+	}
+	if usage.CompletionTokens <= 0 {
+		usage.CompletionTokens = estimateTextTokens(content)
+	}
+	if usage.TotalTokens <= 0 {
+		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+	}
+	return usage
 }
 
 func (s *ChatService) balanceError(ctx context.Context, userID int64, input CompletionInput, requestID string) *BalanceError {

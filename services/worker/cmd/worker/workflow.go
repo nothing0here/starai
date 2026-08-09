@@ -13,6 +13,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "golang.org/x/image/webp"
 )
@@ -539,13 +541,20 @@ func processCustomWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 	}
 
 	totalCost = workflowActualCost(ctx, pool, p.ProjectID, outputs)
-	if err := chargeBilling(ctx, pool, p.UserID, estimated, totalCost, "workflow", publicID, "workflow_usage", "智能体工作流"); err != nil {
-		return fmt.Errorf("workflow %s billing: %w", publicID, err)
-	}
-	if _, err := pool.Exec(ctx, `
-		UPDATE workflow_projects SET status='succeeded', outputs=$1, actual_cost=$2, error_message=NULL, finished_at=now(), updated_at=now() WHERE id=$3`,
-		mustJSON(outputs), totalCost, p.ProjectID); err != nil {
-		return fmt.Errorf("workflow %s finalize: %w", publicID, err)
+	chargeCost := incrementalWorkflowCharge(ctx, pool, p.ProjectID, totalCost)
+	if err := chargeBillingWithFinalize(ctx, pool, p.UserID, estimated, chargeCost, "workflow", publicID, "workflow_usage", "智能体工作流", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE workflow_projects SET status='succeeded', outputs=$1, actual_cost=$2, error_message=NULL, finished_at=now(), updated_at=now() WHERE id=$3 AND status='running'`,
+			mustJSON(outputs), totalCost, p.ProjectID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("workflow is no longer running")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("workflow %s billing/finalize: %w", publicID, err)
 	}
 	log.Printf("Workflow project %s completed (cost=%.4f)", publicID, totalCost)
 	return nil
@@ -1941,9 +1950,6 @@ func workflowActualCost(ctx context.Context, pool *pgxpool.Pool, projectID int64
 	base := workflowBaseCost(ctx, pool, projectID)
 	var nodeCost float64
 	_ = pool.QueryRow(ctx, `SELECT COALESCE(SUM(cost),0) FROM workflow_node_runs WHERE project_id=$1`, projectID).Scan(&nodeCost)
-	if nodeCost > 0 {
-		return base + nodeCost
-	}
 	mediaCost := 0.0
 	if raw, ok := outputs["media_tasks"].([]interface{}); ok {
 		for _, item := range raw {
@@ -1960,7 +1966,47 @@ func workflowActualCost(ctx context.Context, pool *pgxpool.Pool, projectID int64
 	if mediaCost <= 0 {
 		mediaCost = floatAny(outputs["cost"])
 	}
-	return base + mediaCost
+	return selectWorkflowActualCost(base, nodeCost, mediaCost)
+}
+
+func workflowAccruedCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
+	var nodeCost float64
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(SUM(cost),0) FROM workflow_node_runs WHERE project_id=$1`, projectID).Scan(&nodeCost); err != nil || nodeCost <= 0 {
+		return 0
+	}
+	if base := workflowBaseCost(ctx, pool, projectID); base > 0 {
+		return base
+	}
+	return nodeCost
+}
+
+func incrementalWorkflowCharge(ctx context.Context, pool *pgxpool.Pool, projectID int64, cumulativeCost float64) float64 {
+	var settled float64
+	if err := pool.QueryRow(ctx, `SELECT actual_cost FROM workflow_projects WHERE id=$1`, projectID).Scan(&settled); err != nil {
+		return cumulativeCost
+	}
+	return incrementalChargeAmount(cumulativeCost, settled)
+}
+
+func incrementalChargeAmount(cumulativeCost, settledCost float64) float64 {
+	incremental := cumulativeCost - settledCost
+	if incremental < 0 {
+		return 0
+	}
+	return incremental
+}
+
+func selectWorkflowActualCost(flatPrice, nodeCost, mediaCost float64) float64 {
+	if flatPrice > 0 {
+		return flatPrice
+	}
+	if nodeCost > 0 {
+		return nodeCost
+	}
+	if mediaCost > 0 {
+		return mediaCost
+	}
+	return 0
 }
 
 func workflowBaseCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
@@ -1993,22 +2039,45 @@ func chatUsageTokens(body []byte) (int, int) {
 
 func estimateModelCostByCodeWorker(ctx context.Context, pool *pgxpool.Pool, code string, params map[string]interface{}, promptTokens, outputTokens int) float64 {
 	var raw []byte
-	if err := pool.QueryRow(ctx, `SELECT price_rule FROM models WHERE code=$1`, code).Scan(&raw); err != nil {
+	var category string
+	if err := pool.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE code=$1`, code).Scan(&raw, &category); err != nil {
 		return 0
 	}
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
+	params = workerBillingParams(params, category)
 	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens)
 }
 
 func estimateModelCostByIDWorker(ctx context.Context, pool *pgxpool.Pool, modelID int64, params map[string]interface{}, promptTokens, outputTokens int) float64 {
 	var raw []byte
-	if err := pool.QueryRow(ctx, `SELECT price_rule FROM models WHERE id=$1`, modelID).Scan(&raw); err != nil {
+	var category string
+	if err := pool.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE id=$1`, modelID).Scan(&raw, &category); err != nil {
 		return 0
 	}
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
+	params = workerBillingParams(params, category)
 	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens)
+}
+
+func workerBillingParams(params map[string]interface{}, category string) map[string]interface{} {
+	if category != "audio" {
+		return params
+	}
+	out := make(map[string]interface{}, len(params)+1)
+	for key, value := range params {
+		out[key] = value
+	}
+	count := floatAny(params["count"])
+	if count <= 0 {
+		count = floatAny(params["n"])
+	}
+	if count <= 0 {
+		count = 1
+	}
+	out["_billing_item_count"] = count
+	return out
 }
 
 func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]interface{}, promptTokens, outputTokens int) float64 {
@@ -2023,25 +2092,18 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		}
 		return floatAny(rule["unit_price"]) * n
 	case "per_token":
-		if promptTokens <= 0 {
-			promptTokens = 500
-		}
-		if outputTokens <= 0 {
-			outputTokens = 1000
-		}
+		promptTokens, outputTokens = workerEstimatedTokenCounts(rule, params, promptTokens, outputTokens)
 		cost := float64(promptTokens)*tokenPriceWorker(rule, "input_price") + float64(outputTokens)*tokenPriceWorker(rule, "output_price")
 		if surcharge := floatAny(rule["surcharge_per_m"]); surcharge > 0 {
 			cost += float64(promptTokens+outputTokens) / 1_000_000 * surcharge
 		}
-		return cost
+		count := floatAny(params["_billing_item_count"])
+		if count <= 0 {
+			count = 1
+		}
+		return cost * count
 	case "per_second":
-		duration := floatAny(params["duration"])
-		if duration <= 0 {
-			duration = floatAny(params["duration_sec"])
-		}
-		if duration <= 0 {
-			duration = 1
-		}
+		duration := workerDurationSeconds(params)
 		n := floatAny(params["count"])
 		if n <= 0 {
 			n = floatAny(params["n"])
@@ -2057,6 +2119,59 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 	default:
 		return 0
 	}
+}
+
+func workerEstimatedTokenCounts(rule, params map[string]interface{}, promptTokens, outputTokens int) (int, int) {
+	if promptTokens <= 0 {
+		for _, source := range []map[string]interface{}{params, rule} {
+			for _, key := range []string{"_estimated_input_tokens", "estimated_input_tokens"} {
+				if value := int(math.Ceil(floatAny(source[key]))); value > 0 {
+					promptTokens = value
+					break
+				}
+			}
+			if promptTokens > 0 {
+				break
+			}
+		}
+		if promptTokens <= 0 {
+			promptTokens = workerTextTokenEstimate(stringAny(params["prompt"]))
+		}
+		if promptTokens <= 0 {
+			promptTokens = 500
+		}
+	}
+	if outputTokens <= 0 {
+		for _, key := range []string{"_estimated_output_tokens", "max_completion_tokens", "max_tokens"} {
+			if value := int(math.Ceil(floatAny(params[key]))); value > 0 {
+				outputTokens = value
+				break
+			}
+		}
+		if outputTokens <= 0 {
+			outputTokens = int(math.Ceil(floatAny(rule["estimated_output_tokens"])))
+		}
+		if outputTokens <= 0 {
+			outputTokens = 1000
+		}
+	}
+	return promptTokens, outputTokens
+}
+
+func workerTextTokenEstimate(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	weighted := 0.0
+	for _, r := range []rune(value) {
+		if r <= 127 {
+			weighted += 0.25
+		} else {
+			weighted += 0.75
+		}
+	}
+	return int(math.Ceil(weighted)) + 8
 }
 
 func estimateDynamicPriceRuleCostWorker(rule, params map[string]interface{}) float64 {
@@ -2736,13 +2851,20 @@ func composeDetailPageLongImage(ctx context.Context, publicID string, urls []str
 func completeSimpleAgentWorkflow(ctx context.Context, pool *pgxpool.Pool, p WorkflowTaskPayload, publicID string, estimated float64, outputs map[string]interface{}) error {
 	saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 	actual := workflowActualCost(ctx, pool, p.ProjectID, outputs)
-	if err := chargeBilling(ctx, pool, p.UserID, estimated, actual, "workflow", publicID, "workflow_usage", "智能体工作流"); err != nil {
-		return fmt.Errorf("workflow %s billing: %w", publicID, err)
-	}
-	if _, err := pool.Exec(ctx, `
-		UPDATE workflow_projects SET status='succeeded', outputs=$1, actual_cost=$2, error_message=NULL, finished_at=now(), updated_at=now() WHERE id=$3`,
-		mustJSON(outputs), actual, p.ProjectID); err != nil {
-		return fmt.Errorf("workflow %s finalize: %w", publicID, err)
+	chargeCost := incrementalWorkflowCharge(ctx, pool, p.ProjectID, actual)
+	if err := chargeBillingWithFinalize(ctx, pool, p.UserID, estimated, chargeCost, "workflow", publicID, "workflow_usage", "智能体工作流", func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE workflow_projects SET status='succeeded', outputs=$1, actual_cost=$2, error_message=NULL, finished_at=now(), updated_at=now() WHERE id=$3 AND status='running'`,
+			mustJSON(outputs), actual, p.ProjectID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("workflow is no longer running")
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("workflow %s billing/finalize: %w", publicID, err)
 	}
 	log.Printf("Workflow project %s completed (cost=%.4f)", publicID, actual)
 	return nil
@@ -3543,8 +3665,27 @@ func firstNonEmpty(values ...string) string {
 }
 
 func failWorkflow(ctx context.Context, pool *pgxpool.Pool, p WorkflowTaskPayload, publicID string, estimated float64, msg string) error {
-	pool.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message=$1, finished_at=now(), updated_at=now() WHERE id=$2`, msg, p.ProjectID)
-	if err := unfreezeBilling(ctx, pool, p.UserID, estimated, "workflow", publicID); err != nil {
+	actual := workflowAccruedCost(ctx, pool, p.ProjectID)
+	chargeCost := incrementalWorkflowCharge(ctx, pool, p.ProjectID, actual)
+	finalize := func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE workflow_projects SET status='failed', actual_cost=$1, error_message=$2, finished_at=now(), updated_at=now()
+			WHERE id=$3 AND status IN ('pending','running')`, actual, msg, p.ProjectID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("workflow is no longer active")
+		}
+		return nil
+	}
+	var err error
+	if chargeCost > 0 {
+		err = chargeBillingWithFinalize(ctx, pool, p.UserID, estimated, chargeCost, "workflow", publicID, "workflow_usage", "工作流失败前已完成步骤", finalize)
+	} else {
+		err = unfreezeBillingWithFinalize(ctx, pool, p.UserID, estimated, "workflow", publicID, finalize)
+	}
+	if err != nil {
 		return fmt.Errorf("workflow %s release billing: %w", publicID, err)
 	}
 	log.Printf("Workflow project %s failed: %s", publicID, msg)

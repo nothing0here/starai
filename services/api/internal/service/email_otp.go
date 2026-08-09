@@ -180,10 +180,12 @@ func (s *EmailOTPService) VerifyAndLogin(ctx context.Context, email, code, refer
 	if err != nil {
 		return nil, err
 	}
+	if err = s.auth.grantSignupBonusTx(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	s.auth.GrantSignupBonus(ctx, userID)
 	auth, err := s.auth.issueToken(userID, publicID, nickname, &avatarURL, "normal", "普通会员", memberLevelID, userReferralCode, referrerID, nil, "zh-CN")
 	if err != nil {
 		return nil, err

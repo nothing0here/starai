@@ -93,23 +93,25 @@ func BuildUpstreamVideoPayload(model *ModelFull, params map[string]interface{}) 
 }
 
 func parseDurationSeconds(params map[string]interface{}) float64 {
-	raw, ok := params["duration"]
-	if !ok {
-		return 5
-	}
-	switch v := raw.(type) {
-	case float64:
-		if v > 0 {
-			return v
+	for _, key := range []string{"duration", "duration_sec", "seconds"} {
+		raw, ok := params[key]
+		if !ok {
+			continue
 		}
-	case int:
-		if v > 0 {
-			return float64(v)
-		}
-	case string:
-		s := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(v, "s"), "S"))
-		if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 {
-			return n
+		switch v := raw.(type) {
+		case float64:
+			if v > 0 {
+				return v
+			}
+		case int:
+			if v > 0 {
+				return float64(v)
+			}
+		case string:
+			s := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(v, "s"), "S"))
+			if n, err := strconv.ParseFloat(s, 64); err == nil && n > 0 {
+				return n
+			}
 		}
 	}
 	return 5
