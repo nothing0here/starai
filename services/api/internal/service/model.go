@@ -1240,6 +1240,17 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 	return s.GetByID(ctx, id)
 }
 
+func (s *ModelService) SetEnabled(ctx context.Context, id int64, enabled bool) (*ModelDTO, error) {
+	result, err := s.db.Exec(ctx, `UPDATE models SET is_enabled=$1, updated_at=now() WHERE id=$2`, enabled, id)
+	if err != nil {
+		return nil, err
+	}
+	if result.RowsAffected() == 0 {
+		return nil, errors.New("模型不存在")
+	}
+	return s.GetByID(ctx, id)
+}
+
 func validateModelPriceRule(rule map[string]interface{}) error {
 	billingType := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
 	allowed := map[string]bool{"per_token": true, "per_image": true, "per_request": true, "per_second": true, "dynamic": true}

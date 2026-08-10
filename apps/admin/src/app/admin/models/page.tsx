@@ -44,6 +44,13 @@ interface ModelConnectionTest {
   latency_ms: number;
 }
 
+interface UpstreamModel {
+  id: string;
+  object?: string;
+  owned_by?: string;
+  created?: number;
+}
+
 const REQUEST_MODES = ["chat_completions", "responses", "images", "video", "audio", "custom"];
 const PAGE_SIZE = 10;
 const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
@@ -349,6 +356,11 @@ const ENDPOINT_BY_MODE: Record<string, string> = {
   audio: "/v1/audio/speech",
   custom: "",
 };
+const CHAT_ENDPOINT_BY_PROTOCOL: Record<string, string> = {
+  openai_compatible: "/v1/chat/completions",
+  claude: "/v1/messages",
+  gemini: "/v1beta/models/{model}:generateContent",
+};
 
 const IMAGE_ENDPOINT_PRESETS = [
   {
@@ -470,6 +482,9 @@ export default function ModelsPage() {
   const [videoTemplateKey, setVideoTemplateKey] = useState("");
   const [testingModelId, setTestingModelId] = useState<number | null>(null);
   const [connectionTests, setConnectionTests] = useState<Record<number, ModelConnectionTest>>({});
+  const [upstreamModels, setUpstreamModels] = useState<UpstreamModel[]>([]);
+  const [upstreamModelsLoading, setUpstreamModelsLoading] = useState(false);
+  const [upstreamModelsError, setUpstreamModelsError] = useState("");
 
   const [filterCategory, setFilterCategory] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
@@ -549,6 +564,8 @@ export default function ModelsPage() {
     setAudioTemplateKey("");
     setVideoTemplateKey("");
     setErr("");
+    setUpstreamModels([]);
+    setUpstreamModelsError("");
     setShowForm(true);
   };
 
@@ -602,6 +619,8 @@ export default function ModelsPage() {
       setVideoTemplateKey("");
     }
     setErr("");
+    setUpstreamModels([]);
+    setUpstreamModelsError("");
     setShowForm(true);
   };
 
@@ -677,7 +696,9 @@ export default function ModelsPage() {
       api_key: String(c.api_key ?? ""),
       auth_type: String(c.auth_type ?? "bearer"),
       api_key_header: String(c.api_key_header ?? "Authorization"),
-      protocol: String(c.protocol ?? "openai_compatible"),
+      models_endpoint: String(c.models_endpoint ?? "/v1/models"),
+      anthropic_version: String(c.anthropic_version ?? "2023-06-01"),
+      protocol: String(c.protocol === "new_api" ? "openai_compatible" : c.protocol ?? "openai_compatible"),
     };
   };
 
@@ -685,6 +706,44 @@ export default function ModelsPage() {
     const extra = safeParseJson(extraText, {});
     const prev = (extra?.connection ?? {}) as Record<string, unknown>;
     return JSON.stringify({ ...extra, connection: { ...prev, ...patch } }, null, 2);
+  };
+
+  const listUpstreamModels = async () => {
+    setUpstreamModelsLoading(true);
+    setUpstreamModelsError("");
+    try {
+      const payload = form.id
+        ? { model_id: form.id }
+        : { new_api_extra_params: safeParseJson(form.new_api_extra_params, {}) };
+      const result = await adminApi<{ items: UpstreamModel[] }>("/models/upstream-models", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setUpstreamModels(result.items || []);
+      if (!result.items?.length) setUpstreamModelsError("上游返回成功，但没有可用模型");
+    } catch (error) {
+      setUpstreamModelsError(error instanceof Error ? error.message : "获取上游模型列表失败");
+      setUpstreamModels([]);
+    } finally {
+      setUpstreamModelsLoading(false);
+    }
+  };
+
+  const selectUpstreamModel = (model: UpstreamModel) => {
+    if (!model.id) return;
+    if (form.id) {
+      setForm((prev) => ({ ...prev, new_api_model: model.id }));
+      return;
+    }
+    const emptyIndex = batchRows.findIndex((row) => !row.model.trim());
+    if (emptyIndex >= 0) {
+      updateBatchRow(emptyIndex, { model: model.id });
+    } else {
+      setBatchRows((rows) => [
+        ...rows,
+        { model: model.id, code: suggestCode(model.id), name: suggestDisplayName(model.id), codeTouched: false, nameTouched: false },
+      ]);
+    }
   };
 
   const getDefaultChannelKey = (defaultParamsText: string) => {
@@ -2765,26 +2824,9 @@ export default function ModelsPage() {
   };
 
   const toggleEnabled = async (m: AdminModel) => {
-    await adminApi(`/models/${m.id}`, {
+    await adminApi(`/models/${m.id}/status`, {
       method: "PATCH",
-      body: JSON.stringify({
-        code: m.code,
-        display_name: m.display_name,
-        icon_url: m.icon_url || "",
-        new_api_model: m.new_api_model,
-        request_mode: m.request_mode,
-        category: m.category,
-        description: m.description || "",
-        tags: m.tags || [],
-        runtime_rule: m.runtime_rule || {},
-        input_schema: m.input_schema || {},
-        default_params: m.default_params || {},
-        new_api_extra_params: m.new_api_extra_params || {},
-        price_rule: m.price_rule || {},
-        is_enabled: !m.is_enabled,
-        sort_order: m.sort_order,
-        new_api_endpoint: m.new_api_endpoint,
-      }),
+      body: JSON.stringify({ is_enabled: !m.is_enabled }),
     });
     load();
   };
@@ -3151,9 +3193,25 @@ export default function ModelsPage() {
                 <select
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
                   value={getConnection(form.new_api_extra_params).protocol}
-                  onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { protocol: e.target.value }) }))}
+                  onChange={(e) => {
+                    const protocol = e.target.value;
+                    setForm((prev) => ({
+                      ...prev,
+                      new_api_endpoint:
+                        prev.request_mode === "chat_completions" &&
+                        ["/v1/chat/completions", "/v1/messages", "/v1beta/models/{model}:generateContent", ""].includes(prev.new_api_endpoint)
+                          ? CHAT_ENDPOINT_BY_PROTOCOL[protocol] || prev.new_api_endpoint
+                          : prev.new_api_endpoint,
+                      new_api_extra_params: setConnection(prev.new_api_extra_params, {
+                        protocol,
+                        models_endpoint: protocol === "gemini" ? "/v1beta/models" : "/v1/models",
+                      }),
+                    }));
+                  }}
                 >
                   <option value="openai_compatible">OpenAI / NEW API 兼容</option>
+                  <option value="claude">原生 Claude Messages</option>
+                  <option value="gemini">原生 Gemini</option>
                   <option value="custom_http">自定义 HTTP（先按兼容格式解析响应）</option>
                 </select>
               )}
@@ -3198,7 +3256,57 @@ export default function ModelsPage() {
                   onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { api_key_header: e.target.value }) }))}
                 />
               )}
+              {getConnection(form.new_api_extra_params).protocol === "claude" && field(
+                "Anthropic API 版本",
+                <input
+                  className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
+                  placeholder="2023-06-01"
+                  value={getConnection(form.new_api_extra_params).anthropic_version}
+                  onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { anthropic_version: e.target.value }) }))}
+                />
+              )}
+              {field(
+                "模型列表 Endpoint（可选）",
+                <input
+                  className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
+                  placeholder="默认：/v1/models"
+                  value={getConnection(form.new_api_extra_params).models_endpoint}
+                  onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { models_endpoint: e.target.value }) }))}
+                />
+              )}
             </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                disabled={upstreamModelsLoading}
+                onClick={listUpstreamModels}
+              >
+                {upstreamModelsLoading ? "获取中…" : "获取上游模型列表"}
+              </button>
+              <span className="text-[11px] text-gray-400">
+                优先请求 GET {getConnection(form.new_api_extra_params).protocol === "gemini" ? "/v1beta/models" : "/v1/models"}，不会产生聊天调用费用
+              </span>
+            </div>
+            {upstreamModelsError && <p className="mt-2 text-xs text-red-600">{upstreamModelsError}</p>}
+            {upstreamModels.length > 0 && (
+              <div className="mt-3 rounded-xl border border-blue-100 bg-white p-3">
+                <div className="mb-2 text-xs font-medium text-gray-600">上游可用模型（点击填入）</div>
+                <div className="flex max-h-36 flex-wrap gap-2 overflow-auto">
+                  {upstreamModels.map((model) => (
+                    <button
+                      key={model.id}
+                      type="button"
+                      className="rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs text-gray-700 hover:border-blue-300 hover:bg-blue-50"
+                      onClick={() => selectUpstreamModel(model)}
+                      title={model.owned_by ? `owned_by: ${model.owned_by}` : model.id}
+                    >
+                      {model.id}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
           )}
           {form.id || form.category === "multi_collab" ? (

@@ -152,14 +152,15 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 		return nil, err
 	}
 
-	temp := 0.7
+	var temperature *float64
 	if v, ok := input.Params["temperature"].(float64); ok {
-		temp = v
+		temperature = runtime.Float64Ptr(v)
 	}
 	req := runtime.ChatRequest{
 		Model:       model.NewAPIModel,
 		Messages:    chatRequestMessages(input.Messages, input.Params),
-		Temperature: temp,
+		Temperature: temperature,
+		Extra:       chatUpstreamParams(input.Params),
 	}
 	start := time.Now()
 	resp, err := s.runtime.ChatCompletionWithConfig(ctx, model.NewAPIEndpoint, req, model.NewAPIExtraParams)
@@ -212,11 +213,11 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 		}
 		return "", nil, 0, err
 	}
-	temp := 0.7
+	var temperature *float64
 	if v, ok := input.Params["temperature"].(float64); ok {
-		temp = v
+		temperature = runtime.Float64Ptr(v)
 	}
-	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: chatRequestMessages(input.Messages, input.Params), Temperature: temp}
+	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: chatRequestMessages(input.Messages, input.Params), Temperature: temperature, Extra: chatUpstreamParams(input.Params)}
 	// per-request timeout override (seconds)
 	if v, ok := input.Params["timeout_sec"].(float64); ok && v > 0 && v <= 600 {
 		var cancel context.CancelFunc
@@ -267,6 +268,20 @@ func chatRequestMessages(messages []runtime.ChatMessage, params map[string]inter
 			})
 		}
 		out = append(out, map[string]interface{}{"role": message.Role, "content": content})
+	}
+	return out
+}
+
+func chatUpstreamParams(params map[string]interface{}) map[string]interface{} {
+	allowed := []string{
+		"max_tokens", "max_completion_tokens", "top_p", "response_format", "tools", "tool_choice",
+		"reasoning_effort", "seed", "stop", "presence_penalty", "frequency_penalty", "user", "n",
+	}
+	out := make(map[string]interface{}, len(allowed))
+	for _, key := range allowed {
+		if value, ok := params[key]; ok && value != nil {
+			out[key] = value
+		}
 	}
 	return out
 }

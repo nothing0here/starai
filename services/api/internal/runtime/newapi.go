@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -56,15 +55,20 @@ type ChatMessage struct {
 }
 
 type ChatRequest struct {
-	Model         string             `json:"model"`
-	Messages      interface{}        `json:"messages"`
-	Stream        bool               `json:"stream"`
-	StreamOptions *ChatStreamOptions `json:"stream_options,omitempty"`
-	Temperature   float64            `json:"temperature,omitempty"`
+	Model         string                 `json:"model"`
+	Messages      interface{}            `json:"messages"`
+	Stream        bool                   `json:"stream"`
+	StreamOptions *ChatStreamOptions     `json:"stream_options,omitempty"`
+	Temperature   *float64               `json:"temperature,omitempty"`
+	Extra         map[string]interface{} `json:"-"`
 }
 
 type ChatStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
+}
+
+func Float64Ptr(value float64) *float64 {
+	return &value
 }
 
 type ChatUsage struct {
@@ -86,10 +90,19 @@ func (u ChatUsage) CachedInputTokens() int {
 }
 
 type ChatResponse struct {
-	Choices []struct {
-		Message ChatMessage `json:"message"`
-	} `json:"choices"`
-	Usage ChatUsage `json:"usage"`
+	Choices []ChatChoice `json:"choices"`
+	Usage   ChatUsage    `json:"usage"`
+}
+
+type ChatChoice struct {
+	Message ChatMessage `json:"message"`
+}
+
+type UpstreamModel struct {
+	ID      string `json:"id"`
+	Object  string `json:"object,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+	Created int64  `json:"created,omitempty"`
 }
 
 type StreamChunk struct {
@@ -104,16 +117,17 @@ func (c *Client) ChatCompletion(ctx context.Context, endpoint string, req ChatRe
 }
 
 func (c *Client) ChatCompletionWithConfig(ctx context.Context, endpoint string, req ChatRequest, cfg map[string]interface{}) (*ChatResponse, error) {
-	if endpoint == "" {
-		endpoint = "/v1/chat/completions"
-	}
 	requestCfg := c.resolveConfig(cfg)
-	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", requestCfg.BaseURL+endpoint, bytes.NewReader(body))
+	endpoint, body, protocol, err := prepareChatRequest(endpoint, req, cfg)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(requestCfg.BaseURL, endpoint), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	applyAuthHeaders(httpReq, requestCfg)
+	applyChatProtocolHeaders(httpReq, protocol, cfg)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -124,11 +138,11 @@ func (c *Client) ChatCompletionWithConfig(ctx context.Context, endpoint string, 
 	if resp.StatusCode >= 400 {
 		return nil, normalizeHTTPError(resp)
 	}
-	var result ChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return decodeChatResponse(protocol, raw)
 }
 
 func (c *Client) ChatCompletionStream(ctx context.Context, endpoint string, req ChatRequest) (<-chan StreamChunk, error) {
@@ -144,16 +158,17 @@ func (c *Client) ChatCompletionStreamWithConfig(ctx context.Context, endpoint st
 	if includeUsage {
 		req.StreamOptions = &ChatStreamOptions{IncludeUsage: true}
 	}
-	if endpoint == "" {
-		endpoint = "/v1/chat/completions"
-	}
 	requestCfg := c.resolveConfig(cfg)
-	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", requestCfg.BaseURL+endpoint, bytes.NewReader(body))
+	endpoint, body, protocol, err := prepareChatRequest(endpoint, req, cfg)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(requestCfg.BaseURL, endpoint), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	applyAuthHeaders(httpReq, requestCfg)
+	applyChatProtocolHeaders(httpReq, protocol, cfg)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
 
@@ -171,40 +186,7 @@ func (c *Client) ChatCompletionStreamWithConfig(ctx context.Context, endpoint st
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
-			if data == "[DONE]" {
-				ch <- StreamChunk{Done: true}
-				return
-			}
-			var event struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-				} `json:"choices"`
-				Usage *ChatUsage `json:"usage"`
-			}
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-			if len(event.Choices) > 0 {
-				content := event.Choices[0].Delta.Content
-				if content != "" {
-					ch <- StreamChunk{Content: content}
-				}
-			}
-			if event.Usage != nil {
-				ch <- StreamChunk{Done: true, Usage: event.Usage}
-				return
-			}
-		}
-		ch <- StreamChunk{Done: true}
+		consumeChatStream(resp.Body, protocol, ch)
 	}()
 	return ch, nil
 }
@@ -223,11 +205,9 @@ type ImageResponse struct {
 }
 
 func (c *Client) ImageGeneration(ctx context.Context, endpoint string, req ImageRequest) (*ImageResponse, error) {
-	if endpoint == "" {
-		endpoint = "/v1/images/generations"
-	}
+	endpoint = defaultEndpoint(endpoint, "/v1/images/generations")
 	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(c.baseURL, endpoint), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -339,9 +319,124 @@ func (c *Client) ResolveConfig(extra map[string]interface{}) RequestConfig {
 	return c.resolveConfig(extra)
 }
 
-// TestModelConnection performs an intentionally incomplete request. A 400/422
-// response proves that the configured route and credentials were accepted
-// without starting a billable generation job.
+func marshalChatRequest(req ChatRequest) ([]byte, error) {
+	base := map[string]interface{}{
+		"model":    req.Model,
+		"messages": req.Messages,
+		"stream":   req.Stream,
+	}
+	if req.StreamOptions != nil {
+		base["stream_options"] = req.StreamOptions
+	}
+	if req.Temperature != nil {
+		base["temperature"] = *req.Temperature
+	}
+	for key, value := range req.Extra {
+		if key == "" || value == nil {
+			continue
+		}
+		base[key] = value
+	}
+	return json.Marshal(base)
+}
+
+func defaultEndpoint(endpoint, fallback string) string {
+	if strings.TrimSpace(endpoint) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(endpoint)
+}
+
+func joinEndpoint(baseURL, endpoint string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return baseURL
+	}
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+	if !strings.HasPrefix(endpoint, "/") {
+		endpoint = "/" + endpoint
+	}
+	if strings.HasSuffix(baseURL, endpoint) {
+		return baseURL
+	}
+	// Allow Base URL to include the protocol prefix (/v1 or /v1beta) without
+	// producing the common /v1/v1/... or /v1beta/v1beta/... duplicate path.
+	for _, prefix := range []string{"/v1", "/v1beta"} {
+		if strings.HasSuffix(baseURL, prefix) && (endpoint == prefix || strings.HasPrefix(endpoint, prefix+"/")) {
+			endpoint = strings.TrimPrefix(endpoint, prefix)
+			if endpoint == "" {
+				return baseURL
+			}
+			break
+		}
+	}
+	return baseURL + endpoint
+}
+
+func (c *Client) ListModels(ctx context.Context, extra map[string]interface{}) ([]UpstreamModel, error) {
+	cfg := c.resolveConfig(extra)
+	protocol := chatProtocol(extra)
+	endpoint := modelListEndpoint(protocol, "")
+	if conn, ok := extra["connection"].(map[string]interface{}); ok {
+		if configured, ok := conn["models_endpoint"].(string); ok && strings.TrimSpace(configured) != "" {
+			configured = strings.TrimSpace(configured)
+			if !(protocol == chatProtocolGemini && configured == "/v1/models") {
+				endpoint = configured
+			}
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinEndpoint(cfg.BaseURL, endpoint), nil)
+	if err != nil {
+		return nil, err
+	}
+	applyAuthHeaders(req, cfg)
+	applyChatProtocolHeaders(req, protocol, extra)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, normalizeHTTPError(resp)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Data   []UpstreamModel `json:"data"`
+		Models []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		var items []UpstreamModel
+		if arrayErr := json.Unmarshal(raw, &items); arrayErr == nil {
+			return items, nil
+		}
+		return nil, err
+	}
+	if payload.Data != nil {
+		return payload.Data, nil
+	}
+	items := make([]UpstreamModel, 0, len(payload.Models))
+	for _, item := range payload.Models {
+		id := item.ID
+		if id == "" {
+			id = strings.TrimPrefix(item.Name, "models/")
+		}
+		if id != "" {
+			items = append(items, UpstreamModel{ID: id, Object: "model"})
+		}
+	}
+	return items, nil
+}
+
 func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode, model string, extra map[string]interface{}) (result ConnectionTestResult) {
 	startedAt := time.Now()
 	defer func() {
@@ -352,6 +447,24 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		result.Message = "未配置上游 Base URL"
 		return result
+	}
+	if requestMode == "chat_completions" {
+		models, listErr := c.ListModels(ctx, extra)
+		if listErr == nil {
+			for _, item := range models {
+				if item.ID == model {
+					result.OK = true
+					result.Message = "连接、鉴权及模型列表正常"
+					result.StatusCode = http.StatusOK
+					return result
+				}
+			}
+			result.StatusCode = http.StatusOK
+			result.Message = fmt.Sprintf("连接与鉴权正常，但上游模型列表中没有 %q", model)
+			return result
+		}
+		// Some OpenAI-compatible providers omit GET /v1/models. Fall back to
+		// a valid, minimal chat request instead of treating a 404 as a bad key.
 	}
 	if strings.TrimSpace(endpoint) == "" {
 		switch requestMode {
@@ -367,22 +480,36 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 			endpoint = "/v1/chat/completions"
 		}
 	}
-	if !strings.HasPrefix(endpoint, "/") {
-		endpoint = "/" + endpoint
-	}
 
-	body, _ := json.Marshal(map[string]interface{}{
-		"model":  model,
-		"stream": false,
-	})
+	protocol := chatProtocol(extra)
+	var body []byte
+	var err error
+	if requestMode == "chat_completions" {
+		endpoint, body, protocol, err = prepareChatRequest(endpoint, ChatRequest{
+			Model:    model,
+			Messages: []ChatMessage{{Role: "user", Content: "ping"}},
+			Extra:    map[string]interface{}{"max_completion_tokens": 1, "max_tokens": 1},
+		}, extra)
+		if err != nil {
+			result.Message = "测试请求创建失败：" + err.Error()
+			return result
+		}
+	} else {
+		probePayload := map[string]interface{}{"model": model, "stream": false}
+		if requestMode == "responses" {
+			probePayload["input"] = "ping"
+		}
+		body, _ = json.Marshal(probePayload)
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodPost, strings.TrimRight(cfg.BaseURL, "/")+endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodPost, joinEndpoint(cfg.BaseURL, endpoint), bytes.NewReader(body))
 	if err != nil {
 		result.Message = "测试请求创建失败：" + err.Error()
 		return result
 	}
 	applyAuthHeaders(req, cfg)
+	applyChatProtocolHeaders(req, protocol, extra)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
