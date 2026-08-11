@@ -3683,7 +3683,7 @@ func (h *Handler) GetPublicSystemConfigs(c *gin.Context) {
 		return
 	}
 	util.OK(c, map[string]interface{}{
-		"site_base_url":                    cfg["site_base_url"],
+		"site_base_url":                   cfg["site_base_url"],
 		"site_name":                       cfg["site_name"],
 		"site_logo":                       cfg["site_logo"],
 		"site_favicon":                    cfg["site_favicon"],
@@ -3721,7 +3721,9 @@ func (h *Handler) GetPublicSystemConfigs(c *gin.Context) {
 func (h *Handler) AdminListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	items, total, err := h.payment.ListOrders(c.Request.Context(), page, pageSize)
+	status := strings.TrimSpace(c.Query("status"))
+	search := strings.TrimSpace(c.Query("search"))
+	items, total, err := h.payment.ListOrders(c.Request.Context(), page, pageSize, status, search)
 	if err != nil {
 		util.InternalError(c, err.Error())
 		return

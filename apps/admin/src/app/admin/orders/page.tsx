@@ -26,26 +26,16 @@ export default function OrdersPage() {
   const [total, setTotal] = useState(0);
 
   useEffect(() => {
-    adminApi<{ items: Order[]; total: number }>(`/orders?page=${page}&page_size=${PAGE_SIZE}`).then((r) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
+    if (status) params.set("status", status);
+    if (search.trim()) params.set("search", search.trim());
+    adminApi<{ items: Order[]; total: number }>(`/orders?${params.toString()}`).then((r) => {
       setOrders(r.items || []);
       setTotal(r.total || 0);
     });
-  }, [page]);
+  }, [page, status, search]);
 
-  const filtered = useMemo(() => {
-    const kw = search.trim().toLowerCase();
-    return orders.filter((o) => {
-      if (status && o.status !== status) return false;
-      if (
-        kw &&
-        !o.order_no.toLowerCase().includes(kw) &&
-        !(o.nickname || "").toLowerCase().includes(kw) &&
-        !(o.user_public_id || "").toLowerCase().includes(kw)
-      )
-        return false;
-      return true;
-    });
-  }, [orders, status, search]);
+  const filtered = orders;
 
   return (
     <div>
@@ -54,17 +44,17 @@ export default function OrdersPage() {
         <input
           placeholder="搜索订单号 / 用户"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           className="px-3 py-2 rounded-lg border text-sm w-60"
         />
-        <select value={status} onChange={(e) => setStatus(e.target.value)} className="px-3 py-2 rounded-lg border text-sm">
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="px-3 py-2 rounded-lg border text-sm">
           <option value="">全部状态</option>
           <option value="paid">paid</option>
           <option value="pending">pending</option>
           <option value="failed">failed</option>
           <option value="expired">expired</option>
         </select>
-        <span className="text-xs text-gray-400">共 {filtered.length} 笔</span>
+        <span className="text-xs text-gray-400">共 {total} 笔</span>
       </div>
       <div className="bg-white rounded-2xl border overflow-hidden">
         <table className="w-full text-sm">
@@ -99,7 +89,7 @@ export default function OrdersPage() {
           </tbody>
         </table>
       </div>
-      <AdminPagination page={page} total={total} pageSize={PAGE_SIZE} onPageChange={setPage} />
+      {total > PAGE_SIZE && <AdminPagination page={page} total={total} pageSize={PAGE_SIZE} onPageChange={setPage} />}
     </div>
   );
 }

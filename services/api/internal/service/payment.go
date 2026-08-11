@@ -671,20 +671,37 @@ func (s *PaymentService) GetUserOrder(ctx context.Context, userID int64, orderNo
 	return &order, nil
 }
 
-func (s *PaymentService) ListOrders(ctx context.Context, page, pageSize int) ([]AdminOrderDTO, int, error) {
+func (s *PaymentService) ListOrders(ctx context.Context, page, pageSize int, status, search string) ([]AdminOrderDTO, int, error) {
 	if page < 1 {
 		page = 1
 	}
 	if pageSize < 1 || pageSize > 100 {
 		pageSize = 20
 	}
+	conditions := []string{}
+	args := []any{}
+	if status != "" {
+		args = append(args, status)
+		conditions = append(conditions, fmt.Sprintf("o.status = $%d", len(args)))
+	}
+	if search != "" {
+		args = append(args, "%"+search+"%")
+		conditions = append(conditions, fmt.Sprintf("(o.order_no ILIKE $%d OR u.public_id ILIKE $%d OR COALESCE(u.nickname,'') ILIKE $%d)", len(args), len(args), len(args)))
+	}
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
 	var total int
-	s.db.QueryRow(ctx, `SELECT COUNT(*) FROM orders`).Scan(&total)
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.user_id`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
 	rows, err := s.db.Query(ctx, `
 		SELECT o.order_no, o.channel, o.amount, o.currency, o.compute_credited, o.status, o.paid_at, o.created_at,
 		       u.public_id, COALESCE(u.nickname,'')
-		FROM orders o JOIN users u ON u.id = o.user_id
-		ORDER BY o.created_at DESC LIMIT $1 OFFSET $2`, pageSize, (page-1)*pageSize)
+		FROM orders o JOIN users u ON u.id = o.user_id`+where+`
+		ORDER BY o.created_at DESC LIMIT $`+strconv.Itoa(len(args)-1)+` OFFSET $`+strconv.Itoa(len(args)), args...)
 	if err != nil {
 		return nil, 0, err
 	}

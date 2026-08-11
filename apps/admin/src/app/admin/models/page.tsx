@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { adminApi, adminUploadFile } from "@/lib/api";
 import { UpstreamIncludeEditor } from "@/components/UpstreamIncludeEditor";
 import { AdminPagination } from "@/components/AdminPagination";
@@ -467,6 +468,7 @@ const emptyForm: FormState = {
 export default function ModelsPage() {
   const [models, setModels] = useState<AdminModel[]>([]);
   const [showForm, setShowForm] = useState(false);
+  const [formMount, setFormMount] = useState<HTMLTableCellElement | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [batchRows, setBatchRows] = useState<BatchRow[]>([emptyBatchRow()]);
   const [err, setErr] = useState("");
@@ -2902,7 +2904,7 @@ export default function ModelsPage() {
   );
 
   const field = (label: string, node: React.ReactNode) => (
-    <div>
+    <div className="flex flex-col">
       <label className="text-xs text-gray-500">{label}</label>
       {node}
     </div>
@@ -3029,7 +3031,7 @@ export default function ModelsPage() {
   };
 
   return (
-    <div>
+    <div className="flex flex-col">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">模型管理</h1>
         <div className="flex items-center gap-2">
@@ -3144,8 +3146,8 @@ export default function ModelsPage() {
         <span className="text-xs text-gray-400">共 {filtered.length} 个</span>
       </div>
 
-      {showForm && (
-        <form onSubmit={submit} className="bg-white rounded-2xl p-6 border mb-6 grid grid-cols-2 gap-4">
+      {showForm && formMount && createPortal(
+        <form onSubmit={submit} className="bg-white rounded-2xl p-6 grid grid-cols-2 gap-4">
           <div className="col-span-2 flex items-center justify-between">
             <h2 className="font-semibold">{form.id ? "编辑模型" : "新增模型"}</h2>
             <button type="button" onClick={() => setShowForm(false)} className="text-sm text-gray-400 hover:text-gray-600">
@@ -4628,7 +4630,8 @@ export default function ModelsPage() {
           <button type="submit" className="col-span-2 py-2 bg-primary rounded-xl text-dark font-semibold">
             {form.id ? "保存修改" : "创建"}
           </button>
-        </form>
+        </form>,
+        formMount
       )}
 
       <div className="bg-white rounded-2xl border overflow-hidden">
@@ -4647,7 +4650,8 @@ export default function ModelsPage() {
           </thead>
           <tbody className="divide-y">
             {paginated.map((m) => (
-              <tr key={m.id}>
+              <Fragment key={m.id}>
+              <tr>
                 <td className="px-4 py-3"><ModelLogo model={m} /></td>
                 <td className="px-4 py-3 font-mono text-xs">{m.code}</td>
                 <td className="px-4 py-3">{m.display_name}</td>
@@ -4703,7 +4707,18 @@ export default function ModelsPage() {
                   )}
                 </td>
               </tr>
+              {showForm && form.id === m.id && (
+                <tr>
+                  <td ref={setFormMount} colSpan={8} className="p-0 align-top" />
+                </tr>
+              )}
+              </Fragment>
             ))}
+            {showForm && !form.id && (
+              <tr>
+                <td ref={setFormMount} colSpan={8} className="p-0 align-top" />
+              </tr>
+            )}
             {filtered.length === 0 && (
               <tr>
                 <td colSpan={8} className="text-center text-gray-400 py-10">
