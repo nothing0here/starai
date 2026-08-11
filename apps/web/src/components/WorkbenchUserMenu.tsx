@@ -16,6 +16,7 @@ import {
   Wallet,
   X,
 } from "lucide-react";
+import { useSiteBranding } from "@/components/SiteBrand";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import { ReferralShareButton } from "./ReferralShareButton";
@@ -47,6 +48,8 @@ function initialDarkMode() {
 
 export function WorkbenchUserMenu({ onRecharge }: Props) {
   const { t } = useI18n();
+  const { api_docs_enabled, api_docs_operations } = useSiteBranding();
+  const apiDocsVisible = api_docs_enabled !== false && (!api_docs_operations || Object.keys(api_docs_operations).length === 0 || Object.values(api_docs_operations).some((value) => value !== false));
   const { logout } = useAuthStore();
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState<StoredUser | null>(null);
@@ -62,9 +65,9 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
       { href: "/app/gallery", label: t("nav.gallery"), desc: t("menu.galleryDesc"), icon: Compass, color: "bg-violet-50 text-violet-600 dark:bg-violet-500/10 dark:text-violet-300" },
       { href: "/app/settings", label: t("nav.settings"), desc: t("menu.settingsDesc"), icon: Settings, color: "bg-gray-50 text-gray-600 dark:bg-white/10 dark:text-gray-300" },
       { href: "/app/pricing", label: t("nav.pricing"), desc: t("menu.pricingDesc"), icon: BadgeDollarSign, color: "bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300" },
-      { href: "/app/api-docs", label: t("nav.apiDocs"), desc: t("menu.apiDocsDesc"), icon: FileText, color: "bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-300" },
+      ...(apiDocsVisible ? [{ href: "/app/api-docs", label: t("nav.apiDocs"), desc: t("menu.apiDocsDesc"), icon: FileText, color: "bg-purple-50 text-purple-600 dark:bg-purple-500/10 dark:text-purple-300" }] : []),
     ],
-    [t]
+    [apiDocsVisible, t]
   );
 
   useEffect(() => {

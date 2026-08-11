@@ -142,12 +142,15 @@ export interface Work {
 }
 
 export interface SystemConfig {
+  site_base_url?: string;
   site_name: string;
   site_logo?: string;
   site_favicon?: string;
   site_description?: string;
   admin_site_description?: string;
   site_api_tagline?: string;
+  api_docs_enabled?: boolean;
+  api_docs_operations?: Record<string, boolean>;
   site_copyright?: string;
   home_meta_title?: string;
   home_meta_description?: string;

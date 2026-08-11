@@ -90,12 +90,17 @@ func (u ChatUsage) CachedInputTokens() int {
 }
 
 type ChatResponse struct {
-	Choices []ChatChoice `json:"choices"`
-	Usage   ChatUsage    `json:"usage"`
+	ID            string        `json:"id,omitempty"`
+	Model         string        `json:"model,omitempty"`
+	Choices       []ChatChoice  `json:"choices"`
+	Usage         ChatUsage     `json:"usage"`
+	ContentBlocks []interface{} `json:"-"`
 }
 
 type ChatChoice struct {
-	Message ChatMessage `json:"message"`
+	Message      ChatMessage              `json:"message"`
+	ToolCalls    []map[string]interface{} `json:"tool_calls,omitempty"`
+	FinishReason string                   `json:"finish_reason,omitempty"`
 }
 
 type UpstreamModel struct {
@@ -106,10 +111,11 @@ type UpstreamModel struct {
 }
 
 type StreamChunk struct {
-	Content string
-	Done    bool
-	Usage   *ChatUsage
-	Error   error
+	Content   string
+	ToolCalls []map[string]interface{}
+	Done      bool
+	Usage     *ChatUsage
+	Error     error
 }
 
 func (c *Client) ChatCompletion(ctx context.Context, endpoint string, req ChatRequest) (*ChatResponse, error) {

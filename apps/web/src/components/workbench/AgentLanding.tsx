@@ -40,6 +40,7 @@ export function AgentLanding({
   compactOnMobile?: boolean;
 }) {
   const { ts } = useI18n();
+  const translatedHeroTags = heroTags.map((tag) => ts(tag));
   const safeFeatures = features.length
     ? features
     : [
@@ -48,7 +49,7 @@ export function AgentLanding({
         { icon: generationType === "video" ? "🎬" : "🖼️", title: generationType === "video" ? ts("视频生成") : ts("图片生成"), subtitle: ts("按选定场景输出可用素材") },
       ];
   const active = safeFeatures[Math.min(activeIndex, safeFeatures.length - 1)] || safeFeatures[0];
-  const activeTags = active.tags?.length ? active.tags : heroTags.slice(0, 4);
+  const activeTags = active.tags?.length ? active.tags : translatedHeroTags.slice(0, 4);
   return (
     <div className={`agent-landing-shell scrollbar-none flex min-h-0 flex-col justify-start overflow-y-auto overscroll-contain py-1 ${compactOnMobile ? "min-h-[420px] flex-none sm:min-h-0 sm:flex-1" : "flex-1"}`}>
       <div className="shrink-0 -translate-y-1 pt-0 text-center sm:-translate-y-2 sm:pt-1 lg:pt-2">
@@ -62,7 +63,7 @@ export function AgentLanding({
         </div>
         {workflowDescription && <p className="mx-auto mt-2 max-w-2xl px-3 text-xs leading-5 text-gray-500 dark:text-gray-300 sm:text-sm">{workflowDescription}</p>}
         <div className="mt-2 flex flex-wrap justify-center gap-1.5 sm:mt-3 sm:gap-2">
-          {heroTags.map((tag, index) => (
+          {translatedHeroTags.map((tag, index) => (
             <span key={`${tag}-${index}`} title={tag} className="max-w-[180px] truncate rounded-full border border-gray-200 bg-white/55 px-2.5 py-0.5 text-[11px] text-gray-500 backdrop-blur dark:border-white/10 dark:bg-white/5 dark:text-gray-300 sm:px-3 sm:py-1 sm:text-xs">
               {tag}
             </span>

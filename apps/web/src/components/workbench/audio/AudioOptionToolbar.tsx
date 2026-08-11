@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, type ReactNode } from "react";
+import { useI18n } from "@/i18n/I18nProvider";
 import { AudioLines, ChevronDown, Compass, FileAudio, Gauge, Grid3X3, Sparkles, Target } from "lucide-react";
 import {
   DEFAULT_AUDIO_COUNT_OPTIONS,
@@ -113,6 +114,7 @@ function CountOptionMenu({
   audioConfig?: AudioRuntimeConfig;
   onChange: (val: number) => void;
 }) {
+  const { ts, td } = useI18n();
   const options =
     audioConfig?.count_options?.length
       ? audioConfig.count_options
@@ -127,9 +129,9 @@ function CountOptionMenu({
   return (
     <OptionMenu
       icon={iconFor(prop["x-icon"])}
-      activeLabel={`${count}个`}
-      title={prop.title || "生成数量"}
-      subtitle="选择生成内容的数量"
+      activeLabel={td("audio.count", "{count}", { count })}
+      title={prop.title || ts("生成数量")}
+      subtitle={ts("选择生成内容的数量")}
       tone={prop["x-highlight"] ? "yellow" : "white"}
     >
       {(closeMenu) => (
@@ -149,14 +151,14 @@ function CountOptionMenu({
                   selected ? "bg-primary/10 text-gray-900 dark:bg-primary/15 dark:text-gray-100" : "bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10"
                 }`}
               >
-                <span>{n}个</span>
+                <span>{td("audio.count", "{count}", { count: n })}</span>
                 {selected && <span className="text-lg leading-none">✓</span>}
               </button>
             );
           })}
           {allowCustom && (
             <div className="pt-3 mt-3 border-t border-gray-100 dark:border-white/10">
-              <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">自定义数量</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">{ts("自定义数量")}</div>
               <div className="flex items-center gap-3">
                 <input
                   value={customDraft}
@@ -176,7 +178,7 @@ function CountOptionMenu({
                     closeMenu();
                   }}
                 >
-                  确定
+                  {ts("确定")}
                 </button>
               </div>
             </div>
@@ -192,7 +194,8 @@ function renderFieldControl(
   prop: SchemaFieldMeta,
   value: unknown,
   onChange: (key: string, val: unknown) => void,
-  audioConfig?: AudioRuntimeConfig
+  audioConfig: AudioRuntimeConfig | undefined,
+  translate: (source: string) => string
 ) {
   const widget = prop["x-widget"] || (prop.enum?.length ? "option_menu" : "select");
 
@@ -212,7 +215,7 @@ function renderFieldControl(
       >
         <span className="text-gray-500 dark:text-gray-400">{iconFor(prop["x-icon"])}</span>
         <span>
-          {prop.title || key}：{on ? "开启" : "关闭"}
+          {translate(prop.title || key)}：{on ? translate("开启") : translate("关闭")}
         </span>
       </button>
     );
@@ -224,9 +227,9 @@ function renderFieldControl(
   return (
     <OptionMenu
       icon={iconFor(prop["x-icon"])}
-      activeLabel={String(activeLabel)}
-      title={prop.title || key}
-      subtitle={`选择${prop.title || key}`}
+      activeLabel={translate(String(activeLabel))}
+      title={translate(prop.title || key)}
+      subtitle={translate(`选择${prop.title || key}`)}
       tone={prop["x-highlight"] ? "yellow" : "white"}
     >
       {(closeMenu) => (
@@ -245,7 +248,7 @@ function renderFieldControl(
                   selected ? "bg-primary/10 text-gray-900 dark:bg-primary/15 dark:text-gray-100" : "bg-gray-50 hover:bg-gray-100 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10"
                 }`}
               >
-                <span>{enumLabel(prop, opt)}</span>
+                <span>{translate(enumLabel(prop, opt))}</span>
                 {selected && <span className="text-lg leading-none">✓</span>}
               </button>
             );
@@ -267,10 +270,11 @@ export function AudioOptionToolbar({
   onChange: (next: Record<string, unknown>) => void;
   audioConfig?: AudioRuntimeConfig;
 }) {
+  const { ts } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => !isTopPlacementField(prop));
   if (entries.length === 0) return null;
-  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig)}</span>)}</>;
+  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig, ts)}</span>)}</>;
 }
 
 export function AudioTopControls({
@@ -284,8 +288,9 @@ export function AudioTopControls({
   onChange: (next: Record<string, unknown>) => void;
   audioConfig?: AudioRuntimeConfig;
 }) {
+  const { ts } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => isTopPlacementField(prop));
   if (entries.length === 0) return null;
-  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig)}</span>)}</>;
+  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, audioConfig, ts)}</span>)}</>;
 }

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Download, ExternalLink, Film, Image as ImageIcon, Music, Sparkles, Trash2, Upload, X } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Work } from "@starai/shared-types";
+import { useI18n } from "@/i18n/I18nProvider";
 
 type MediaKind = "image" | "video" | "audio";
 type MediaItem = { kind: MediaKind; url: string; thumbnail?: string };
@@ -168,7 +169,8 @@ function VideoThumb({ src, poster, alt = "" }: { src: string; poster?: string; a
 }
 
 function MediaThumb({ item, prompt = "" }: { item?: MediaItem; prompt?: string }) {
-  if (!item) return <div className="flex h-full w-full items-center justify-center bg-gray-100 text-gray-400 dark:bg-white/5 dark:text-gray-500">暂无作品</div>;
+  const { ts } = useI18n();
+  if (!item) return <div className="flex h-full w-full items-center justify-center bg-gray-100 text-gray-400 dark:bg-white/5 dark:text-gray-500">{ts("暂无作品")}</div>;
   if (item.kind === "video") return <VideoThumb src={item.url} poster={item.thumbnail} alt={prompt} />;
   if (item.kind === "image") {
     // eslint-disable-next-line @next/next/no-img-element
@@ -177,12 +179,13 @@ function MediaThumb({ item, prompt = "" }: { item?: MediaItem; prompt?: string }
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-gray-100 text-gray-500 dark:bg-white/5 dark:text-gray-400">
       <Music size={24} />
-      <span className="text-xs">音频</span>
+              <span className="text-xs">{ts("音频")}</span>
     </div>
   );
 }
 
 function MosaicPreview({ media, prompt, onOpen }: { media: MediaItem[]; prompt: string; onOpen: (index: number) => void }) {
+  const { ts } = useI18n();
   const shown = media.slice(0, Math.min(media.length, 4));
   const gridClass =
     shown.length === 1
@@ -215,7 +218,7 @@ function MosaicPreview({ media, prompt, onOpen }: { media: MediaItem[]; prompt: 
           <div className="absolute inset-0 bg-black/0 transition group-hover/tile:bg-black/10" />
           {item.kind === "video" && (
             <span className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-1 text-[11px] font-medium text-white">
-              视频
+              {ts("视频")}
             </span>
           )}
           {index === 3 && media.length > 4 && (
@@ -230,6 +233,7 @@ function MosaicPreview({ media, prompt, onOpen }: { media: MediaItem[]; prompt: 
 }
 
 export default function WorksPage() {
+  const { ts, td } = useI18n();
   const [works, setWorks] = useState<Work[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<"all" | MediaKind>("all");
@@ -261,7 +265,7 @@ export default function WorksPage() {
   const currentMedia = previewMedia[preview?.index || 0];
 
   const handleDelete = async (id: string) => {
-    if (!confirm("确认删除这个作品？作品记录和已转存文件都会被清理。")) return;
+    if (!confirm(ts("确认删除这个作品？作品记录和已转存文件都会被清理。"))) return;
     await api(`/api/works/${id}`, { method: "DELETE" });
     if (preview?.work.public_id === id) setPreview(null);
     load();
@@ -275,7 +279,7 @@ export default function WorksPage() {
     if (!publishDraft || publishing) return;
     const price = publishDraft.is_paid ? Number(publishDraft.price || 0) : 0;
     if (publishDraft.is_paid && (!Number.isFinite(price) || price <= 0)) {
-      alert("请填写有效的算力点价格");
+      alert(ts("请填写有效的算力点价格"));
       return;
     }
     setPublishing(true);
@@ -284,11 +288,11 @@ export default function WorksPage() {
         method: "POST",
         body: JSON.stringify({ title: publishDraft.title, tags: [], is_paid: publishDraft.is_paid, price }),
       });
-      alert("已提交发布，审核通过后会出现在灵感广场。");
+      alert(ts("已提交发布，审核通过后会出现在灵感广场。"));
       setPublishDraft(null);
       load();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "发布失败");
+      alert(err instanceof Error ? err.message : ts("发布失败"));
     } finally {
       setPublishing(false);
     }
@@ -311,10 +315,10 @@ export default function WorksPage() {
           <div>
             <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-gray-950 px-3 py-1 text-xs font-medium text-white dark:bg-white/10 dark:text-gray-100">
               <Sparkles size={13} />
-              创作资源库
+              {ts("创作资源库")}
             </div>
-            <h1 className="text-2xl font-bold text-gray-950 dark:text-gray-100">我的作品</h1>
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">图片、视频、音频统一管理；批量生成会以拼图方式展示全部结果。</p>
+            <h1 className="text-2xl font-bold text-gray-950 dark:text-gray-100">{ts("我的作品")}</h1>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{ts("图片、视频、音频统一管理；批量生成会以拼图方式展示全部结果。")}</p>
           </div>
           <div className="flex w-full overflow-x-auto rounded-xl border border-gray-200 bg-gray-50 p-1 text-sm sm:w-auto dark:border-white/10 dark:bg-white/5">
             {(["all", "image", "video", "audio"] as const).map((key) => (
@@ -326,7 +330,7 @@ export default function WorksPage() {
                   filter === key ? "bg-white text-gray-950 shadow-sm dark:bg-gray-900 dark:text-gray-100" : "text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100"
                 }`}
               >
-                {key === "all" ? "全部" : displayType(key)}
+                {key === "all" ? ts("全部") : ts(displayType(key))}
                 <span className={filter === key ? "text-gray-500" : "text-gray-400"}>{counts[key]}</span>
               </button>
             ))}
@@ -334,38 +338,38 @@ export default function WorksPage() {
         </div>
 
         {loading ? (
-          <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-20 text-center text-sm text-gray-400 dark:border-white/10 dark:bg-gray-900">加载中...</div>
+          <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-20 text-center text-sm text-gray-400 dark:border-white/10 dark:bg-gray-900">{ts("加载中...")}</div>
         ) : rows.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-20 text-center text-sm text-gray-400 dark:border-white/10 dark:bg-gray-900">暂无作品，去生成一个新作品吧。</div>
+          <div className="rounded-2xl border border-dashed border-gray-200 bg-white py-20 text-center text-sm text-gray-400 dark:border-white/10 dark:bg-gray-900">{ts("暂无作品，去生成一个新作品吧。")}</div>
         ) : (
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {rows.map(({ work, media }) => {
               const cover = media[0];
               return (
                 <article key={work.public_id} className="group overflow-hidden rounded-2xl border border-gray-200/70 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-lg dark:border-white/10 dark:bg-gray-900">
-                  <button type="button" className="relative block w-full bg-gray-100 text-left" onClick={() => setPreview({ work, index: 0 })} title="预览作品">
+                  <button type="button" className="relative block w-full bg-gray-100 text-left" onClick={() => setPreview({ work, index: 0 })} title={ts("预览作品")}>
                     <div className="aspect-[4/3] overflow-hidden">
                       <MosaicPreview media={media} prompt={work.prompt || ""} onOpen={(index) => setPreview({ work, index })} />
                     </div>
                     <div className="absolute left-3 top-3 flex items-center gap-1 rounded-full bg-black/65 px-2.5 py-1 text-xs font-medium text-white backdrop-blur">
                       <MediaIcon kind={cover?.kind || work.type} />
-                      {displayType(cover?.kind || work.type)}
+                      {ts(displayType(cover?.kind || work.type))}
                     </div>
                     {media.length > 1 && (
                       <div className="absolute bottom-3 right-3 rounded-full border border-white/70 bg-white/95 px-3 py-1 text-xs font-semibold text-gray-900 shadow-sm dark:border-white/10 dark:bg-gray-950/90 dark:text-gray-100">
-                        {media.length} 个作品
+                        {td("works.count", "{count} works", { count: media.length })}
                       </div>
                     )}
                   </button>
                   <div className="p-4">
-                    <p className="line-clamp-2 min-h-[40px] text-sm leading-5 text-gray-800 dark:text-gray-100">{work.prompt || "未命名作品"}</p>
+                    <p className="line-clamp-2 min-h-[40px] text-sm leading-5 text-gray-800 dark:text-gray-100">{work.prompt || ts("未命名作品")}</p>
                     <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-100 pt-3 dark:border-white/10">
                       <span className="text-xs text-gray-400">{new Date(work.created_at).toLocaleDateString()}</span>
                       <div className="flex items-center gap-1">
-                        <button type="button" onClick={() => openPublish(work)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-50 hover:text-secondary dark:hover:bg-white/5" title="发布到广场">
+                        <button type="button" onClick={() => openPublish(work)} className="rounded-lg p-2 text-gray-400 hover:bg-gray-50 hover:text-secondary dark:hover:bg-white/5" title={ts("发布到广场")}>
                           <Upload size={15} />
                         </button>
-                        <button type="button" onClick={() => handleDelete(work.public_id)} className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10" title="删除">
+                        <button type="button" onClick={() => handleDelete(work.public_id)} className="rounded-lg p-2 text-gray-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10" title={ts("删除")}>
                           <Trash2 size={15} />
                         </button>
                       </div>
@@ -383,9 +387,9 @@ export default function WorksPage() {
           <div className="max-h-[92vh] w-full max-w-6xl overflow-hidden rounded-2xl bg-white shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between gap-3 border-b px-4 py-3 dark:border-white/10">
               <div className="min-w-0">
-                <div className="truncate text-sm font-semibold text-gray-950 dark:text-gray-100">{preview.work.prompt || "未命名作品"}</div>
+                <div className="truncate text-sm font-semibold text-gray-950 dark:text-gray-100">{preview.work.prompt || ts("未命名作品")}</div>
                 <div className="text-xs text-gray-400">
-                  {displayType(currentMedia.kind)} · 共 {(preview.index || 0) + 1}/{previewMedia.length} 个作品 · 创建于 {new Date(preview.work.created_at).toLocaleString()}
+                  {ts(displayType(currentMedia.kind))} · {td("works.count", "共 {count} 个作品", { count: (preview.index || 0) + 1 })}/{previewMedia.length} · {ts("创建于")} {new Date(preview.work.created_at).toLocaleString()}
                 </div>
               </div>
               <button type="button" className="shrink-0 rounded-xl border p-2 text-gray-500 hover:bg-gray-50 dark:border-white/10 dark:hover:bg-white/5" onClick={() => setPreview(null)}>
@@ -414,8 +418,8 @@ export default function WorksPage() {
               </div>
               <aside className="border-t bg-white p-4 lg:border-l lg:border-t-0 dark:border-white/10 dark:bg-gray-900">
                 <div className="mb-3 flex items-center justify-between text-xs">
-                  <span className="font-semibold text-gray-500 dark:text-gray-300">全部作品</span>
-                  <span className="rounded-full bg-gray-100 px-2 py-1 text-gray-500 dark:bg-white/10 dark:text-gray-300">{previewMedia.length} 个</span>
+                  <span className="font-semibold text-gray-500 dark:text-gray-300">{ts("全部作品")}</span>
+                  <span className="rounded-full bg-gray-100 px-2 py-1 text-gray-500 dark:bg-white/10 dark:text-gray-300">{td("works.items", "{count}", { count: previewMedia.length })}</span>
                 </div>
                 <div className="grid max-h-72 grid-cols-4 gap-2 overflow-y-auto pr-1 sm:grid-cols-5 lg:max-h-[48vh] lg:grid-cols-2">
                   {previewMedia.map((item, idx) => (
@@ -435,11 +439,11 @@ export default function WorksPage() {
                 <div className="mt-4 flex flex-col gap-2">
                   <a href={currentMedia.url} target="_blank" rel="noreferrer" className="inline-flex h-10 items-center justify-center gap-2 rounded-xl border text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-white/10 dark:text-gray-200 dark:hover:bg-white/5">
                     <ExternalLink size={16} />
-                    {currentMedia.kind === "video" ? "查看原视频" : currentMedia.kind === "audio" ? "打开原音频" : "查看原图"}
+                    {currentMedia.kind === "video" ? ts("查看原视频") : currentMedia.kind === "audio" ? ts("打开原音频") : ts("查看原图")}
                   </a>
                   <a href={currentMedia.url} download className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-gray-950 text-sm font-medium text-white hover:bg-gray-800">
                     <Download size={16} />
-                    下载作品
+                    {ts("下载作品")}
                   </a>
                 </div>
               </aside>

@@ -684,6 +684,7 @@ function CustomerService({ config }: { config: CustomerServiceConfig }) {
 }
 
 function GalleryPreview({ item, index }: { item: GalleryItem; index: number }) {
+  const { ts } = useI18n();
   const heightClass = ["h-64", "h-80", "h-56", "h-72", "h-96", "h-60"][index % 6];
   const mediaURL = item.media_url || item.cover_url || "";
   const poster = item.thumbnail_url || (item.cover_url && item.cover_url !== mediaURL ? item.cover_url : "");
@@ -720,10 +721,10 @@ function GalleryPreview({ item, index }: { item: GalleryItem; index: number }) {
       )}
       <div className="p-4">
         <div className="flex items-center gap-2">
-          {item.is_featured && <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-semibold text-primary">精选</span>}
-          <h3 className="truncate text-sm font-semibold text-white">{item.title || "未命名作品"}</h3>
+          {item.is_featured && <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-semibold text-primary">{ts("精选")}</span>}
+          <h3 className="truncate text-sm font-semibold text-white">{item.title || ts("未命名作品")}</h3>
         </div>
-        <p className="mt-2 line-clamp-2 text-xs leading-5 text-white/52">{item.prompt || "从社区作品中提取提示词和模型配置，一键生成同款。"}</p>
+        <p className="mt-2 line-clamp-2 text-xs leading-5 text-white/52">{item.prompt || ts("从社区作品中提取提示词和模型配置，一键生成同款。")}</p>
         <div className="mt-3 flex flex-wrap gap-1.5">
           {(item.tags || []).slice(0, 3).map((tag) => (
             <span key={tag} className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-white/45">
@@ -748,7 +749,8 @@ export default function LandingPageClient() {
   const [showLogin, setShowLogin] = useState(false);
   const [gallery, setGallery] = useState<GalleryItem[]>(FALLBACK_GALLERY);
   const branding = useSiteBranding();
-  const { site_name, site_copyright } = branding;
+  const { site_name, site_copyright, api_docs_enabled, api_docs_operations } = branding;
+  const apiDocsVisible = api_docs_enabled !== false && (!api_docs_operations || Object.keys(api_docs_operations).length === 0 || Object.values(api_docs_operations).some((value) => value !== false));
   const copyrightText = site_copyright || `© ${new Date().getFullYear()} ${site_name || "StarAI"}. All rights reserved.`;
 
   useEffect(() => {
@@ -865,9 +867,11 @@ export default function LandingPageClient() {
             badgeClassName="h-8 w-8 rounded-lg text-sm"
           />
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
-            <Link href="/app/api-docs" className="hidden rounded-full border border-white/15 px-4 py-2 text-sm text-white/75 transition hover:border-primary/60 hover:text-white sm:inline-flex">
-              {t("landing.apiDocs")}
-            </Link>
+            {apiDocsVisible && (
+              <Link href="/app/api-docs" className="hidden rounded-full border border-white/15 px-4 py-2 text-sm text-white/75 transition hover:border-primary/60 hover:text-white sm:inline-flex">
+                {t("landing.apiDocs")}
+              </Link>
+            )}
             <button onClick={enterAppOrLogin} className="h-9 max-w-[54px] truncate whitespace-nowrap rounded-full border border-white/20 px-2.5 text-xs leading-none text-white/86 transition hover:border-primary/60 sm:h-10 sm:max-w-none sm:px-5 sm:text-sm">
               {t("landing.login")}
             </button>

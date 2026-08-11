@@ -136,9 +136,9 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(middleware.RequestID(), middleware.RequestLog(), middleware.Metrics())
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:3001"},
+		AllowOrigins:     []string{"http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "http://127.0.0.1:3001"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Locale", "Accept-Language"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-Locale", "Accept-Language", "X-API-Key", "Anthropic-Version", "X-Goog-Api-Key"},
 		AllowCredentials: true,
 	}))
 	if localRoot == "" {

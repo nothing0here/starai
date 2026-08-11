@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Upload, X } from "lucide-react";
 import { uploadFile } from "@/lib/api";
+import { useI18n } from "@/i18n/I18nProvider";
 
 export function AudioUploadButton({
   url,
@@ -13,6 +14,7 @@ export function AudioUploadButton({
   name?: string;
   onChange: (next: { url: string; name: string } | null) => void;
 }) {
+  const { ts } = useI18n();
   const [uploading, setUploading] = useState(false);
 
   const handleUpload = async (files: FileList | null) => {
@@ -22,7 +24,7 @@ export function AudioUploadButton({
     try {
       onChange({ url: await uploadFile(f), name: f.name });
     } catch (err) {
-      alert(err instanceof Error ? err.message : "上传失败");
+      alert(err instanceof Error ? err.message : ts("上传失败"));
     } finally {
       setUploading(false);
     }
@@ -32,13 +34,13 @@ export function AudioUploadButton({
     return (
       <div className="flex items-center gap-2 h-9 px-3 rounded-xl border border-gray-200 bg-white text-xs text-gray-600 shrink-0 max-w-[200px] dark:border-white/10 dark:bg-white/5 dark:text-gray-300">
         <span className="truncate flex-1" title={name || url}>
-          {name || "参考音频"}
+          {name || ts("参考音频")}
         </span>
         <button
           type="button"
           onClick={() => onChange(null)}
           className="text-gray-400 hover:text-gray-700 shrink-0 dark:hover:text-gray-100"
-          title="移除"
+          title={ts("移除")}
         >
           <X size={14} />
         </button>
@@ -49,7 +51,7 @@ export function AudioUploadButton({
   return (
     <label
       className="h-9 w-9 rounded-xl border border-gray-200 bg-white text-gray-500 flex items-center justify-center cursor-pointer hover:bg-gray-50 shrink-0 dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10"
-      title={uploading ? "上传中..." : "上传参考音频"}
+      title={uploading ? ts("上传中...") : ts("上传参考音频")}
     >
       <Upload size={16} />
       <input

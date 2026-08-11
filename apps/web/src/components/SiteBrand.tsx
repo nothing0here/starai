@@ -9,12 +9,15 @@ import { useI18n } from "@/i18n/I18nProvider";
 
 type BrandData = Pick<
   SystemConfig,
+  | "site_base_url"
   | "site_name"
   | "site_logo"
   | "site_favicon"
   | "site_description"
   | "admin_site_description"
   | "site_api_tagline"
+  | "api_docs_enabled"
+  | "api_docs_operations"
   | "site_copyright"
   | "terms_title"
   | "terms_content"
@@ -35,11 +38,13 @@ type BrandData = Pick<
 >;
 
 const DEFAULT_BRANDING: BrandData = {
+  site_base_url: "",
   site_name: "StarAI",
   site_logo: "",
   site_favicon: "",
   site_description: "AI 大模型聚合平台",
   site_api_tagline: "Open API Documentation",
+  api_docs_enabled: true,
   terms_title: "服务协议",
   terms_content: "",
   privacy_title: "隐私政策",

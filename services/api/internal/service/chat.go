@@ -99,10 +99,13 @@ type CompletionInput struct {
 }
 
 type CompletionResult struct {
-	RequestID      string  `json:"request_id"`
-	ConversationID string  `json:"conversation_id"`
-	Content        string  `json:"content"`
-	Cost           float64 `json:"cost"`
+	RequestID      string                   `json:"request_id"`
+	ConversationID string                   `json:"conversation_id"`
+	Content        string                   `json:"content"`
+	ContentBlocks  []interface{}            `json:"content_blocks,omitempty"`
+	ToolCalls      []map[string]interface{} `json:"tool_calls,omitempty"`
+	Usage          runtime.ChatUsage        `json:"usage"`
+	Cost           float64                  `json:"cost"`
 }
 
 type BalanceError struct {
@@ -196,7 +199,15 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 		s.saveMessages(ctx, convID, userID, input.Messages, content)
 	}
 
-	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, Cost: actualCost}, nil
+	var blocks []interface{}
+	var toolCalls []map[string]interface{}
+	if len(resp.ContentBlocks) > 0 {
+		blocks = resp.ContentBlocks
+	}
+	if len(resp.Choices) > 0 {
+		toolCalls = resp.Choices[0].ToolCalls
+	}
+	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, ContentBlocks: blocks, ToolCalls: toolCalls, Usage: usage, Cost: actualCost}, nil
 }
 
 func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input CompletionInput) (string, <-chan runtime.StreamChunk, float64, error) {

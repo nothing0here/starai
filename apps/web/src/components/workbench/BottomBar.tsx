@@ -106,7 +106,7 @@ function AssetGridCard({
   onPreview?: () => void;
   onDelete?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const k = (kind || "image").toLowerCase();
   return (
     <div
@@ -148,7 +148,7 @@ function AssetGridCard({
               onPreview();
             }}
           >
-            预览
+            {ts("预览")}
           </button>
         )}
         {onDelete && (
@@ -199,7 +199,7 @@ function ReferencePickCard({
   locked?: boolean;
   onClick: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, td } = useI18n();
   return (
     <div
       role="button"
@@ -385,7 +385,7 @@ export function BottomBar({
                       </button>
                     ))
                   ) : (
-                    <div className="text-center text-gray-400 py-10">暂无渠道预设</div>
+                    <div className="text-center text-gray-400 py-10">{t("暂无渠道预设")}</div>
                   )}
                 </div>
               </div>
@@ -448,7 +448,7 @@ export function ChatTopTools({
   maxReferenceImages?: number;
   assetLibraryLabel?: string;
 }) {
-  const { t } = useI18n();
+  const { t, td } = useI18n();
   const kindText = useCallback((k?: string) => {
     const v = (k || "").toLowerCase();
     if (v === "image") return t("asset.image");
@@ -630,7 +630,7 @@ export function ChatTopTools({
 
   const deleteUserAsset = async (asset: AssetItem) => {
     const title = asset.name || asset.public_id;
-    if (typeof window !== "undefined" && !window.confirm(`确定删除资产「${title}」吗？删除后无法继续引用该资产。`)) {
+    if (typeof window !== "undefined" && !window.confirm(td("asset.confirmDelete", "Delete asset \"{name}\"? It can no longer be used after deletion.", { name: title }))) {
       return;
     }
     setDeletingAssetId(asset.public_id);
@@ -644,7 +644,7 @@ export function ChatTopTools({
       });
       setPickedRefs((items) => items.filter((item) => item.public_id !== asset.public_id && item.url !== asset.url));
       if (assetPreview?.public_id === asset.public_id) setAssetPreview(null);
-      setAssetNotice({ type: "success", message: `「${title}」已删除。` });
+      setAssetNotice({ type: "success", message: td("asset.deleted", '"{name}" deleted.', { name: title }) });
       if (assetOpen && assetTab === "mine") await loadAssets();
     } catch (err) {
       setAssetNotice({ type: "error", message: err instanceof Error ? err.message : t("asset.uploadFailed") });
@@ -1217,7 +1217,7 @@ export function ChatTopTools({
                                 key={a.public_id}
                                 coverUrl={a.url}
                                 title={a.name || a.public_id}
-                                tag="图片"
+                                tag={t("图片")}
                                 kind="image"
                                 selected={selected}
                                 locked={deletingAssetId === a.public_id}
@@ -1233,7 +1233,7 @@ export function ChatTopTools({
                           <div className="w-16 h-16 rounded-2xl bg-white border border-gray-200 flex items-center justify-center mb-3 dark:bg-gray-900 dark:border-white/10">
                           <ImageIcon size={28} className="text-gray-300" />
                         </div>
-                        <div className="text-lg font-semibold text-gray-500">暂无灵感作品</div>
+                        <div className="text-lg font-semibold text-gray-500">{t("暂无灵感作品")}</div>
                       </div>
                     ) : (
                       <div className="grid h-full grid-cols-3 content-start gap-2 overflow-y-auto p-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
@@ -1244,7 +1244,7 @@ export function ChatTopTools({
                             <ReferencePickCard
                               key={item.public_id}
                               coverUrl={item.cover_url}
-                              title={item.title || "未命名"}
+                              title={item.title || t("未命名")}
                               tag={galleryTypeText(item.type)}
                               paid={pricing.paid}
                               price={pricing.price}
@@ -1275,8 +1275,8 @@ export function ChatTopTools({
                               type="button"
                               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/10"
                               onClick={() => toggleRefPick(img)}
-                              aria-label="移除"
-                              title="移除"
+                              aria-label={t("移除")}
+                              title={t("移除")}
                             >
                               <X size={14} />
                             </button>

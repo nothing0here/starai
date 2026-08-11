@@ -845,10 +845,69 @@ func (s *ModelService) normalizeAPIDocInput(ctx context.Context, input APIDocInp
 	if input.AuthHeader == "" {
 		input.AuthHeader = "Authorization: Bearer <API_KEY>"
 	}
-	if input.Content == nil {
-		input.Content = map[string]interface{}{}
-	}
+	input.Content = normalizeAPIDocContent(input.Content, requestMode, code)
 	return &input, nil
+}
+
+// normalizeAPIDocContent keeps the editable JSON backward compatible while
+// giving every document a predictable, reference-style contract shape.
+func normalizeAPIDocContent(content map[string]interface{}, requestMode, modelCode string) map[string]interface{} {
+	if content == nil {
+		content = map[string]interface{}{}
+	}
+	setDefault := func(key string, value interface{}) {
+		if _, exists := content[key]; !exists {
+			content[key] = value
+		}
+	}
+
+	setDefault("version", "v1")
+	setDefault("operation_id", apiDocOperationID(requestMode))
+	setDefault("request_content_type", "application/json")
+	setDefault("auth_scheme", map[string]interface{}{"type": "api_key", "location": "header", "name": "Authorization", "prefix": "Bearer"})
+	setDefault("capabilities", []interface{}{})
+	setDefault("errors", []interface{}{
+		map[string]interface{}{"status": 400, "code": "invalid_request", "description": "请求参数无效"},
+		map[string]interface{}{"status": 401, "code": "invalid_api_key", "description": "API Key 无效或已停用"},
+		map[string]interface{}{"status": 429, "code": "rate_limit_exceeded", "description": "请求频率超过限制"},
+		map[string]interface{}{"status": 500, "code": "provider_error", "description": "模型服务异常"},
+	})
+
+	if _, exists := content["request_example"]; !exists {
+		switch requestMode {
+		case "images":
+			content["request_example"] = map[string]interface{}{"model": modelCode, "prompt": "一只赛博朋克风格的猫", "size": "1024x1024", "n": 1}
+		case "video":
+			content["request_example"] = map[string]interface{}{"model": modelCode, "prompt": "一段城市夜景视频", "size": "1280x720", "duration": 5}
+		case "audio":
+			content["request_example"] = map[string]interface{}{"model": modelCode, "input": "你好，欢迎使用", "voice": "alloy", "format": "mp3"}
+		default:
+			content["request_example"] = map[string]interface{}{"model": modelCode, "messages": []interface{}{map[string]interface{}{"role": "user", "content": "你好，请介绍你的能力"}}, "stream": false}
+		}
+	}
+	if _, exists := content["response_mode"]; !exists {
+		if requestMode == "chat_completions" || requestMode == "responses" {
+			content["response_mode"] = "sync_or_stream"
+		} else {
+			content["response_mode"] = "async_task"
+		}
+	}
+	return content
+}
+
+func apiDocOperationID(requestMode string) string {
+	switch requestMode {
+	case "images":
+		return "createImageGeneration"
+	case "video":
+		return "createVideoGeneration"
+	case "audio":
+		return "createSpeech"
+	case "responses":
+		return "createResponse"
+	default:
+		return "createChatCompletion"
+	}
 }
 
 func defaultAPIDocProtocol(requestMode string) string {
@@ -928,6 +987,14 @@ func standardAPIDocContent(doc *APIDocDTO, content map[string]interface{}) map[s
 		}
 	}
 	setDefault("features", []string{"统一 API Key", "平台模型编码", "标准 JSON 响应"})
+	setDefault("operation_id", doc.Slug)
+	setDefault("version", "v1")
+	setDefault("deprecated", false)
+	setDefault("request_content_type", "application/json")
+	setDefault("response_content_type", "application/json")
+	setDefault("streaming", doc.RequestMode == "chat_completions")
+	setDefault("rate_limit", map[string]interface{}{"requests_per_minute": 120, "policy": "按用户和 API Key 限流"})
+	setDefault("idempotency", map[string]interface{}{"supported": false, "header": "Idempotency-Key", "note": "当前版本未启用幂等键，请使用 task_no 追踪异步任务"})
 	requestExample := defaultAPIDocRequestExample(doc)
 	responseExample := defaultAPIDocResponseExample(doc)
 	if doc.RequestMode == "images" || doc.RequestMode == "video" || doc.RequestMode == "audio" {
@@ -935,7 +1002,9 @@ func standardAPIDocContent(doc *APIDocDTO, content map[string]interface{}) map[s
 		content["response_example"] = responseExample
 	} else {
 		setDefault("request_example", requestExample)
-		setDefault("response_example", responseExample)
+		if existing, ok := content["response_example"].(map[string]interface{}); !ok || isLegacyAPIDocEnvelope(existing) {
+			content["response_example"] = responseExample
+		}
 	}
 	setDefault("notes", []string{
 		"Authorization 使用平台 API Key，而不是上游供应商 Key。",
@@ -956,6 +1025,9 @@ func standardAPIDocContent(doc *APIDocDTO, content map[string]interface{}) map[s
 		}
 		content["parameters"] = defaultAPIDocParameters(doc)
 	}
+	if doc.RequestMode == "chat_completions" && (!hasNonEmptyList(content["parameters"])) {
+		content["parameters"] = defaultChatAPIDocParameters()
+	}
 	content["standard"] = map[string]interface{}{
 		"method":      "POST",
 		"endpoint":    doc.Endpoint,
@@ -966,6 +1038,28 @@ func standardAPIDocContent(doc *APIDocDTO, content map[string]interface{}) map[s
 	return content
 }
 
+func hasNonEmptyList(value interface{}) bool {
+	switch items := value.(type) {
+	case []interface{}:
+		return len(items) > 0
+	case []map[string]interface{}:
+		return len(items) > 0
+	default:
+		return false
+	}
+}
+
+func defaultChatAPIDocParameters() []map[string]interface{} {
+	return []map[string]interface{}{
+		{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名"},
+		{"name": "messages", "type": "array", "required": true, "description": "OpenAI Chat Completions 消息数组"},
+		{"name": "stream", "type": "boolean", "required": false, "description": "是否通过 SSE 返回流式片段"},
+		{"name": "temperature", "type": "number", "required": false, "description": "采样温度，以接入模型支持范围为准"},
+		{"name": "max_tokens", "type": "integer", "required": false, "description": "最大输出 Token 数"},
+		{"name": "tools", "type": "array", "required": false, "description": "工具定义，用于工具调用"},
+	}
+}
+
 func standardAPIDocResponses(content map[string]interface{}, successExample map[string]interface{}) map[string]interface{} {
 	responses := map[string]interface{}{}
 	if raw, ok := content["responses"].(map[string]interface{}); ok {
@@ -973,7 +1067,11 @@ func standardAPIDocResponses(content map[string]interface{}, successExample map[
 			responses[k] = v
 		}
 	}
-	if _, ok := responses["200"]; !ok {
+	if success, ok := responses["200"].(map[string]interface{}); ok {
+		if body, ok := success["body"].(map[string]interface{}); ok && isLegacyAPIDocEnvelope(body) {
+			success["body"] = successExample
+		}
+	} else {
 		responses["200"] = map[string]interface{}{
 			"description": "请求成功",
 			"body":        successExample,
@@ -982,22 +1080,61 @@ func standardAPIDocResponses(content map[string]interface{}, successExample map[
 	if _, ok := responses["400"]; !ok {
 		responses["400"] = map[string]interface{}{
 			"description": "请求参数错误，例如 model 不存在或未启用",
-			"body":        map[string]interface{}{"code": 400, "message": "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名"},
+			"body":        standardAPIDocError("invalid_request_error", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名"),
 		}
 	}
 	if _, ok := responses["401"]; !ok {
 		responses["401"] = map[string]interface{}{
 			"description": "API Key 无效或已停用",
-			"body":        map[string]interface{}{"code": 401, "message": "API Key 无效或已停用"},
+			"body":        standardAPIDocError("invalid_api_key", "API Key 无效或已停用"),
 		}
 	}
 	if _, ok := responses["502"]; !ok {
 		responses["502"] = map[string]interface{}{
 			"description": "上游模型服务异常",
-			"body":        map[string]interface{}{"code": 502, "message": "模型服务异常"},
+			"body":        standardAPIDocError("upstream_error", "模型服务异常"),
+		}
+	}
+	for status, raw := range responses {
+		if status == "200" {
+			continue
+		}
+		definition, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		body, ok := definition["body"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, hasError := body["error"]; hasError {
+			continue
+		}
+		code, hasCode := body["code"]
+		message, hasMessage := body["message"]
+		if hasCode {
+			codeText := fmt.Sprint(code)
+			messageText := fmt.Sprint(message)
+			if !hasMessage || messageText == "<nil>" {
+				messageText = "请求失败"
+				if description, ok := definition["description"].(string); ok && description != "" {
+					messageText = description
+				}
+			}
+			definition["body"] = standardAPIDocError(codeText, messageText)
 		}
 	}
 	return responses
+}
+
+func isLegacyAPIDocEnvelope(body map[string]interface{}) bool {
+	_, hasCode := body["code"]
+	_, hasData := body["data"]
+	return hasCode && hasData
+}
+
+func standardAPIDocError(code, message string) map[string]interface{} {
+	return map[string]interface{}{"error": map[string]interface{}{"type": code, "code": code, "message": message}}
 }
 
 func defaultAPIDocParameters(doc *APIDocDTO) []map[string]interface{} {
@@ -1084,45 +1221,33 @@ func defaultAPIDocResponseExample(doc *APIDocDTO) map[string]interface{} {
 	switch doc.RequestMode {
 	case "images":
 		return map[string]interface{}{
-			"code":    0,
-			"message": "ok",
-			"data": map[string]interface{}{
-				"task_no":        "task_xxx",
-				"type":           "image",
-				"status":         "pending",
-				"model_code":     doc.ModelCode,
-				"estimated_cost": 1.0,
-				"created_at":     time.Now().Format(time.RFC3339),
-				"poll_url":       "/v1/tasks/task_xxx",
-			},
+			"task_no":        "task_xxx",
+			"type":           "image",
+			"status":         "pending",
+			"model_code":     doc.ModelCode,
+			"estimated_cost": 1.0,
+			"created_at":     "2026-01-01T00:00:00Z",
+			"poll_url":       "/v1/tasks/task_xxx",
 		}
 	case "video":
 		return map[string]interface{}{
-			"code":    0,
-			"message": "ok",
-			"data": map[string]interface{}{
-				"task_no":        "task_xxx",
-				"type":           "video",
-				"status":         "pending",
-				"model_code":     doc.ModelCode,
-				"estimated_cost": 1.0,
-				"created_at":     time.Now().Format(time.RFC3339),
-				"poll_url":       "/v1/tasks/task_xxx",
-			},
+			"task_no":        "task_xxx",
+			"type":           "video",
+			"status":         "pending",
+			"model_code":     doc.ModelCode,
+			"estimated_cost": 1.0,
+			"created_at":     "2026-01-01T00:00:00Z",
+			"poll_url":       "/v1/tasks/task_xxx",
 		}
 	case "audio":
 		return map[string]interface{}{
-			"code":    0,
-			"message": "ok",
-			"data": map[string]interface{}{
-				"task_no":        "task_xxx",
-				"type":           "audio",
-				"status":         "pending",
-				"model_code":     doc.ModelCode,
-				"estimated_cost": 1.0,
-				"created_at":     time.Now().Format(time.RFC3339),
-				"poll_url":       "/v1/tasks/task_xxx",
-			},
+			"task_no":        "task_xxx",
+			"type":           "audio",
+			"status":         "pending",
+			"model_code":     doc.ModelCode,
+			"estimated_cost": 1.0,
+			"created_at":     "2026-01-01T00:00:00Z",
+			"poll_url":       "/v1/tasks/task_xxx",
 		}
 	case "responses":
 		return map[string]interface{}{
@@ -1134,14 +1259,19 @@ func defaultAPIDocResponseExample(doc *APIDocDTO) map[string]interface{} {
 		}
 	default:
 		return map[string]interface{}{
-			"code":    0,
-			"message": "ok",
-			"data": map[string]interface{}{
-				"request_id":      "req_xxx",
-				"conversation_id": "conv_xxx",
-				"content":         "这是模型响应内容。",
-				"cost":            0.01,
-			},
+			"id":      "chatcmpl_xxx",
+			"object":  "chat.completion",
+			"created": 1767225600,
+			"model":   doc.ModelCode,
+			"choices": []map[string]interface{}{{
+				"index": 0,
+				"message": map[string]interface{}{
+					"role":    "assistant",
+					"content": "这是模型响应内容。",
+				},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]interface{}{"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
 		}
 	}
 }

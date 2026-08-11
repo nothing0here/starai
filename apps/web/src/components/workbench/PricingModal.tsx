@@ -6,6 +6,7 @@ import { clsx } from "clsx";
 import type { Model } from "@starai/shared-types";
 import { api } from "@/lib/api";
 import { CATEGORY_TAG, MODEL_ICONS } from "./categoryMeta";
+import { useI18n } from "@/i18n/I18nProvider";
 
 function num(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -43,6 +44,7 @@ export function PricingModal({
   onClose: () => void;
   currentModelCode?: string;
 }) {
+  const { ts } = useI18n();
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -60,7 +62,7 @@ export function PricingModal({
         setModels(items || []);
         setActiveCode((prev) => currentModelCode || prev || items?.[0]?.code);
       })
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
+      .catch((e) => setErr(e instanceof Error ? e.message : ts("加载失败")))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, currentModelCode]);
@@ -110,38 +112,39 @@ export function PricingModal({
   }));
   const tokenRows = TOKEN_PRICE_ROWS.map((row) => ({
     ...row,
+    label: ts(row.label),
     value: pricePerM(price, row.key),
   }))
-    .concat(surchargePerM !== null && surchargePerM > 0 ? [{ key: "surcharge", label: "平台附加费", value: surchargePerM }] : [])
+    .concat(surchargePerM !== null && surchargePerM > 0 ? [{ key: "surcharge", label: ts("平台附加费"), value: surchargePerM }] : [])
     .filter((row) => row.required || row.value !== null);
 
   const billingLabel =
     billingType === "per_token"
-      ? "按 Token 计费"
+      ? ts("按 Token 计费")
       : billingType === "per_request"
-        ? "按次计费"
+        ? ts("按次计费")
         : billingType === "per_image"
-          ? "按张计费"
+          ? ts("按张计费")
           : billingType === "per_second"
-            ? "按秒计费"
+            ? ts("按秒计费")
             : isMiniMaxH3Dynamic
-              ? "按输出与参考素材动态计费"
+              ? ts("按输出与参考素材动态计费")
             : isSeedanceDynamic
-              ? "按 Seedance 输出 Token 动态计费"
-            : billingType || "未知";
+              ? ts("按 Seedance 输出 Token 动态计费")
+            : billingType || ts("未知");
 
   const headerHint =
     billingType === "per_token"
-      ? "按 Token 计费，页面统一换算为每 1M Tokens 展示。"
+      ? ts("按 Token 计费，页面统一换算为每 1M Tokens 展示。")
       : billingType === "per_second"
-        ? "按秒计费，通常会受到视频时长与生成数量共同影响。"
+        ? ts("按秒计费，通常会受到视频时长与生成数量共同影响。")
         : isMiniMaxH3Dynamic
-          ? "按输出视频时长、参考视频时长和超额参考图片动态计费。"
+          ? ts("按输出视频时长、参考视频时长和超额参考图片动态计费。")
         : isSeedanceDynamic
-          ? "按输出 Token 动态计费，分辨率、输出时长和是否包含参考视频都会影响费用。"
+          ? ts("按输出 Token 动态计费，分辨率、输出时长和是否包含参考视频都会影响费用。")
         : billingType === "per_request"
-          ? "按次计费，每次调用消耗固定额度。"
-          : "查看当前模型的计费方式、展示口径与单价。";
+          ? ts("按次计费，每次调用消耗固定额度。")
+          : ts("查看当前模型的计费方式、展示口径与单价。");
 
   if (!open) return null;
 
@@ -153,7 +156,7 @@ export function PricingModal({
       >
         <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4 dark:border-white/10">
           <div className="min-w-0">
-            <div className="text-base font-bold text-gray-900 dark:text-gray-100">模型价格查询</div>
+            <div className="text-base font-bold text-gray-900 dark:text-gray-100">{ts("模型价格查询")}</div>
             <div className="mt-0.5 text-xs text-gray-400">{headerHint}</div>
           </div>
           <button
@@ -172,18 +175,18 @@ export function PricingModal({
                 <input
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
-                  placeholder="搜索：模型名称 / 编码 / 标签"
+                  placeholder={ts("搜索：模型名称 / 编码 / 标签")}
                   className="flex-1 bg-transparent text-sm placeholder:text-gray-400 focus:outline-none dark:text-gray-100 dark:placeholder:text-gray-500"
                 />
               </div>
 
               <div className="mt-3 flex flex-wrap gap-1.5">
                 {[
-                  { code: "all" as const, label: "全部" },
-                  { code: "chat" as const, label: "聊天" },
-                  { code: "image" as const, label: "图片" },
-                  { code: "video" as const, label: "视频" },
-                  { code: "audio" as const, label: "音频" },
+                  { code: "all" as const, label: ts("全部") },
+                  { code: "chat" as const, label: ts("聊天") },
+                  { code: "image" as const, label: ts("图片") },
+                  { code: "video" as const, label: ts("视频") },
+                  { code: "audio" as const, label: ts("音频") },
                 ].map((c) => (
                   <button
                     key={c.code}
@@ -203,9 +206,9 @@ export function PricingModal({
             </div>
 
             <div className="h-[56vh] overflow-y-auto px-3 pb-4">
-              {loading && <div className="py-10 text-center text-sm text-gray-400">加载中...</div>}
+              {loading && <div className="py-10 text-center text-sm text-gray-400">{ts("加载中...")}</div>}
               {!!err && !loading && <div className="py-10 text-center text-sm text-red-500">{err}</div>}
-              {!loading && !err && filtered.length === 0 && <div className="py-10 text-center text-sm text-gray-400">没有匹配的模型</div>}
+              {!loading && !err && filtered.length === 0 && <div className="py-10 text-center text-sm text-gray-400">{ts("没有匹配的模型")}</div>}
 
               <div className="space-y-2">
                 {filtered.map((m) => {
@@ -250,7 +253,7 @@ export function PricingModal({
 
           <div className="p-5">
             {!active ? (
-              <div className="py-12 text-center text-sm text-gray-400">请选择左侧模型</div>
+              <div className="py-12 text-center text-sm text-gray-400">{ts("请选择左侧模型")}</div>
             ) : (
               <div className="space-y-4">
                 <div className="soft-card p-5">
@@ -282,47 +285,47 @@ export function PricingModal({
 
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div className="soft-card p-4">
-                    <div className="text-xs text-gray-400">计费方式</div>
+                    <div className="text-xs text-gray-400">{ts("计费方式")}</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">{billingLabel}</div>
                     <div className="mt-2 text-xs text-gray-400">
                       {isMiniMaxH3Dynamic
-                        ? "费用按输出视频时长、参考视频时长及超出免费额度的参考图片数动态计算。"
+                        ? ts("费用按输出视频时长、参考视频时长及超出免费额度的参考图片数动态计算。")
                         : isSeedanceDynamic
-                        ? "预估费用会根据输出时长、分辨率、参考视频时长和官方 Token 单价动态计算。"
+                          ? ts("预估费用会根据输出时长、分辨率、参考视频时长和官方 Token 单价动态计算。")
                         : billingType === "per_second"
-                        ? "费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。"
+                          ? ts("费用通常约等于单价 x 时长（秒）x 生成数量，实际以提交参数为准。")
                         : billingType === "per_token"
-                          ? "输入、输出、缓存读取等价格会分别展示，方便核对实际成本。"
-                          : "价格以系统算力度量为准，充值后即可直接调用。"}
+                          ? ts("输入、输出、缓存读取等价格会分别展示，方便核对实际成本。")
+                          : ts("价格以系统算力度量为准，充值后即可直接调用。")}
                     </div>
                   </div>
                   <div className="soft-card p-4">
-                    <div className="text-xs text-gray-400">展示口径</div>
+                  <div className="text-xs text-gray-400">{ts("展示口径")}</div>
                     <div className="mt-1 text-sm font-semibold text-gray-900 dark:text-gray-100">
                       {isMiniMaxH3Dynamic
-                        ? "动态估算"
+                        ? ts("动态估算")
                         : isSeedanceDynamic
-                        ? "动态估算"
+                        ? ts("动态估算")
                         : billingType === "per_token"
-                        ? "每 1M Tokens"
+                        ? ts("每 1M Tokens")
                         : billingType === "per_second"
-                          ? "算力 / 秒"
+                          ? ts("算力 / 秒")
                           : billingType === "per_request"
-                            ? "算力 / 次"
+                            ? ts("算力 / 次")
                             : billingType === "per_image"
-                              ? "算力 / 张"
-                              : "算力"}
+                              ? ts("算力 / 张")
+                              : ts("算力")}
                     </div>
                     <div className="mt-2 text-xs text-gray-400">
                       {billingType === "per_token"
-                        ? "如果后台存的是单 Token 单价，这里会自动换算成每 1M Tokens。"
-                        : "前台输入区中的“预估”金额，会基于当前参数做近似计算。"}
+                      ? ts("如果后台存的是单 Token 单价，这里会自动换算成每 1M Tokens。")
+                      : ts("前台输入区中的“预估”金额，会基于当前参数做近似计算。")}
                     </div>
                   </div>
                 </div>
 
                 <div className="soft-card p-5">
-                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">价格</div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{ts("价格")}</div>
                   {isMiniMaxH3Dynamic ? (
                     <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
                       <div className="rounded-2xl border border-gray-100 bg-white p-4 dark:border-white/10 dark:bg-white/5">

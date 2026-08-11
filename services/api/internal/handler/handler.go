@@ -84,13 +84,19 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.Use(h.ApiTokenAuth())
 	v1.Use(middleware.RateLimit(h.cache, "openapi", 120, time.Minute, middleware.UserIdentity))
 	{
+		v1.GET("/models", h.OpenAPIListModels)
 		v1.POST("/chat/completions", h.ChatCompletion)
+		v1.POST("/messages", h.AnthropicMessages)
 		v1.POST("/images/generations", h.OpenAPIImageGeneration)
 		v1.POST("/video/generations", h.OpenAPIVideoGeneration)
 		v1.POST("/audio/speech", h.OpenAPIAudioSpeech)
 		v1.GET("/tasks/:task_no", h.OpenAPIGetTask)
 		v1.GET("/tasks/:task_no/events", h.OpenAPIListTaskEvents)
 	}
+	native := r.Group("/v1beta")
+	native.Use(h.ApiTokenAuth())
+	native.Use(middleware.RateLimit(h.cache, "openapi", 120, time.Minute, middleware.UserIdentity))
+	native.POST("/models/*action", h.GeminiGenerateContent)
 
 	api := r.Group("/api")
 	{
@@ -563,6 +569,11 @@ func extractAPIKey(c *gin.Context) string {
 	if token := extractBearer(c); token != "" {
 		return token
 	}
+	for _, header := range []string{"x-api-key", "x-goog-api-key"} {
+		if token := strings.TrimSpace(c.GetHeader(header)); token != "" {
+			return token
+		}
+	}
 	if token := strings.TrimSpace(c.Query("token")); token != "" {
 		return token
 	}
@@ -612,7 +623,11 @@ func (h *Handler) ApiTokenAuth() gin.HandlerFunc {
 		token := extractAPIKey(c)
 		userID, err := h.ops.AuthenticateApiToken(c.Request.Context(), token)
 		if err != nil {
-			util.Unauthorized(c, err.Error())
+			if strings.HasPrefix(c.Request.URL.Path, "/v1") {
+				openAPIError(c, http.StatusUnauthorized, "authentication_error", err.Error())
+			} else {
+				util.Unauthorized(c, err.Error())
+			}
 			c.Abort()
 			return
 		}
@@ -693,6 +708,25 @@ func (h *Handler) ListModels(c *gin.Context) {
 	}
 	_ = h.contentI18n.ApplyBatch(c.Request.Context(), "model", locale, localized)
 	util.OK(c, models)
+}
+
+// OpenAPIListModels exposes the standard model-list shape without leaking the
+// internal pricing, runtime and administrative fields returned by /api/models.
+func (h *Handler) OpenAPIListModels(c *gin.Context) {
+	models, err := h.models.ListPublic(c.Request.Context(), c.Query("category"))
+	if err != nil {
+		openAPIError(c, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	data := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		data = append(data, map[string]interface{}{
+			"id":       model.Code,
+			"object":   "model",
+			"owned_by": "starai",
+		})
+	}
+	c.JSON(http.StatusOK, map[string]interface{}{"object": "list", "data": data})
 }
 
 func (h *Handler) GetModel(c *gin.Context) {
@@ -1100,7 +1134,7 @@ func (h *Handler) DeleteConversation(c *gin.Context) {
 func (h *Handler) ChatCompletion(c *gin.Context) {
 	var input service.CompletionInput
 	if err := c.ShouldBindJSON(&input); err != nil {
-		util.BadRequest(c, "参数错误")
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "参数错误")
 		return
 	}
 	userID := c.GetInt64("user_id")
@@ -1108,7 +1142,7 @@ func (h *Handler) ChatCompletion(c *gin.Context) {
 		return
 	}
 	if _, err := h.chat.ResolveInputModel(c.Request.Context(), &input); err != nil {
-		util.BadRequest(c, "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
+		openAPIError(c, http.StatusBadRequest, "model_not_found", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
 		return
 	}
 	h.attachAssetContext(c.Request.Context(), userID, &input)
@@ -1119,16 +1153,346 @@ func (h *Handler) ChatCompletion(c *gin.Context) {
 	result, err := h.chat.Completion(c.Request.Context(), userID, input)
 	if err != nil {
 		if pe, ok := err.(*runtime.PlatformError); ok {
-			util.Fail(c, 502, 502, pe.Message)
+			openAPIError(c, http.StatusBadGateway, "provider_error", pe.Message)
 			return
 		}
-		if failChatBalance(c, err) {
+		if failChatBalanceOpenAPI(c, err) {
 			return
 		}
-		util.InternalError(c, err.Error())
+		openAPIError(c, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
-	util.OK(c, result)
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) AnthropicMessages(c *gin.Context) {
+	var body map[string]interface{}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "请求参数错误")
+		return
+	}
+	input, err := anthropicCompletionInput(body)
+	if err != nil {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if input.Stream {
+		h.nativeChatStream(c, input, "anthropic")
+		return
+	}
+	result, err := h.chat.Completion(c.Request.Context(), c.GetInt64("user_id"), input)
+	if err != nil {
+		h.writeNativeChatError(c, err)
+		return
+	}
+	responseContent := result.ContentBlocks
+	if len(responseContent) == 0 {
+		responseContent = []interface{}{map[string]interface{}{"type": "text", "text": result.Content}}
+	}
+	if len(result.ToolCalls) > 0 {
+		for _, call := range result.ToolCalls {
+			responseContent = append(responseContent, map[string]interface{}{"type": "tool_use", "id": stringAny(call["id"]), "name": stringAny(call["function_name"]), "input": call["arguments"]})
+		}
+	}
+	response := map[string]interface{}{
+		"id": "msg_" + result.RequestID, "type": "message", "role": "assistant",
+		"content": responseContent,
+		"model":   input.Model, "stop_reason": "end_turn", "stop_sequence": nil,
+		"usage": map[string]interface{}{"input_tokens": result.Usage.PromptTokens, "output_tokens": result.Usage.CompletionTokens},
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *Handler) GeminiGenerateContent(c *gin.Context) {
+	action := strings.TrimPrefix(c.Param("action"), "/")
+	parts := strings.SplitN(action, ":", 2)
+	if len(parts) != 2 || (parts[1] != "generateContent" && parts[1] != "streamGenerateContent") {
+		openAPIError(c, http.StatusNotFound, "not_found", "Gemini endpoint 不存在")
+		return
+	}
+	var body map[string]interface{}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		openAPIError(c, http.StatusBadRequest, "INVALID_ARGUMENT", "请求参数错误")
+		return
+	}
+	input, err := geminiCompletionInput(parts[0], body, parts[1] == "streamGenerateContent" || c.Query("alt") == "sse")
+	if err != nil {
+		openAPIError(c, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	if input.Stream {
+		h.nativeChatStream(c, input, "gemini")
+		return
+	}
+	result, err := h.chat.Completion(c.Request.Context(), c.GetInt64("user_id"), input)
+	if err != nil {
+		h.writeNativeChatError(c, err)
+		return
+	}
+	responseParts := result.ContentBlocks
+	if len(responseParts) == 0 {
+		responseParts = []interface{}{map[string]interface{}{"text": result.Content}}
+	}
+	if len(result.ToolCalls) > 0 {
+		for _, call := range result.ToolCalls {
+			responseParts = append(responseParts, map[string]interface{}{"functionCall": map[string]interface{}{"name": stringAny(call["function_name"]), "args": call["arguments"]}})
+		}
+	}
+	c.JSON(http.StatusOK, map[string]interface{}{
+		"candidates": []interface{}{map[string]interface{}{
+			"content":      map[string]interface{}{"role": "model", "parts": responseParts},
+			"finishReason": "STOP", "index": 0,
+		}},
+		"modelVersion":  input.Model,
+		"usageMetadata": map[string]interface{}{"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0},
+	})
+}
+
+func anthropicCompletionInput(body map[string]interface{}) (service.CompletionInput, error) {
+	model := strings.TrimSpace(stringAny(body["model"]))
+	if model == "" {
+		return service.CompletionInput{}, errors.New("model 不能为空")
+	}
+	messages := []runtime.ChatMessage{}
+	if system := nativeText(body["system"]); system != "" {
+		messages = append(messages, runtime.ChatMessage{Role: "system", Content: system})
+	}
+	for _, item := range nativeList(body["messages"]) {
+		message, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		role := strings.TrimSpace(stringAny(message["role"]))
+		if role == "" {
+			role = "user"
+		}
+		messages = append(messages, runtime.ChatMessage{Role: role, Content: nativeText(message["content"])})
+	}
+	if len(messages) == 0 {
+		return service.CompletionInput{}, errors.New("messages 不能为空")
+	}
+	params := map[string]interface{}{}
+	if len(messages) > 0 {
+		params["reference_images"] = nativeMediaURLs(body["messages"])
+	}
+	for _, key := range []string{"max_tokens", "temperature", "top_p", "top_k", "stop_sequences", "tools", "tool_choice", "thinking", "metadata"} {
+		if value, ok := body[key]; ok {
+			params[key] = value
+		}
+	}
+	return service.CompletionInput{Model: model, Messages: messages, Params: params, Stream: boolValue(body["stream"])}, nil
+}
+
+func geminiCompletionInput(model string, body map[string]interface{}, stream bool) (service.CompletionInput, error) {
+	model = strings.TrimSpace(strings.TrimPrefix(model, "models/"))
+	if model == "" {
+		return service.CompletionInput{}, errors.New("model 不能为空")
+	}
+	messages := []runtime.ChatMessage{}
+	for _, item := range nativeList(body["contents"]) {
+		content, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		role := "user"
+		if strings.TrimSpace(stringAny(content["role"])) == "model" {
+			role = "assistant"
+		}
+		messages = append(messages, runtime.ChatMessage{Role: role, Content: nativeText(content["parts"])})
+	}
+	if instruction := nativeText(body["systemInstruction"]); instruction != "" {
+		messages = append([]runtime.ChatMessage{{Role: "system", Content: instruction}}, messages...)
+	}
+	if len(messages) == 0 {
+		return service.CompletionInput{}, errors.New("contents 不能为空")
+	}
+	params := map[string]interface{}{}
+	params["reference_images"] = nativeMediaURLs(body["contents"])
+	if config, ok := body["generationConfig"].(map[string]interface{}); ok {
+		for source, target := range map[string]string{"temperature": "temperature", "topP": "top_p", "topK": "top_k", "maxOutputTokens": "max_tokens", "stopSequences": "stop"} {
+			if value, exists := config[source]; exists {
+				params[target] = value
+			}
+		}
+	}
+	if value, ok := body["tools"]; ok {
+		params["tools"] = value
+	}
+	return service.CompletionInput{Model: model, Messages: messages, Params: params, Stream: stream}, nil
+}
+
+func (h *Handler) nativeChatStream(c *gin.Context, input service.CompletionInput, protocol string) {
+	requestID, ch, estimated, err := h.chat.CompletionStream(c.Request.Context(), c.GetInt64("user_id"), input)
+	if err != nil {
+		h.writeNativeChatError(c, err)
+		return
+	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.WriteHeader(http.StatusOK)
+	flusher, _ := c.Writer.(http.Flusher)
+	if protocol == "anthropic" {
+		writeNativeSSE(c, "message_start", map[string]interface{}{"type": "message_start", "message": map[string]interface{}{"id": "msg_" + requestID, "type": "message", "role": "assistant", "content": []interface{}{}, "model": input.Model}})
+		writeNativeSSE(c, "content_block_start", map[string]interface{}{"type": "content_block_start", "index": 0, "content_block": map[string]interface{}{"type": "text", "text": ""}})
+	}
+	flusher.Flush()
+	fullContent := ""
+	var usage *runtime.ChatUsage
+	for chunk := range ch {
+		if chunk.Error != nil {
+			h.chat.UnfreezeStream(context.Background(), c.GetInt64("user_id"), requestID, estimated)
+			writeNativeSSE(c, "error", map[string]interface{}{"type": "error", "error": map[string]interface{}{"type": "api_error", "message": "模型服务异常"}})
+			flusher.Flush()
+			return
+		}
+		if chunk.Content != "" {
+			fullContent += chunk.Content
+			if protocol == "anthropic" {
+				writeNativeSSE(c, "content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": 0, "delta": map[string]interface{}{"type": "text_delta", "text": chunk.Content}})
+			} else {
+				writeNativeSSE(c, "", map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"role": "model", "parts": []interface{}{map[string]interface{}{"text": chunk.Content}}}}}})
+			}
+			flusher.Flush()
+		}
+		for _, call := range chunk.ToolCalls {
+			if protocol == "anthropic" {
+				if stringAny(call["type"]) == "tool_use" {
+					writeNativeSSE(c, "content_block_start", map[string]interface{}{"type": "content_block_start", "index": 1, "content_block": map[string]interface{}{"type": "tool_use", "id": stringAny(call["id"]), "name": stringAny(call["name"]), "input": map[string]interface{}{}}})
+				} else {
+					writeNativeSSE(c, "content_block_delta", map[string]interface{}{"type": "content_block_delta", "index": 1, "delta": map[string]interface{}{"type": "input_json_delta", "partial_json": stringAny(call["partial_json"])}})
+				}
+			} else {
+				writeNativeSSE(c, "", map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"content": map[string]interface{}{"role": "model", "parts": []interface{}{map[string]interface{}{"functionCall": call["functionCall"]}}}}}})
+			}
+			flusher.Flush()
+		}
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
+		if chunk.Done {
+			break
+		}
+	}
+	_, finalizeErr := h.chat.FinalizeStream(context.Background(), c.GetInt64("user_id"), requestID, input, fullContent, usage, estimated)
+	if finalizeErr != nil {
+		writeNativeSSE(c, "error", map[string]interface{}{"type": "error", "error": map[string]interface{}{"type": "api_error", "message": "费用结算失败"}})
+		flusher.Flush()
+		return
+	}
+	if protocol == "anthropic" {
+		writeNativeSSE(c, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0})
+		writeNativeSSE(c, "message_delta", map[string]interface{}{"type": "message_delta", "delta": map[string]interface{}{"stop_reason": "end_turn"}})
+		writeNativeSSE(c, "message_stop", map[string]interface{}{"type": "message_stop"})
+	} else {
+		writeNativeSSE(c, "", map[string]interface{}{"candidates": []interface{}{map[string]interface{}{"finishReason": "STOP"}}})
+	}
+	flusher.Flush()
+}
+
+func (h *Handler) writeNativeChatError(c *gin.Context, err error) {
+	status := http.StatusInternalServerError
+	code := "api_error"
+	if errors.Is(err, billing.ErrInsufficientBalance) || err.Error() == billing.InsufficientBalanceMsg {
+		status, code = http.StatusPaymentRequired, "insufficient_balance"
+	}
+	openAPIError(c, status, code, err.Error())
+}
+
+func writeNativeSSE(c *gin.Context, event string, value interface{}) {
+	b, _ := json.Marshal(value)
+	if event != "" {
+		_, _ = fmt.Fprintf(c.Writer, "event: %s\n", event)
+	}
+	_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
+}
+
+func nativeList(value interface{}) []interface{} {
+	items, _ := value.([]interface{})
+	return items
+}
+
+func nativeText(value interface{}) string {
+	switch item := value.(type) {
+	case string:
+		return item
+	case []interface{}:
+		parts := make([]string, 0, len(item))
+		for _, child := range item {
+			if part, ok := child.(map[string]interface{}); ok {
+				if text := strings.TrimSpace(stringAny(part["text"])); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "")
+	case map[string]interface{}:
+		if text := stringAny(item["text"]); text != "" {
+			return text
+		}
+		if parts, ok := item["parts"]; ok {
+			return nativeText(parts)
+		}
+	}
+	return ""
+}
+
+func nativeMediaURLs(value interface{}) []string {
+	var urls []string
+	var walk func(interface{})
+	walk = func(item interface{}) {
+		switch value := item.(type) {
+		case []interface{}:
+			for _, child := range value {
+				walk(child)
+			}
+		case map[string]interface{}:
+			if source, ok := value["source"].(map[string]interface{}); ok {
+				if url := strings.TrimSpace(stringAny(source["url"])); url != "" {
+					urls = append(urls, url)
+				}
+				if data := strings.TrimSpace(stringAny(source["data"])); data != "" {
+					urls = append(urls, "data:"+stringAny(source["media_type"])+";base64,"+data)
+				}
+			}
+			if inline, ok := value["inline_data"].(map[string]interface{}); ok {
+				if data := strings.TrimSpace(stringAny(inline["data"])); data != "" {
+					urls = append(urls, "data:"+stringAny(inline["mime_type"])+";base64,"+data)
+				}
+			}
+			for _, key := range []string{"content", "parts", "image_url", "video_url"} {
+				if child, exists := value[key]; exists {
+					walk(child)
+				}
+			}
+		}
+	}
+	walk(value)
+	return urls
+}
+
+func boolValue(value interface{}) bool {
+	result, _ := value.(bool)
+	return result
+}
+
+func openAPIError(c *gin.Context, status int, code, message string) {
+	c.JSON(status, map[string]interface{}{"error": map[string]interface{}{
+		"type": code, "code": code, "message": message,
+	}})
+}
+
+func failChatBalanceOpenAPI(c *gin.Context, err error) bool {
+	var be *service.BalanceError
+	if errors.As(err, &be) {
+		openAPIError(c, http.StatusPaymentRequired, "insufficient_balance", billing.InsufficientBalanceMsg)
+		return true
+	}
+	if err.Error() == billing.InsufficientBalanceMsg {
+		openAPIError(c, http.StatusPaymentRequired, "insufficient_balance", billing.InsufficientBalanceMsg)
+		return true
+	}
+	return false
 }
 
 func stringListFromParam(v interface{}) []string {
@@ -1385,10 +1749,10 @@ func (h *Handler) chatStream(c *gin.Context, userID int64, input service.Complet
 func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.CompletionInput, model *service.ModelFull) {
 	requestID, ch, estimated, err := h.chat.CompletionStream(c.Request.Context(), userID, input)
 	if err != nil {
-		if failChatBalance(c, err) {
+		if failChatBalanceOpenAPI(c, err) {
 			return
 		}
-		util.InternalError(c, err.Error())
+		openAPIError(c, http.StatusInternalServerError, "server_error", err.Error())
 		return
 	}
 
@@ -1400,7 +1764,7 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 
 	var fullContent string
 	var usage *runtime.ChatUsage
-	c.Writer.Write([]byte(runtime.FormatSSE("start", map[string]string{"request_id": requestID})))
+	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"role": "assistant"}, "", nil)
 	flusher.Flush()
 
 	for chunk := range ch {
@@ -1409,13 +1773,17 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			if unfreezeErr := h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated); unfreezeErr != nil {
 				message = "模型服务异常，且冻结额度释放失败，请联系客服核对账单"
 			}
-			c.Writer.Write([]byte(runtime.FormatSSE("error", map[string]string{"message": message})))
+			openAIStreamError(c, message)
 			flusher.Flush()
 			return
 		}
 		if chunk.Content != "" {
 			fullContent += chunk.Content
-			c.Writer.Write([]byte(runtime.FormatSSE("delta", map[string]string{"content": chunk.Content})))
+			writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"content": chunk.Content}, "", nil)
+			flusher.Flush()
+		}
+		if len(chunk.ToolCalls) > 0 {
+			writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"tool_calls": chunk.ToolCalls}, "", nil)
 			flusher.Flush()
 		}
 		if chunk.Usage != nil {
@@ -1425,14 +1793,38 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			break
 		}
 	}
-	convID, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, usage, estimated)
+	_, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, usage, estimated)
 	if finalizeErr != nil {
-		c.Writer.Write([]byte(runtime.FormatSSE("error", map[string]string{"message": "费用结算失败，请联系客服核对账单"})))
+		openAIStreamError(c, "费用结算失败，请联系客服核对账单")
 		flusher.Flush()
 		return
 	}
-	c.Writer.Write([]byte(runtime.FormatSSE("done", map[string]interface{}{"content": fullContent, "request_id": requestID, "conversation_id": convID})))
+	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{}, "stop", usage)
+	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
+}
+
+func writeOpenAIStreamChunk(c *gin.Context, requestID, model string, delta map[string]interface{}, finishReason string, usage *runtime.ChatUsage) {
+	choice := map[string]interface{}{"index": 0, "delta": delta}
+	if finishReason != "" {
+		choice["finish_reason"] = finishReason
+	} else {
+		choice["finish_reason"] = nil
+	}
+	payload := map[string]interface{}{
+		"id": "chatcmpl-" + requestID, "object": "chat.completion.chunk", "created": time.Now().Unix(),
+		"model": model, "choices": []interface{}{choice},
+	}
+	if usage != nil {
+		payload["usage"] = usage
+	}
+	data, _ := json.Marshal(payload)
+	_, _ = c.Writer.Write([]byte("data: " + string(data) + "\n\n"))
+}
+
+func openAIStreamError(c *gin.Context, message string) {
+	data, _ := json.Marshal(map[string]interface{}{"error": map[string]interface{}{"type": "server_error", "code": "server_error", "message": message}})
+	_, _ = c.Writer.Write([]byte("data: " + string(data) + "\n\n"))
 }
 
 func (h *Handler) chatMultiStream(c *gin.Context, userID int64, input service.CompletionInput, channelKey string) {
@@ -1886,12 +2278,12 @@ func (h *Handler) OpenAPIAudioSpeech(c *gin.Context) {
 func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptField string) {
 	var body map[string]interface{}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		util.BadRequest(c, "参数错误")
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "参数错误")
 		return
 	}
 	modelName := strings.TrimSpace(stringAny(body["model"]))
 	if modelName == "" {
-		util.BadRequest(c, "model 不能为空")
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "model 不能为空")
 		return
 	}
 	prompt := strings.TrimSpace(stringAny(body[promptField]))
@@ -1900,9 +2292,9 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 	}
 	if prompt == "" {
 		if promptField == "input" {
-			util.BadRequest(c, "input 不能为空")
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "input 不能为空")
 		} else {
-			util.BadRequest(c, "prompt 不能为空")
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "prompt 不能为空")
 		}
 		return
 	}
@@ -1911,7 +2303,7 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 	}
 	model, err := h.models.ResolveTaskModel(c.Request.Context(), modelName, requestMode)
 	if err != nil {
-		util.BadRequest(c, "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
+		openAPIError(c, http.StatusBadRequest, "model_not_found", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
 		return
 	}
 	params := map[string]interface{}{}
@@ -1936,10 +2328,10 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 	input := service.CreateTaskInput{ModelCode: model.Code, Prompt: prompt, Params: params}
 	task, err := h.tasks.Create(c.Request.Context(), c.GetInt64("user_id"), input)
 	if err != nil {
-		util.BadRequest(c, err.Error())
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	util.OK(c, openAPITaskResponse(task))
+	c.JSON(http.StatusOK, openAPITaskResponse(task))
 }
 
 func openAPITaskResponse(task *service.TaskDTO) map[string]interface{} {
@@ -1973,19 +2365,19 @@ func openAPITaskResponse(task *service.TaskDTO) map[string]interface{} {
 func (h *Handler) OpenAPIGetTask(c *gin.Context) {
 	task, err := h.tasks.Get(c.Request.Context(), c.GetInt64("user_id"), c.Param("task_no"))
 	if err != nil {
-		util.NotFound(c, "任务不存在")
+		openAPIError(c, http.StatusNotFound, "task_not_found", "任务不存在")
 		return
 	}
-	util.OK(c, openAPITaskResponse(task))
+	c.JSON(http.StatusOK, openAPITaskResponse(task))
 }
 
 func (h *Handler) OpenAPIListTaskEvents(c *gin.Context) {
 	events, err := h.tasks.ListEvents(c.Request.Context(), c.GetInt64("user_id"), c.Param("task_no"))
 	if err != nil {
-		util.NotFound(c, "任务不存在")
+		openAPIError(c, http.StatusNotFound, "task_not_found", "任务不存在")
 		return
 	}
-	util.OK(c, map[string]interface{}{"items": events})
+	c.JSON(http.StatusOK, map[string]interface{}{"items": events})
 }
 
 func normalizeOpenAPIStringList(v interface{}) []string {
@@ -2598,6 +2990,10 @@ func (h *Handler) AdminListUpstreamModels(c *gin.Context) {
 }
 
 func (h *Handler) ListAPIDocs(c *gin.Context) {
+	if !h.apiDocsEnabled(c.Request.Context()) {
+		util.OK(c, map[string]interface{}{"items": []service.APIDocDTO{}})
+		return
+	}
 	items, err := h.models.ListAPIDocs(c.Request.Context(), false)
 	if err != nil {
 		util.InternalError(c, err.Error())
@@ -2612,6 +3008,10 @@ func (h *Handler) ListAPIDocs(c *gin.Context) {
 }
 
 func (h *Handler) GetAPIDoc(c *gin.Context) {
+	if !h.apiDocsEnabled(c.Request.Context()) {
+		util.NotFound(c, "API 文档未开放")
+		return
+	}
 	item, err := h.models.GetAPIDoc(c.Request.Context(), c.Param("slug"), true)
 	if err != nil {
 		util.BadRequest(c, "API 文档不存在")
@@ -2619,6 +3019,17 @@ func (h *Handler) GetAPIDoc(c *gin.Context) {
 	}
 	_ = h.contentI18n.Apply(c.Request.Context(), "api_doc", item.Slug, requestContentLocale(c), item)
 	util.OK(c, item)
+}
+
+func (h *Handler) apiDocsEnabled(ctx context.Context) bool {
+	cfg, err := h.admin.GetSystemConfigs(ctx)
+	if err != nil {
+		// Keep the public docs available if an old database has not received the
+		// optional setting yet. The migration still makes the default explicit.
+		return true
+	}
+	value, ok := cfg["api_docs_enabled"].(bool)
+	return !ok || value
 }
 
 func (h *Handler) AdminListAPIDocs(c *gin.Context) {
@@ -3272,12 +3683,15 @@ func (h *Handler) GetPublicSystemConfigs(c *gin.Context) {
 		return
 	}
 	util.OK(c, map[string]interface{}{
+		"site_base_url":                    cfg["site_base_url"],
 		"site_name":                       cfg["site_name"],
 		"site_logo":                       cfg["site_logo"],
 		"site_favicon":                    cfg["site_favicon"],
 		"site_description":                cfg["site_description"],
 		"admin_site_description":          cfg["admin_site_description"],
 		"site_api_tagline":                cfg["site_api_tagline"],
+		"api_docs_enabled":                cfg["api_docs_enabled"] == nil || cfg["api_docs_enabled"] == true,
+		"api_docs_operations":             cfg["api_docs_operations"],
 		"site_copyright":                  cfg["site_copyright"],
 		"home_meta_title":                 cfg["home_meta_title"],
 		"home_meta_description":           cfg["home_meta_description"],

@@ -111,6 +111,14 @@ const EMPTY: FormState = {
 
 const PAGE_SIZE = 10;
 
+const DOC_SECTIONS = [
+  { key: "chat", label: "聊天与文本", hint: "OpenAI、Anthropic、Gemini 三种聊天协议" },
+  { key: "image", label: "图片", hint: "图片生成接口" },
+  { key: "video", label: "视频", hint: "视频生成与异步任务接口" },
+  { key: "audio", label: "音频", hint: "语音生成接口" },
+  { key: "platform", label: "平台", hint: "模型列表、任务查询和任务事件" },
+] as const;
+
 function defaultEndpoint(mode: string, upstream?: string) {
   if (mode === "responses") return "/v1/responses";
   if (mode === "images") return "/v1/images/generations";
@@ -128,6 +136,21 @@ function defaultProtocol(mode: string) {
   return "openai-compatible";
 }
 
+function validateContent(content: Record<string, unknown>) {
+  const errors: string[] = [];
+  if (!content.request_example || typeof content.request_example !== "object" || Array.isArray(content.request_example)) errors.push("content.request_example 必须是 JSON 对象");
+  if (!content.response_example || typeof content.response_example !== "object" || Array.isArray(content.response_example)) errors.push("content.response_example 必须是 JSON 对象");
+  if (content.parameters !== undefined) {
+    if (!Array.isArray(content.parameters)) errors.push("content.parameters 必须是数组");
+    else content.parameters.forEach((item, index) => {
+      if (!item || typeof item !== "object" || !(item as Record<string, unknown>).name) errors.push(`content.parameters[${index}] 缺少 name`);
+    });
+  }
+  if (content.responses !== undefined && (!content.responses || typeof content.responses !== "object" || Array.isArray(content.responses))) errors.push("content.responses 必须是按 HTTP 状态码组织的 JSON 对象");
+  if (content.version !== undefined && typeof content.version !== "string") errors.push("content.version 必须是字符串，例如 v1");
+  return errors;
+}
+
 export default function AdminApiDocsPage() {
   const [docs, setDocs] = useState<APIDoc[]>([]);
   const [models, setModels] = useState<AdminModel[]>([]);
@@ -136,10 +159,26 @@ export default function AdminApiDocsPage() {
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [page, setPage] = useState(1);
+  const [apiDocsEnabled, setApiDocsEnabled] = useState(true);
+  const [siteBaseURL, setSiteBaseURL] = useState("");
+  const [apiDocsSections, setApiDocsSections] = useState<Record<string, boolean>>(
+    Object.fromEntries(DOC_SECTIONS.map((item) => [item.key, true]))
+  );
+  const [switchSaving, setSwitchSaving] = useState(false);
 
   const load = () => {
     adminApi<{ items: APIDoc[] }>("/api-docs").then((r) => setDocs(r.items || []));
     adminApi<AdminModel[]>("/models").then(setModels);
+    adminApi<Record<string, unknown>>("/system-configs").then((cfg) => {
+      if (typeof cfg.site_base_url === "string") setSiteBaseURL(cfg.site_base_url.trim().replace(/\/+$/, ""));
+      setApiDocsEnabled(cfg.api_docs_enabled !== false);
+      if (cfg.api_docs_operations && typeof cfg.api_docs_operations === "object") {
+        setApiDocsSections({
+          ...Object.fromEntries(DOC_SECTIONS.map((item) => [item.key, true])),
+          ...(cfg.api_docs_operations as Record<string, boolean>),
+        });
+      }
+    });
   };
 
   useEffect(() => {
@@ -174,7 +213,7 @@ export default function AdminApiDocsPage() {
   };
 
   const openCreate = () => {
-    setForm(EMPTY);
+    setForm({ ...EMPTY, base_url: siteBaseURL || EMPTY.base_url });
     setMsg("");
     setShowForm(true);
   };
@@ -209,6 +248,11 @@ export default function AdminApiDocsPage() {
       setMsg("content JSON 格式错误");
       return;
     }
+    const contentErrors = validateContent(content);
+    if (contentErrors.length > 0) {
+      setMsg(contentErrors[0]);
+      return;
+    }
     if (!form.model_id) {
       setMsg("请选择平台已接入模型");
       return;
@@ -230,10 +274,61 @@ export default function AdminApiDocsPage() {
     }
   };
 
+  const standardizeContent = () => {
+    try {
+      const current = JSON.parse(form.content || "{}");
+      const model = models.find((item) => item.id === form.model_id);
+      const modelCode = model?.code || "MODEL_CODE";
+      const next = {
+        operation_id: current.operation_id || form.slug || modelCode,
+        version: current.version || "v1",
+        request_content_type: current.request_content_type || "application/json",
+        response_content_type: current.response_content_type || "application/json",
+        ...current,
+        request_example: current.request_example || { model: modelCode, messages: [{ role: "user", content: "你好，请介绍你的能力" }], stream: false },
+        response_example: current.response_example || { id: "chatcmpl_xxx", object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "这是模型响应内容" }, finish_reason: "stop" }] },
+        responses: current.responses || {
+          "200": { description: "请求成功", body: { id: "chatcmpl_xxx", object: "chat.completion", choices: [] } },
+          "400": { description: "请求参数错误", body: { error: { type: "invalid_request_error", code: "invalid_request_error", message: "请求参数错误" } } },
+          "401": { description: "API Key 无效或已停用", body: { error: { type: "invalid_api_key", code: "invalid_api_key", message: "API Key 无效或已停用" } } },
+        },
+      };
+      setForm({ ...form, content: JSON.stringify(next, null, 2) });
+      setMsg("已补齐标准字段，请检查后保存");
+    } catch {
+      setMsg("content JSON 格式错误，无法标准化");
+    }
+  };
+
   const remove = async (doc: APIDoc) => {
     if (!confirm(`确认删除「${doc.title}」的 API 文档？`)) return;
     await adminApi(`/api-docs/${doc.id}`, { method: "DELETE" });
     load();
+  };
+
+  const togglePublicDocs = async (enabled: boolean) => {
+    setSwitchSaving(true);
+    try {
+      await adminApi("/system-configs", { method: "PATCH", body: JSON.stringify({ api_docs_enabled: enabled }) });
+      setApiDocsEnabled(enabled);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "保存显示开关失败");
+    } finally {
+      setSwitchSaving(false);
+    }
+  };
+
+  const toggleDocSection = async (key: string, enabled: boolean) => {
+    const next = { ...apiDocsSections, [key]: enabled };
+    setSwitchSaving(true);
+    try {
+      await adminApi("/system-configs", { method: "PATCH", body: JSON.stringify({ api_docs_operations: next }) });
+      setApiDocsSections(next);
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : "保存接口显示开关失败");
+    } finally {
+      setSwitchSaving(false);
+    }
   };
 
   return (
@@ -249,6 +344,38 @@ export default function AdminApiDocsPage() {
           新增 API 文档
         </button>
       </div>
+
+      <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-indigo-100 bg-indigo-50/60 px-4 py-3">
+        <div>
+          <div className="text-sm font-semibold text-gray-900">前台 API 文档中心</div>
+          <div className="mt-1 text-xs text-gray-500">关闭后会隐藏前台导航、阻止公开文档接口，并保留后台编辑数据。</div>
+        </div>
+        <button
+          type="button"
+          disabled={switchSaving}
+          onClick={() => togglePublicDocs(!apiDocsEnabled)}
+          className={`relative h-7 w-12 rounded-full transition ${apiDocsEnabled ? "bg-emerald-500" : "bg-gray-300"} disabled:opacity-50`}
+          aria-label={apiDocsEnabled ? "隐藏 API 文档中心" : "显示 API 文档中心"}
+        >
+          <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${apiDocsEnabled ? "left-6" : "left-1"}`} />
+        </button>
+      </div>
+      <div className="mb-6 rounded-2xl border border-gray-200 bg-white p-4">
+        <div className="mb-3">
+          <div className="text-sm font-semibold text-gray-900">文档分组显示</div>
+          <div className="mt-1 text-xs text-gray-500">可单独隐藏某一类接口；隐藏只影响文档中心展示，不会停用实际 API。</div>
+        </div>
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-5">
+          {DOC_SECTIONS.map((section) => {
+            const enabled = apiDocsSections[section.key] !== false;
+            return <button key={section.key} type="button" disabled={switchSaving || !apiDocsEnabled} onClick={() => toggleDocSection(section.key, !enabled)} className={`rounded-xl border px-3 py-3 text-left transition ${enabled ? "border-emerald-200 bg-emerald-50/60" : "border-gray-200 bg-gray-50"} disabled:cursor-not-allowed disabled:opacity-50`}>
+              <div className="flex items-center justify-between gap-2"><span className="text-sm font-semibold text-gray-900">{section.label}</span><span className={`relative h-5 w-9 rounded-full transition ${enabled ? "bg-emerald-500" : "bg-gray-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${enabled ? "left-4" : "left-0.5"}`} /></span></div>
+              <div className="mt-1 text-[11px] leading-4 text-gray-500">{section.hint}</div>
+            </button>;
+          })}
+        </div>
+      </div>
+      {msg && !showForm && <p className="mb-4 text-sm text-red-500">{msg}</p>}
 
       {showForm && (
         <form onSubmit={submit} className="bg-white rounded-2xl p-6 border mb-6 grid grid-cols-2 gap-4">
@@ -308,8 +435,9 @@ export default function AdminApiDocsPage() {
             <input className="w-full mt-1 px-3 py-2 rounded-lg border text-sm" value={form.sdk} onChange={(e) => setForm({ ...form, sdk: e.target.value })} />
           </div>
           <div className="col-span-2">
-            <label className="text-xs text-gray-500">content JSON（features / request_example / response_example / notes）</label>
+            <div className="flex items-center justify-between gap-3"><label className="text-xs text-gray-500">标准文档 JSON（operation_id / version / request_example / response_example / parameters / responses / errors）</label><button type="button" onClick={standardizeContent} className="shrink-0 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs text-indigo-700 hover:bg-indigo-100">补齐标准字段</button></div>
             <textarea className="w-full mt-1 px-3 py-2 rounded-lg border text-xs font-mono h-64" value={form.content} onChange={(e) => setForm({ ...form, content: e.target.value })} />
+            <p className="mt-1 text-[11px] leading-5 text-gray-400">保存时会校验请求示例、响应示例、参数数组和 HTTP 响应定义；后端仍会自动补齐平台标准字段。</p>
           </div>
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={form.is_published} onChange={(e) => setForm({ ...form, is_published: e.target.checked })} />

@@ -217,22 +217,22 @@ function statusProgress(status: string, explicit = 0) {
   return 0;
 }
 
-function projectStage(project: Project | null, mediaTasks: MediaTask[], generationType: "image" | "video", isComicDrama = false) {
-  if (!project) return "开始";
-  if (project.status === "waiting_confirm") return "方案确认";
-  if (project.status === "succeeded") return "已完成";
-  if (project.status === "failed") return "失败";
+function projectStage(project: Project | null, mediaTasks: MediaTask[], generationType: "image" | "video", isComicDrama = false, translate: (source: string) => string = (source) => source) {
+  if (!project) return translate("开始");
+  if (project.status === "waiting_confirm") return translate("方案确认");
+  if (project.status === "succeeded") return translate("已完成");
+  if (project.status === "failed") return translate("失败");
   if (isComicDrama) {
     const step = textOf(project.outputs?.current_step);
-    if (step === "storyboard_confirm") return "分镜规划中...";
-    if (step === "video_segments") return "分段视频生成中...";
-    if (step === "compose") return "最终成片合成中...";
-    if (step === "result") return "成片整理中...";
-    if (mediaTasks.some((task) => mediaURL(task) && task.output?.image_url)) return "关键帧生成中...";
-    return "AI漫剧规划中...";
+    if (step === "storyboard_confirm") return translate("分镜规划中...");
+    if (step === "video_segments") return translate("分段视频生成中...");
+    if (step === "compose") return translate("最终成片合成中...");
+    if (step === "result") return translate("成片整理中...");
+    if (mediaTasks.some((task) => mediaURL(task) && task.output?.image_url)) return translate("关键帧生成中...");
+    return translate("AI漫剧规划中...");
   }
-  if (mediaTasks.length > 0 || project.outputs?.media_tasks || project.outputs?.current_step === "generate") return generationType === "video" ? "视频生成中..." : "图片生成中...";
-  return "AI分析中...";
+  if (mediaTasks.length > 0 || project.outputs?.media_tasks || project.outputs?.current_step === "generate") return generationType === "video" ? translate("视频生成中...") : translate("图片生成中...");
+  return translate("AI分析中...");
 }
 
 function analysisCandidates(analysis: Record<string, any>): AnalysisCandidate[] {
@@ -282,7 +282,7 @@ function clientScenePrompt(code: string, label: string, generationType: "image" 
 }
 
 export function AgentWorkspace({ code }: { code: string }) {
-  const { t, td, locale } = useI18n();
+  const { t, td, ts, locale } = useI18n();
   const router = useRouter();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [generationModel, setGenerationModel] = useState<Model | null>(null);
@@ -393,6 +393,8 @@ export function AgentWorkspace({ code }: { code: string }) {
     subtitle: step.subtitle && workflow ? td(`agent.${workflow.code}.step.${idx}.subtitle`, step.subtitle) : step.subtitle,
     tags: workflow ? step.tags?.map((tag) => td(`agent.${workflow.code}.step.${idx}.tag.${tag}`, tag)) : step.tags,
   }));
+  const translatedTimeline = (display.timeline?.length ? display.timeline : (workflow?.nodes || []).map((node) => node.name))
+    .map((item) => workflow ? td(`agent.${workflow.code}.timeline.${item}`, item) : item);
   const enableStepConfirm = flowOptions.enable_step_confirm !== false;
   const canUseAutopilot = flowOptions.enable_autopilot !== false;
   const allowPromptEdit = flowOptions.allow_prompt_edit !== false;
@@ -1022,7 +1024,7 @@ export function AgentWorkspace({ code }: { code: string }) {
     }
   };
 
-  if (!workflow) return <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">加载中...</div>;
+  if (!workflow) return <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">{ts("加载中...")}</div>;
 
   if (isVideoUtility) {
     return <VideoUpscaleWorkspace workflow={workflow} />;
@@ -1050,7 +1052,7 @@ export function AgentWorkspace({ code }: { code: string }) {
             {projectDrawerCollapsed ? ">" : "<"}
           </button>
           {projectDrawerCollapsed ? (
-            <div className="flex flex-1 items-start justify-center pt-20 text-xs text-gray-400 [writing-mode:vertical-rl]">项目</div>
+            <div className="flex flex-1 items-start justify-center pt-20 text-xs text-gray-400 [writing-mode:vertical-rl]">{ts("项目")}</div>
           ) : (
             <>
               <div className="p-4">
@@ -1145,8 +1147,8 @@ export function AgentWorkspace({ code }: { code: string }) {
               </div>
               <div className="shrink-0">
                 <ComicTimeline
-                  nodes={display.timeline?.length ? display.timeline : (workflow.nodes || []).map((node) => node.name)}
-                  mobileNodes={(workflow.nodes || []).map((node) => node.name)}
+                  nodes={translatedTimeline}
+                  mobileNodes={translatedTimeline}
                   compact
                 />
               </div>
@@ -1156,7 +1158,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 {project && (
                   <div className="mb-2 rounded-2xl border border-cyan-100 bg-white/70 px-4 py-2 text-xs text-gray-500 shadow-sm backdrop-blur dark:border-cyan-400/15 dark:bg-white/5 dark:text-gray-300">
                     <div className="flex items-center justify-between gap-3">
-                    <span>{projectStage(project, allMediaTasks, generationType, true)} · {totalProgress}%</span>
+                    <span>{projectStage(project, allMediaTasks, generationType, true, ts)} · {totalProgress}%</span>
                     <div className="flex items-center gap-2">
 					  {finalVideoURL ? <a href={finalVideoURL} target="_blank" rel="noreferrer" className="font-semibold text-cyan-600 dark:text-cyan-200">{t("comic.viewFinal")}</a> : null}
                       {(project.status === "pending" || project.status === "waiting_confirm") && <button type="button" onClick={() => void cancelProject()} className="font-semibold text-red-500 hover:text-red-600">{t("common.cancel")}</button>}
@@ -1215,13 +1217,13 @@ export function AgentWorkspace({ code }: { code: string }) {
                     <MediaOptionMenu
                       icon={<Mic2 size={14} />}
                       activeLabel={comicNarrationLabel(comicSettings.narration_perspective)}
-                      title="配音叙事模式"
-                      subtitle="控制剧本中的旁白视角与角色对白结构"
+                      title={ts("配音叙事模式")}
+                      subtitle={ts("控制剧本中的旁白视角与角色对白结构")}
                       menuWidth={300}
                     >
                       {(close) => <div className="space-y-1.5">{COMIC_NARRATION_MODES.map((option) => <MediaMenuOption key={option.value} multiline selected={comicSettings.narration_perspective === option.value} onClick={() => { setComicSettings((prev) => ({ ...prev, narration_perspective: option.value })); close(); }}><div><div className="leading-5">{option.label}</div><div className="mt-0.5 whitespace-normal text-[11px] font-normal leading-4 opacity-65">{option.description}</div></div></MediaMenuOption>)}</div>}
                     </MediaOptionMenu>
-                    {selectedComicVideoModel && !comicVideoSupportsReference ? <button type="button" onClick={() => setSettingsOpen(true)} className="h-9 rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">当前视频模型不支持参考图</button> : null}
+                    {selectedComicVideoModel && !comicVideoSupportsReference ? <button type="button" onClick={() => setSettingsOpen(true)} className="h-9 rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs font-semibold text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">{ts("当前视频模型不支持参考图")}</button> : null}
                     <MediaOptionMenu
                       icon={<Settings2 size={14} />}
                       activeLabel={projectQuality}
@@ -1422,7 +1424,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 <div className="space-y-5">
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-sm font-semibold text-gray-900 dark:text-white">{projectStage(project, allMediaTasks, generationType, isComicDrama)}</div>
+                      <div className="text-sm font-semibold text-gray-900 dark:text-white">{projectStage(project, allMediaTasks, generationType, isComicDrama, ts)}</div>
                       <div className="mt-0.5 text-xs text-gray-400">{t("workspace.generationProgress")} {totalProgress}%</div>
                     </div>
                     {project.status === "running" || project.status === "pending" ? <Loader2 size={18} className="animate-spin text-primary" /> : null}
@@ -1557,7 +1559,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 <div className="flex items-center gap-2">
                   {isComicDrama && (
                     <button onClick={() => setSettingsOpen(true)} className="h-9 px-3 rounded-xl bg-gray-50 border border-gray-100 text-gray-600 text-sm flex items-center gap-1.5 hover:bg-white transition dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10">
-                      <Settings2 size={15} />偏好设置
+                      <Settings2 size={15} />{ts("偏好设置")}
                     </button>
                   )}
                   <button onClick={() => setHelpOpen(true)} className="h-9 px-3 rounded-xl bg-gray-50 border border-gray-100 text-gray-600 text-sm flex items-center gap-1.5 hover:bg-white transition dark:bg-white/5 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"><HelpCircle size={15} />{t("agent.help")}</button>
@@ -1590,7 +1592,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 </div>
               ) : null}
             </div>
-            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={display.input?.placeholder || t("agent.inputPlaceholder")} rows={3} className="w-full min-h-[88px] resize-none bg-transparent px-4 py-3 text-sm text-gray-700 focus:outline-none placeholder:text-gray-400 leading-relaxed dark:text-gray-100 dark:placeholder:text-gray-500" />
+            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={workflow ? td(`agent.${workflow.code}.input.placeholder`, display.input?.placeholder || t("agent.inputPlaceholder")) : (display.input?.placeholder || t("agent.inputPlaceholder"))} rows={3} className="w-full min-h-[88px] resize-none bg-transparent px-4 py-3 text-sm text-gray-700 focus:outline-none placeholder:text-gray-400 leading-relaxed dark:text-gray-100 dark:placeholder:text-gray-500" />
             <div className="px-3 sm:px-4 py-3 border-t border-gray-50 dark:border-white/10 flex items-center gap-2">
               <div className="scroll-x-only flex min-w-0 flex-1 flex-nowrap items-center gap-2 overflow-x-auto pb-1">
                 {isComicDrama ? (
@@ -1641,39 +1643,39 @@ export function AgentWorkspace({ code }: { code: string }) {
           <div className="w-full max-w-3xl rounded-2xl bg-white p-5 shadow-2xl dark:bg-gray-900 dark:border dark:border-white/10" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
-                <div className="font-semibold text-gray-900 dark:text-white">偏好设置</div>
-                <div className="mt-0.5 text-xs text-gray-400">自定义 AI 漫剧创作偏好</div>
+                <div className="font-semibold text-gray-900 dark:text-white">{ts("偏好设置")}</div>
+                <div className="mt-0.5 text-xs text-gray-400">{ts("自定义 AI 漫剧创作偏好")}</div>
               </div>
               <button onClick={() => setSettingsOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={16} /></button>
             </div>
             <div className="grid max-h-[68vh] gap-3 overflow-y-auto pr-1 md:grid-cols-2">
-              <ComicSettingCard title="资产图风格参考">
-                <Segmented value={comicSettings.style_reference_mode} options={[["image_reference", "附带风格参考图"], ["text_only", "仅文字描述"]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, style_reference_mode: v }))} />
+              <ComicSettingCard title={ts("资产图风格参考")}>
+                <Segmented value={comicSettings.style_reference_mode} options={[["image_reference", ts("附带风格参考图")], ["text_only", ts("仅文字描述")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, style_reference_mode: v }))} />
               </ComicSettingCard>
-              <ComicSettingCard title="分镜时长模式">
-                <Segmented value={comicSettings.duration_mode} options={[["compact", "紧凑"], ["standard", "常规"], ["long", "超长"]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, duration_mode: v }))} />
+              <ComicSettingCard title={ts("分镜时长模式")}>
+                <Segmented value={comicSettings.duration_mode} options={[["compact", ts("紧凑")], ["standard", ts("常规")], ["long", ts("超长")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, duration_mode: v }))} />
               </ComicSettingCard>
-              <ComicSettingCard title="分镜画宫格数">
-                <Segmented value={String(comicSettings.storyboard_grid)} options={[["4", "4宫格"], ["6", "6宫格"], ["9", "9宫格"]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, storyboard_grid: Number(v) }))} />
+              <ComicSettingCard title={ts("分镜画宫格数")}>
+                <Segmented value={String(comicSettings.storyboard_grid)} options={[["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, storyboard_grid: Number(v) }))} />
               </ComicSettingCard>
-              <ComicSettingCard title="分镜图自动重试">
-                <NumberRow label="最大重试次数" value={comicSettings.max_retry} min={0} max={5} onChange={(v) => setComicSettings((prev) => ({ ...prev, max_retry: v }))} />
-                <NumberRow label="资产一致性合格分" value={comicSettings.asset_consistency_score} min={0} max={100} onChange={(v) => setComicSettings((prev) => ({ ...prev, asset_consistency_score: v }))} />
-                <NumberRow label="画面逻辑合格分" value={comicSettings.logic_score} min={0} max={100} onChange={(v) => setComicSettings((prev) => ({ ...prev, logic_score: v }))} />
+              <ComicSettingCard title={ts("分镜图自动重试")}>
+                <NumberRow label={ts("最大重试次数")} value={comicSettings.max_retry} min={0} max={5} onChange={(v) => setComicSettings((prev) => ({ ...prev, max_retry: v }))} />
+                <NumberRow label={ts("资产一致性合格分")} value={comicSettings.asset_consistency_score} min={0} max={100} onChange={(v) => setComicSettings((prev) => ({ ...prev, asset_consistency_score: v }))} />
+                <NumberRow label={ts("画面逻辑合格分")} value={comicSettings.logic_score} min={0} max={100} onChange={(v) => setComicSettings((prev) => ({ ...prev, logic_score: v }))} />
               </ComicSettingCard>
-              <ComicSettingCard title="图片模型">
-                <ComicModelSelect models={comicImageModels} value={comicSettings.image_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, image_model_code: value }))} emptyLabel="请选择图片模型" />
+              <ComicSettingCard title={ts("图片模型")}>
+                <ComicModelSelect models={comicImageModels} value={comicSettings.image_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, image_model_code: value }))} emptyLabel={ts("请选择图片模型")} />
               </ComicSettingCard>
-              <ComicSettingCard title="视频模型">
-                <ComicModelSelect models={comicVideoModels} value={comicSettings.video_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, video_model_code: value }))} emptyLabel="请选择视频模型" />
-                <div className="mt-2 text-[11px] text-gray-400">支持选择 Seedance 2.0 等已启用视频模型；每个分镜按所选模型生成并统一计费。</div>
+              <ComicSettingCard title={ts("视频模型")}>
+                <ComicModelSelect models={comicVideoModels} value={comicSettings.video_model_code} onChange={(value) => setComicSettings((prev) => ({ ...prev, video_model_code: value }))} emptyLabel={ts("请选择视频模型")} />
+                <div className="mt-2 text-[11px] text-gray-400">{ts("支持选择已启用的视频模型；每个分镜按所选模型生成并统一计费。")}</div>
               </ComicSettingCard>
-              <ComicSettingCard title="对话模型">
+              <ComicSettingCard title={ts("对话模型")}>
                 <input className="w-full rounded-xl border border-gray-100 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-white" value={comicSettings.dialogue_model_codes.join(",")} onChange={(e) => setComicSettings((prev) => ({ ...prev, dialogue_model_codes: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) }))} placeholder="chat_demo_v1" />
-                <div className="mt-2 text-[11px] text-gray-400">多个模型用英文逗号分隔，首个为主模型。</div>
+                <div className="mt-2 text-[11px] text-gray-400">{ts("多个模型用英文逗号分隔，首个为主模型。")}</div>
               </ComicSettingCard>
             </div>
-            <button onClick={() => setSettingsOpen(false)} className="mt-4 h-11 w-full rounded-xl bg-secondary text-sm font-semibold text-white">保存设置</button>
+            <button onClick={() => setSettingsOpen(false)} className="mt-4 h-11 w-full rounded-xl bg-secondary text-sm font-semibold text-white">{ts("保存设置")}</button>
           </div>
         </div>
       )}
@@ -1963,6 +1965,7 @@ function ComicProjectModal({
   onClose: () => void;
   onCreate: () => void;
 }) {
+  const { ts } = useI18n();
   const update = (patch: Partial<typeof draft>) => onChange((prev: typeof draft) => ({ ...prev, ...patch }));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm" onClick={onClose}>
@@ -1971,24 +1974,24 @@ function ComicProjectModal({
           <div className="flex items-center gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-600 dark:text-cyan-200"><Folder size={22} /></div>
             <div>
-              <div className="text-lg font-bold text-gray-900 dark:text-white">新建项目</div>
-              <div className="text-xs text-gray-400">创建一个新的漫剧项目</div>
+              <div className="text-lg font-bold text-gray-900 dark:text-white">{ts("新建项目")}</div>
+              <div className="text-xs text-gray-400">{ts("创建一个新的漫剧项目")}</div>
             </div>
           </div>
           <button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button>
         </div>
         <div className="max-h-[72vh] overflow-y-auto p-6">
           <label className="mx-auto flex h-36 w-64 cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-gray-300 bg-gray-50 text-sm text-gray-400 hover:border-cyan-300 hover:bg-cyan-50 dark:border-white/10 dark:bg-white/5">
-            {draft.cover_url ? <Image src={draft.cover_url} alt="" width={512} height={288} sizes="256px" className="h-full w-full rounded-2xl object-cover" /> : uploading ? <Loader2 className="animate-spin" /> : <><ImageIcon size={30} /><span>点击上传封面</span></>}
+            {draft.cover_url ? <Image src={draft.cover_url} alt="" width={512} height={288} sizes="256px" className="h-full w-full rounded-2xl object-cover" /> : uploading ? <Loader2 className="animate-spin" /> : <><ImageIcon size={30} /><span>{ts("点击上传封面")}</span></>}
             <input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={(e) => { onUpload(e.target.files?.[0]); e.currentTarget.value = ""; }} />
           </label>
-          <button type="button" onClick={onChooseCoverAsset} className="mx-auto mb-5 mt-2 flex h-9 items-center gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-4 text-xs font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200"><Folder size={14} />从资产库选择封面</button>
+          <button type="button" onClick={onChooseCoverAsset} className="mx-auto mb-5 mt-2 flex h-9 items-center gap-2 rounded-xl border border-cyan-200 bg-cyan-50 px-4 text-xs font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200"><Folder size={14} />{ts("从资产库选择封面")}</button>
           <div className="space-y-4">
-            <label className="block text-sm text-gray-600 dark:text-gray-300">项目名称 <span className="text-red-500">*</span><input value={draft.name} maxLength={100} onChange={(e) => update({ name: e.target.value })} placeholder="请输入项目名称" className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-cyan-400 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
-            <label className="block text-sm text-gray-600 dark:text-gray-300">项目描述<textarea value={draft.description} maxLength={500} onChange={(e) => update({ description: e.target.value })} placeholder="请输入项目描述（可选）" className="mt-2 h-24 w-full resize-none rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-cyan-400 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
+            <label className="block text-sm text-gray-600 dark:text-gray-300">{ts("项目名称")} <span className="text-red-500">*</span><input value={draft.name} maxLength={100} onChange={(e) => update({ name: e.target.value })} placeholder={ts("请输入项目名称")} className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-cyan-400 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
+            <label className="block text-sm text-gray-600 dark:text-gray-300">{ts("项目描述")}<textarea value={draft.description} maxLength={500} onChange={(e) => update({ description: e.target.value })} placeholder={ts("请输入项目描述（可选）")} className="mt-2 h-24 w-full resize-none rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-cyan-400 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
             <button type="button" onClick={onChooseStyle} className="flex h-14 w-full items-center gap-3 rounded-xl border border-dashed border-orange-200 bg-orange-50/50 px-4 text-left text-sm text-gray-600 hover:bg-orange-50 dark:border-orange-400/20 dark:bg-orange-400/10 dark:text-gray-200">
               <Star size={20} className="text-orange-500" />
-              {selectedStyle ? selectedStyle.name : "点击选择画面风格"}
+              {selectedStyle ? selectedStyle.name : ts("点击选择画面风格")}
             </button>
             <div>
               <div className="mb-2 text-sm text-gray-600 dark:text-gray-300">屏幕方向</div>
@@ -2004,8 +2007,8 @@ function ComicProjectModal({
           </div>
         </div>
         <div className="flex justify-between border-t border-gray-100 p-5 dark:border-white/10">
-          <button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">取消</button>
-          <button onClick={onCreate} disabled={submitting} className="rounded-xl bg-cyan-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{submitting ? "创建中..." : "创建项目"}</button>
+          <button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">{ts("取消")}</button>
+          <button onClick={onCreate} disabled={submitting} className="rounded-xl bg-cyan-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{submitting ? ts("创建中...") : ts("创建项目")}</button>
         </div>
       </div>
     </div>
@@ -2013,46 +2016,48 @@ function ComicProjectModal({
 }
 
 function ComicStyleModal({ styles, selectedId, filter, onFilter, onSelect, onClose, onConfirm, onAdd, onDelete }: { styles: ComicStyle[]; selectedId: string; filter: "all" | "system" | "mine"; onFilter: (v: "all" | "system" | "mine") => void; onSelect: (id: string) => void; onClose: () => void; onConfirm: () => void; onAdd: (mode: "smart" | "manual") => void; onDelete: (style: ComicStyle) => void }) {
-	const { t } = useI18n();
+	const { t, ts } = useI18n();
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/35 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b border-gray-100 p-5 dark:border-white/10">
-          <div className="flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-orange-500/10 text-orange-500"><Star size={21} /></div><div><div className="text-lg font-bold text-gray-900 dark:text-white">选择风格</div><div className="text-xs text-gray-400">为你的漫剧选择合适的画面风格</div></div></div>
+          <div className="flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-orange-500/10 text-orange-500"><Star size={21} /></div><div><div className="text-lg font-bold text-gray-900 dark:text-white">{ts("选择风格")}</div><div className="text-xs text-gray-400">{ts("为你的漫剧选择合适的画面风格")}</div></div></div>
           <button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-b border-gray-100 p-4 dark:border-white/10">
-          {([["all", "全部"], ["system", "系统风格"], ["mine", "我的风格"]] as const).map(([value, label]) => <button key={value} onClick={() => onFilter(value)} className={"rounded-full px-4 py-2 text-sm " + (filter === value ? "bg-orange-50 text-orange-600 ring-1 ring-orange-200 dark:bg-orange-400/10 dark:text-orange-200" : "border border-gray-200 text-gray-500 dark:border-white/10 dark:text-gray-300")}>{label}</button>)}
-          <div className="ml-auto flex gap-2"><button onClick={() => onAdd("smart")} className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-600 dark:border-violet-400/20 dark:bg-violet-400/10 dark:text-violet-200">新增风格 - 智能识别</button><button onClick={() => onAdd("manual")} className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-600 dark:border-orange-400/20 dark:bg-orange-400/10 dark:text-orange-200">新增风格 - 手动添加</button></div>
+          {([["all", ts("全部")], ["system", ts("系统风格")], ["mine", ts("我的风格")] ] as const).map(([value, label]) => <button key={value} onClick={() => onFilter(value)} className={"rounded-full px-4 py-2 text-sm " + (filter === value ? "bg-orange-50 text-orange-600 ring-1 ring-orange-200 dark:bg-orange-400/10 dark:text-orange-200" : "border border-gray-200 text-gray-500 dark:border-white/10 dark:text-gray-300")}>{label}</button>)}
+          <div className="ml-auto flex gap-2"><button onClick={() => onAdd("smart")} className="rounded-xl border border-violet-200 bg-violet-50 px-4 py-2 text-sm font-semibold text-violet-600 dark:border-violet-400/20 dark:bg-violet-400/10 dark:text-violet-200">{ts("新增风格 - 智能识别")}</button><button onClick={() => onAdd("manual")} className="rounded-xl border border-orange-200 bg-orange-50 px-4 py-2 text-sm font-semibold text-orange-600 dark:border-orange-400/20 dark:bg-orange-400/10 dark:text-orange-200">{ts("新增风格 - 手动添加")}</button></div>
         </div>
         <div className="grid max-h-[56vh] gap-4 overflow-y-auto p-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
 			{styles.map((style) => <div key={style.public_id} className="relative"><button onClick={() => onSelect(style.public_id)} className={"w-full overflow-hidden rounded-2xl border bg-white text-left shadow-sm transition dark:bg-white/5 " + (selectedId === style.public_id ? "border-orange-300 ring-2 ring-orange-200 dark:border-orange-400/50" : "border-gray-200 hover:border-orange-200 dark:border-white/10")}><div className="aspect-[1.55] bg-gray-100 dark:bg-white/10">{style.cover_url ? <Image src={style.cover_url} alt="" width={480} height={310} sizes="(max-width: 640px) 50vw, 25vw" className="h-full w-full object-cover" /> : null}</div><div className="p-3"><div className="truncate text-sm font-semibold text-gray-900 dark:text-white">{style.name}</div><div className="mt-1 text-[11px] text-gray-400">{style.source === "system" ? "系统" : "我的"}</div></div></button>{style.source !== "system" ? <button type="button" title={t("comic.deleteStyle")} onClick={() => onDelete(style)} className="absolute right-2 top-2 rounded-lg bg-black/60 p-1.5 text-white hover:bg-red-500"><Trash2 size={13} /></button> : null}</div>)}
         </div>
-        <div className="flex justify-between border-t border-gray-100 p-5 dark:border-white/10"><span className="text-sm text-gray-400">{selectedId ? "已选择风格" : "尚未选择风格"}</span><div className="flex gap-2"><button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">取消</button><button onClick={onConfirm} className="rounded-xl bg-orange-400 px-5 py-2 text-sm font-semibold text-white">确认选择</button></div></div>
+        <div className="flex justify-between border-t border-gray-100 p-5 dark:border-white/10"><span className="text-sm text-gray-400">{selectedId ? ts("已选择风格") : ts("尚未选择风格")}</span><div className="flex gap-2"><button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">{ts("取消")}</button><button onClick={onConfirm} className="rounded-xl bg-orange-400 px-5 py-2 text-sm font-semibold text-white">{ts("确认选择")}</button></div></div>
       </div>
     </div>
   );
 }
 
 function ComicStyleAddModal({ mode, draft, uploading, submitting, onChange, onUpload, onChooseCoverAsset, onClose, onSave }: { mode: "manual" | "smart"; draft: { cover_url: string; name: string; prompt: string }; uploading: boolean; submitting: boolean; onChange: (next: any) => void; onUpload: (file?: File | null) => void; onChooseCoverAsset: () => void; onClose: () => void; onSave: () => void }) {
+  const { ts } = useI18n();
   const update = (patch: Partial<typeof draft>) => onChange((prev: typeof draft) => ({ ...prev, ...patch }));
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="w-full max-w-lg overflow-hidden rounded-3xl bg-white shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-gray-100 p-5 dark:border-white/10"><div className="text-lg font-bold text-gray-900 dark:text-white">新增风格</div><button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
+        <div className="flex items-center justify-between border-b border-gray-100 p-5 dark:border-white/10"><div className="text-lg font-bold text-gray-900 dark:text-white">{ts("新增风格")}</div><button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
         <div className="space-y-4 p-6">
-          <label className="block text-sm text-gray-600 dark:text-gray-300">参考图 <span className="text-red-500">*</span><div className="mt-2 flex h-48 cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-gray-300 bg-gray-50 text-gray-400 dark:border-white/10 dark:bg-white/5">{draft.cover_url ? <Image src={draft.cover_url} alt="" width={640} height={384} sizes="512px" className="h-full w-full rounded-2xl object-cover" /> : uploading ? <Loader2 className="animate-spin" /> : <><Plus size={28} /><span>点击选择图片</span></>}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={(e) => { onUpload(e.target.files?.[0]); e.currentTarget.value = ""; }} /></div></label>
-          <button type="button" onClick={onChooseCoverAsset} className="flex h-9 items-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-4 text-xs font-semibold text-orange-700 dark:border-orange-400/20 dark:bg-orange-400/10 dark:text-orange-200"><Folder size={14} />从资产库选择参考图</button>
-          <label className="block text-sm text-gray-600 dark:text-gray-300">风格名称 <input value={draft.name} onChange={(e) => update({ name: e.target.value })} placeholder="给这个风格起个名字" className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-300 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
-          <label className="block text-sm text-gray-600 dark:text-gray-300">风格提示词 <textarea value={draft.prompt} onChange={(e) => update({ prompt: e.target.value })} placeholder={mode === "smart" ? "可留空，系统会根据参考图生成基础风格说明" : "例如：动漫风格，新海诚画风，赛璐璐上色..."} className="mt-2 h-28 w-full resize-none rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-300 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
+          <label className="block text-sm text-gray-600 dark:text-gray-300">{ts("参考图")} <span className="text-red-500">*</span><div className="mt-2 flex h-48 cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-gray-300 bg-gray-50 text-gray-400 dark:border-white/10 dark:bg-white/5">{draft.cover_url ? <Image src={draft.cover_url} alt="" width={640} height={384} sizes="512px" className="h-full w-full rounded-2xl object-cover" /> : uploading ? <Loader2 className="animate-spin" /> : <><Plus size={28} /><span>{ts("点击选择图片")}</span></>}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden" onChange={(e) => { onUpload(e.target.files?.[0]); e.currentTarget.value = ""; }} /></div></label>
+          <button type="button" onClick={onChooseCoverAsset} className="flex h-9 items-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-4 text-xs font-semibold text-orange-700 dark:border-orange-400/20 dark:bg-orange-400/10 dark:text-orange-200"><Folder size={14} />{ts("从资产库选择参考图")}</button>
+          <label className="block text-sm text-gray-600 dark:text-gray-300">{ts("风格名称")} <input value={draft.name} onChange={(e) => update({ name: e.target.value })} placeholder={ts("给这个风格起个名字")} className="mt-2 w-full rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-300 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
+          <label className="block text-sm text-gray-600 dark:text-gray-300">{ts("风格提示词")} <textarea value={draft.prompt} onChange={(e) => update({ prompt: e.target.value })} placeholder={mode === "smart" ? ts("可留空，系统会根据参考图生成基础风格说明") : ts("例如：动漫风格，新海诚画风，赛璐璐上色...")} className="mt-2 h-28 w-full resize-none rounded-xl border border-gray-200 px-3 py-3 text-sm outline-none focus:border-orange-300 dark:border-white/10 dark:bg-white/5 dark:text-white" /></label>
         </div>
-        <div className="flex justify-end gap-2 border-t border-gray-100 p-5 dark:border-white/10"><button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">取消</button><button onClick={onSave} disabled={submitting} className="rounded-xl bg-orange-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{submitting ? "保存中..." : "保存"}</button></div>
+        <div className="flex justify-end gap-2 border-t border-gray-100 p-5 dark:border-white/10"><button onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">{ts("取消")}</button><button onClick={onSave} disabled={submitting} className="rounded-xl bg-orange-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-50">{submitting ? ts("保存中...") : ts("保存")}</button></div>
       </div>
     </div>
   );
 }
 
 function ComicImageLibraryModal({ target, items, selected, loading, onSelected, onClose, onConfirm }: { target: ComicLibraryTarget; items: LibraryImageAsset[]; selected: ReferenceImage[]; loading: boolean; onSelected: (items: ReferenceImage[]) => void; onClose: () => void; onConfirm: () => void }) {
+  const { ts, td } = useI18n();
   const multiple = target === "references";
   const max = multiple ? 8 : 1;
   const toggle = (asset: LibraryImageAsset) => {
@@ -2067,11 +2072,11 @@ function ComicImageLibraryModal({ target, items, selected, loading, onSelected, 
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="w-full max-w-4xl overflow-hidden rounded-3xl bg-white shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-gray-100 p-5 dark:border-white/10"><div><div className="text-lg font-bold text-gray-900 dark:text-white">从资产库选择图片</div><div className="mt-1 text-xs text-gray-400">{multiple ? `可选择最多 ${max} 张角色、道具或场景参考图` : "选择一张图片作为项目封面或风格参考"}</div></div><button type="button" onClick={onClose} className="rounded-xl bg-gray-100 p-2 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
+        <div className="flex items-center justify-between border-b border-gray-100 p-5 dark:border-white/10"><div><div className="text-lg font-bold text-gray-900 dark:text-white">{ts("从资产库选择图片")}</div><div className="mt-1 text-xs text-gray-400">{multiple ? td("comic.library.maxSelection", "可选择最多 {max} 张角色、道具或场景参考图", { max }) : ts("选择一张图片作为项目封面或风格参考")}</div></div><button type="button" onClick={onClose} className="rounded-xl bg-gray-100 p-2 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
         <div className="max-h-[62vh] min-h-[320px] overflow-y-auto p-5">
-          {loading ? <div className="flex h-72 items-center justify-center text-cyan-500"><Loader2 className="animate-spin" /></div> : items.length === 0 ? <div className="flex h-72 flex-col items-center justify-center gap-3 text-gray-400"><ImageIcon size={36} /><span>资产库暂无图片</span></div> : <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">{items.map((asset) => { const active = selected.some((entry) => entry.url === asset.url); return <button key={asset.public_id} type="button" onClick={() => toggle(asset)} className={`overflow-hidden rounded-2xl border text-left transition ${active ? "border-cyan-400 ring-2 ring-cyan-300/40" : "border-gray-100 hover:border-cyan-200 dark:border-white/10"}`}><div className="relative aspect-square bg-gray-100 dark:bg-white/5"><img src={asset.url} alt={asset.name || ""} className="h-full w-full object-cover" />{active ? <span className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-cyan-500 text-white"><Check size={14} /></span> : null}</div><div className="truncate px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200">{asset.name || asset.public_id}</div></button>; })}</div>}
+          {loading ? <div className="flex h-72 items-center justify-center text-cyan-500"><Loader2 className="animate-spin" /></div> : items.length === 0 ? <div className="flex h-72 flex-col items-center justify-center gap-3 text-gray-400"><ImageIcon size={36} /><span>{ts("资产库暂无图片")}</span></div> : <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">{items.map((asset) => { const active = selected.some((entry) => entry.url === asset.url); return <button key={asset.public_id} type="button" onClick={() => toggle(asset)} className={`overflow-hidden rounded-2xl border text-left transition ${active ? "border-cyan-400 ring-2 ring-cyan-300/40" : "border-gray-100 hover:border-cyan-200 dark:border-white/10"}`}><div className="relative aspect-square bg-gray-100 dark:bg-white/5"><img src={asset.url} alt={asset.name || ""} className="h-full w-full object-cover" />{active ? <span className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-cyan-500 text-white"><Check size={14} /></span> : null}</div><div className="truncate px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-200">{asset.name || asset.public_id}</div></button>; })}</div>}
         </div>
-        <div className="flex items-center justify-between border-t border-gray-100 p-5 dark:border-white/10"><span className="text-sm text-gray-400">已选择 {selected.length}/{max}</span><div className="flex gap-2"><button type="button" onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">取消</button><button type="button" disabled={selected.length === 0} onClick={onConfirm} className="rounded-xl bg-cyan-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-40">确认选择</button></div></div>
+        <div className="flex items-center justify-between border-t border-gray-100 p-5 dark:border-white/10"><span className="text-sm text-gray-400">{td("comic.library.selectedCount", "已选择 {count}/{max}", { count: selected.length, max })}</span><div className="flex gap-2"><button type="button" onClick={onClose} className="rounded-xl border border-gray-200 px-5 py-2 text-sm text-gray-600 dark:border-white/10 dark:text-gray-300">{ts("取消")}</button><button type="button" disabled={selected.length === 0} onClick={onConfirm} className="rounded-xl bg-cyan-500 px-5 py-2 text-sm font-semibold text-white disabled:opacity-40">{ts("确认选择")}</button></div></div>
       </div>
     </div>
   );
@@ -2182,26 +2187,27 @@ function ComicPreferenceModal({
   onChange: (next: any) => void;
   onClose: () => void;
 }) {
+  const { ts } = useI18n();
   const set = (patch: Record<string, unknown>) => onChange((prev: any) => ({ ...prev, ...patch }));
   const selectedVideoModel = videoModels.find((item) => item.code === settings.video_model_code);
   const videoReferenceCompatible = modelSupportsImageReference(selectedVideoModel);
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" onClick={onClose}>
       <div className="w-full max-w-3xl rounded-3xl bg-white p-5 shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(e) => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between"><div><div className="text-lg font-bold text-gray-900 dark:text-white">偏好设置</div><div className="text-xs text-gray-400">自定义你的漫剧创作偏好</div></div><button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
+        <div className="mb-4 flex items-center justify-between"><div><div className="text-lg font-bold text-gray-900 dark:text-white">{ts("偏好设置")}</div><div className="text-xs text-gray-400">{ts("自定义你的漫剧创作偏好")}</div></div><button onClick={onClose} className="flex h-10 w-10 items-center justify-center rounded-xl bg-gray-100 text-gray-500 dark:bg-white/10 dark:text-gray-300"><X size={18} /></button></div>
         <div className="grid max-h-[68vh] gap-3 overflow-y-auto md:grid-cols-2">
-          <ComicSettingCard title="资产图风格参考"><Segmented value={settings.style_reference_mode} options={[["image_reference", "附带风格参考图"], ["text_only", "仅文字描述"]]} onChange={(v) => set({ style_reference_mode: v })} /></ComicSettingCard>
-          <ComicSettingCard title="分镜时长模式"><Segmented value={settings.duration_mode} options={[["compact", "紧凑"], ["standard", "常规"], ["long", "超长"]]} onChange={(v) => set({ duration_mode: v })} /></ComicSettingCard>
-          <ComicSettingCard title="配音叙事模式"><Segmented value={settings.narration_perspective || "smart"} options={COMIC_NARRATION_MODES.map((item) => [item.value, item.label])} onChange={(v) => set({ narration_perspective: v })} /><div className="mt-2 text-[11px] leading-5 text-gray-400">{COMIC_NARRATION_MODES.find((item) => item.value === settings.narration_perspective)?.description || COMIC_NARRATION_MODES[0].description}</div></ComicSettingCard>
-          <ComicSettingCard title="分镜画宫格数"><Segmented value={String(settings.storyboard_grid)} options={[["4", "4宫格"], ["6", "6宫格"], ["9", "9宫格"]]} onChange={(v) => set({ storyboard_grid: Number(v) })} /></ComicSettingCard>
-          <ComicSettingCard title="自动重试"><NumberRow label="最大重试次数" value={settings.max_retry} min={0} max={5} onChange={(v) => set({ max_retry: v })} /><NumberRow label="资产一致性合格分" value={settings.asset_consistency_score} min={0} max={100} onChange={(v) => set({ asset_consistency_score: v })} /><NumberRow label="画面逻辑合格分" value={settings.logic_score} min={0} max={100} onChange={(v) => set({ logic_score: v })} /></ComicSettingCard>
-          <ComicSettingCard title="图片模型"><ComicModelSelect models={imageModels} value={settings.image_model_code} onChange={(value) => set({ image_model_code: value })} emptyLabel="请选择图片模型" /></ComicSettingCard>
-          <ComicSettingCard title="视频模型">
-            <ComicModelSelect models={videoModels} value={settings.video_model_code} onChange={(value) => set({ video_model_code: value })} emptyLabel="请选择视频模型" />
-            <div className={`mt-2 rounded-lg px-2.5 py-2 text-[11px] ${selectedVideoModel && !videoReferenceCompatible ? "bg-amber-50 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200" : "text-gray-400"}`}>{selectedVideoModel ? (videoReferenceCompatible ? "兼容：会自动把每个分镜关键帧作为图生视频参考。" : "不兼容：该模型未声明关键帧/参考图能力，运行前会要求更换模型。") : "AI 漫剧应选择支持图生视频或关键帧参考的视频模型。"}</div>
+          <ComicSettingCard title={ts("资产图风格参考")}><Segmented value={settings.style_reference_mode} options={[["image_reference", ts("附带风格参考图")], ["text_only", ts("仅文字描述")]]} onChange={(v) => set({ style_reference_mode: v })} /></ComicSettingCard>
+          <ComicSettingCard title={ts("分镜时长模式")}><Segmented value={settings.duration_mode} options={[["compact", ts("紧凑")], ["standard", ts("常规")], ["long", ts("超长")]]} onChange={(v) => set({ duration_mode: v })} /></ComicSettingCard>
+          <ComicSettingCard title={ts("配音叙事模式")}><Segmented value={settings.narration_perspective || "smart"} options={COMIC_NARRATION_MODES.map((item) => [item.value, ts(item.label)])} onChange={(v) => set({ narration_perspective: v })} /><div className="mt-2 text-[11px] leading-5 text-gray-400">{COMIC_NARRATION_MODES.find((item) => item.value === settings.narration_perspective)?.description || COMIC_NARRATION_MODES[0].description}</div></ComicSettingCard>
+          <ComicSettingCard title={ts("分镜画宫格数")}><Segmented value={String(settings.storyboard_grid)} options={[["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => set({ storyboard_grid: Number(v) })} /></ComicSettingCard>
+          <ComicSettingCard title={ts("自动重试")}><NumberRow label={ts("最大重试次数")} value={settings.max_retry} min={0} max={5} onChange={(v) => set({ max_retry: v })} /><NumberRow label={ts("资产一致性合格分")} value={settings.asset_consistency_score} min={0} max={100} onChange={(v) => set({ asset_consistency_score: v })} /><NumberRow label={ts("画面逻辑合格分")} value={settings.logic_score} min={0} max={100} onChange={(v) => set({ logic_score: v })} /></ComicSettingCard>
+          <ComicSettingCard title={ts("图片模型")}><ComicModelSelect models={imageModels} value={settings.image_model_code} onChange={(value) => set({ image_model_code: value })} emptyLabel={ts("请选择图片模型")} /></ComicSettingCard>
+          <ComicSettingCard title={ts("视频模型")}>
+            <ComicModelSelect models={videoModels} value={settings.video_model_code} onChange={(value) => set({ video_model_code: value })} emptyLabel={ts("请选择视频模型")} />
+            <div className={`mt-2 rounded-lg px-2.5 py-2 text-[11px] ${selectedVideoModel && !videoReferenceCompatible ? "bg-amber-50 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200" : "text-gray-400"}`}>{selectedVideoModel ? (videoReferenceCompatible ? ts("兼容：会自动把每个分镜关键帧作为图生视频参考。") : ts("不兼容：该模型未声明关键帧/参考图能力，运行前会要求更换模型。")) : ts("AI 漫剧应选择支持图生视频或关键帧参考的视频模型。")}</div>
           </ComicSettingCard>
         </div>
-        <button onClick={onClose} className="mt-4 h-11 w-full rounded-xl bg-cyan-500 text-sm font-semibold text-white">保存设置</button>
+        <button onClick={onClose} className="mt-4 h-11 w-full rounded-xl bg-cyan-500 text-sm font-semibold text-white">{ts("保存设置")}</button>
       </div>
     </div>
   );

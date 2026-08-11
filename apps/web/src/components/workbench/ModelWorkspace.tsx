@@ -771,10 +771,11 @@ function InputToolbarMeta({
 }
 
 export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpenNav, onRecharge }: Props) {
-  const { t, td } = useI18n();
+  const { t, td, ts } = useI18n();
   const [prompt, setPrompt] = useState(initialPrompt || "");
   const [messages, setMessages] = useState<Message[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [chatError, setChatError] = useState("");
   const [mmMode, setMmMode] = useState(false);
   const [mmActiveTab, setMmActiveTab] = useState<"answer" | "summary">("answer");
   const [mmResults, setMmResults] = useState<MultiModelResult[]>([]);
@@ -940,9 +941,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const promptPlaceholder = isChat
     ? t("workspace.placeholder.chat")
     : isVideo
-    ? videoConfig.prompt_hint || t("workspace.placeholder.video")
+    ? (videoConfig.prompt_hint ? ts(videoConfig.prompt_hint) : t("workspace.placeholder.video"))
     : isAudio
-    ? audioConfig.prompt_hint || t("workspace.placeholder.audio")
+    ? (audioConfig.prompt_hint ? ts(audioConfig.prompt_hint) : t("workspace.placeholder.audio"))
     : t("workspace.placeholder.image");
   const referenceAssetIds = useMemo(
     () =>
@@ -1366,6 +1367,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     if (!prompt.trim() || streaming) return;
     const userMsg: Message = { role: "user", content: prompt };
     setMessages((prev) => [...prev, userMsg]);
+    setChatError("");
     setPrompt("");
     setStreaming(true);
     setMmMode(false);
@@ -1373,6 +1375,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     setMmSummary("");
     const newMessages = [...messages, userMsg];
     let assistantContent = "";
+    let receivedReply = false;
+    let receivedMultiModelEvent = false;
 
     try {
       const res = await fetch(`${API_URL}/api/chat/completions`, {
@@ -1430,11 +1434,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       });
 
       if (!res.ok) {
-        const json = await res.json().catch(() => ({} as { message?: string; data?: { conversation_id?: string } }));
+        const json = await res
+          .json()
+          .catch(() => ({} as { message?: string; error?: { message?: string }; data?: { conversation_id?: string } }));
         if (json.data?.conversation_id) {
           setConversationId(json.data.conversation_id);
         }
-        throw new Error(json.message || UI_TEXT.requestFailed);
+        throw new Error(json.error?.message || json.message || UI_TEXT.requestFailed);
                                                                                                                                                                                                                                                                                                                       }
 
       const reader = res.body?.getReader();
@@ -1443,6 +1449,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
 
       let buffer = "";
       const applyDelta = (content: string) => {
+        receivedReply = true;
         assistantContent += content;
         setMessages((prev) => {
           const updated = [...prev];
@@ -1471,6 +1478,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         });
       };
 
+      if (!reader) {
+        throw new Error("模型服务没有返回可读取的响应流，请稍后重试。");
+      }
+
       if (reader) {
         while (true) {
           const { done, value } = await reader.read();
@@ -1486,13 +1497,20 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
               else if (line.startsWith("data: ")) dataStr += line.slice(6);
             }
             if (!dataStr) continue;
+            if (dataStr === "[DONE]") continue;
             let data: Record<string, unknown> = {};
             try {
               data = JSON.parse(dataStr);
             } catch {
               continue;
             }
+            const streamError = data.error;
+            if (streamError && typeof streamError === "object") {
+              const error = streamError as { message?: unknown };
+              throw new Error(typeof error.message === "string" ? error.message : "模型服务返回了错误。");
+            }
             if (eventType === "mm_start") {
+              receivedMultiModelEvent = true;
               setMmMode(true);
               setMmActiveTab("answer");
               setMessages((prev) => {
@@ -1503,6 +1521,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 return prev;
               });
             } else if (eventType === "mm_model_start") {
+              receivedMultiModelEvent = true;
               setMmMode(true);
               const code = String(data.model_code || "");
               if (code) {
@@ -1513,6 +1532,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 });
               }
             } else if (eventType === "mm_model_delta") {
+              receivedMultiModelEvent = true;
               setMmMode(true);
               const code = String(data.model_code || "");
               const content = typeof data.content === "string" ? data.content : "";
@@ -1526,6 +1546,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 });
               }
             } else if (eventType === "mm_model_done") {
+              receivedMultiModelEvent = true;
               setMmMode(true);
               const code = String(data.model_code || "");
               if (code && typeof data.error === "object" && data.error) {
@@ -1536,6 +1557,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 });
               }
             } else if (eventType === "mm_done") {
+              receivedMultiModelEvent = true;
               setMmMode(true);
               if (typeof data.conversation_id === "string" && data.conversation_id) {
                 setConversationId(data.conversation_id);
@@ -1565,12 +1587,23 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
               throw new Error((data.message as string) || "Model error");
             } else if (!eventType && typeof data.content === "string") {
               applyDelta(data.content);
+            } else if (!eventType && Array.isArray(data.choices)) {
+              const choice = data.choices[0] as { delta?: { content?: unknown; tool_calls?: unknown[] } } | undefined;
+              if (typeof choice?.delta?.content === "string") {
+                applyDelta(choice.delta.content);
+              } else if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
+                receivedReply = true;
+              }
             }
           }
         }
       }
+      if (!receivedReply && !receivedMultiModelEvent && !assistantContent.trim()) {
+        throw new Error("模型没有返回内容，请检查模型配置或上游服务。");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Chat failed";
+      setChatError(msg);
       setMessages((prev) => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
@@ -2158,6 +2191,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                     </div>
                   </div>
                 ))}
+                {chatError && (
+                  <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    {chatError}
+                  </div>
+                )}
               </>
             )}
             <div ref={bottomRef} />
@@ -2513,7 +2551,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 <textarea
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  placeholder={audioConfig.prompt_hint || "Enter text..."}
+                  placeholder={audioConfig.prompt_hint ? ts(audioConfig.prompt_hint) : t("workspace.placeholder.audio")}
                   rows={5}
                   className="w-full px-4 py-3 text-sm resize-none focus:outline-none bg-transparent placeholder:text-gray-400"
                   onKeyDown={(e) => {
@@ -2527,8 +2565,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                   value={audioSecondaryPrompt}
                   onChange={(e) => setAudioSecondaryPrompt(e.target.value)}
                   placeholder={
-                    audioConfig.secondary_prompt_hint ||
-                    "Enter a secondary prompt..."
+                    audioConfig.secondary_prompt_hint ? ts(audioConfig.secondary_prompt_hint) : ts("请输入音乐描述...")
                   }
                   rows={5}
                   className="w-full px-4 py-3 text-sm resize-none focus:outline-none bg-transparent placeholder:text-gray-400"

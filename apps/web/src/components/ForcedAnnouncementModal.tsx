@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { BellRing, X } from "lucide-react";
 import { api } from "@/lib/api";
+import { useI18n } from "@/i18n/I18nProvider";
 
 interface Announcement {
   id: number;
@@ -35,6 +36,7 @@ function writeAcked(ids: number[]) {
 }
 
 export function ForcedAnnouncementModal() {
+  const { ts } = useI18n();
   const [items, setItems] = useState<Announcement[]>([]);
   const [acked, setAcked] = useState<number[]>([]);
   const pathname = usePathname();
@@ -120,11 +122,11 @@ export function ForcedAnnouncementModal() {
               <BellRing size={20} />
             </div>
             <div>
-              <div className="text-sm font-semibold text-gray-950 dark:text-white">平台公告</div>
+              <div className="text-sm font-semibold text-gray-950 dark:text-white">{ts("平台公告")}</div>
               <div className="text-xs text-gray-400 dark:text-gray-500">{new Date(current.created_at).toLocaleString()}</div>
             </div>
           </div>
-          <button type="button" onClick={close} className="rounded-xl p-2 text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white" aria-label="关闭公告">
+          <button type="button" onClick={close} className="rounded-xl p-2 text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-white" aria-label={ts("关闭公告")}>
             <X size={18} />
           </button>
         </div>
@@ -134,7 +136,7 @@ export function ForcedAnnouncementModal() {
         </div>
         <div className="flex justify-end border-t border-gray-100 bg-gray-50 px-5 py-4 dark:border-white/10 dark:bg-gray-950/50">
           <button type="button" onClick={close} className="rounded-xl bg-gray-950 px-5 py-2.5 text-sm font-semibold text-white hover:bg-gray-800 dark:bg-primary dark:text-dark dark:hover:bg-primary/90">
-            我知道了
+            {ts("我知道了")}
           </button>
         </div>
       </div>

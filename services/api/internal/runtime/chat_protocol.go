@@ -395,11 +395,8 @@ func decodeChatResponse(protocol string, raw []byte) (*ChatResponse, error) {
 	}
 	if protocol == chatProtocolClaude {
 		var payload struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-			Usage struct {
+			Content []map[string]interface{} `json:"content"`
+			Usage   struct {
 				InputTokens              int `json:"input_tokens"`
 				OutputTokens             int `json:"output_tokens"`
 				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
@@ -411,19 +408,17 @@ func decodeChatResponse(protocol string, raw []byte) (*ChatResponse, error) {
 		}
 		var builder strings.Builder
 		for _, item := range payload.Content {
-			if item.Type == "text" || item.Type == "" {
-				builder.WriteString(item.Text)
+			if itemType := stringAnyRuntime(item["type"]); itemType == "text" || itemType == "" {
+				builder.WriteString(stringAnyRuntime(item["text"]))
 			}
 		}
 		usage := ChatUsage{PromptTokens: payload.Usage.InputTokens, CompletionTokens: payload.Usage.OutputTokens, TotalTokens: payload.Usage.InputTokens + payload.Usage.OutputTokens, CacheReadInputTokens: payload.Usage.CacheReadInputTokens, CacheCreationInputTokens: payload.Usage.CacheCreationInputTokens}
-		return &ChatResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: builder.String()}}}, Usage: usage}, nil
+		return &ChatResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: builder.String()}}}, Usage: usage, ContentBlocks: mapSliceToInterfaces(payload.Content)}, nil
 	}
 	var payload struct {
 		Candidates []struct {
 			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
+				Parts []map[string]interface{} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
 		Usage struct {
@@ -438,11 +433,33 @@ func decodeChatResponse(protocol string, raw []byte) (*ChatResponse, error) {
 	var builder strings.Builder
 	if len(payload.Candidates) > 0 {
 		for _, part := range payload.Candidates[0].Content.Parts {
-			builder.WriteString(part.Text)
+			builder.WriteString(stringAnyRuntime(part["text"]))
 		}
 	}
 	usage := ChatUsage{PromptTokens: payload.Usage.PromptTokenCount, CompletionTokens: payload.Usage.CandidatesTokenCount, TotalTokens: payload.Usage.TotalTokenCount}
-	return &ChatResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: builder.String()}}}, Usage: usage}, nil
+	var blocks []interface{}
+	if len(payload.Candidates) > 0 {
+		blocks = mapSliceToInterfaces(payload.Candidates[0].Content.Parts)
+	}
+	return &ChatResponse{Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: builder.String()}}}, Usage: usage, ContentBlocks: blocks}, nil
+}
+
+func stringAnyRuntime(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
+}
+
+func mapSliceToInterfaces(values []map[string]interface{}) []interface{} {
+	result := make([]interface{}, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
 }
 
 func consumeChatStream(reader io.Reader, protocol string, ch chan<- StreamChunk) {
@@ -474,13 +491,16 @@ func consumeChatStream(reader io.Reader, protocol string, ch chan<- StreamChunk)
 			ch <- StreamChunk{Done: true}
 			return
 		}
-		content, nextUsage, done, err := decodeChatStreamEvent(protocol, eventName, []byte(data))
+		content, toolCalls, nextUsage, done, err := decodeChatStreamEvent(protocol, eventName, []byte(data))
 		if err != nil {
 			ch <- StreamChunk{Error: err}
 			return
 		}
 		if content != "" {
 			ch <- StreamChunk{Content: content}
+		}
+		if len(toolCalls) > 0 {
+			ch <- StreamChunk{ToolCalls: toolCalls}
 		}
 		if nextUsage != nil {
 			mergeChatUsage(&usage, nextUsage)
@@ -501,31 +521,52 @@ func consumeChatStream(reader io.Reader, protocol string, ch chan<- StreamChunk)
 	ch <- StreamChunk{Done: true}
 }
 
-func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, *ChatUsage, bool, error) {
+func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []map[string]interface{}, *ChatUsage, bool, error) {
 	if protocol == chatProtocolOpenAI {
 		var event struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content   string `json:"content"`
+					ToolCalls []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
 				} `json:"delta"`
 			} `json:"choices"`
 			Usage *ChatUsage `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return "", nil, false, nil
+			return "", nil, nil, false, nil
 		}
 		content := ""
 		if len(event.Choices) > 0 {
 			content = event.Choices[0].Delta.Content
 		}
-		return content, event.Usage, false, nil
+		calls := make([]map[string]interface{}, 0)
+		if len(event.Choices) > 0 {
+			for _, call := range event.Choices[0].Delta.ToolCalls {
+				calls = append(calls, map[string]interface{}{"index": call.Index, "id": call.ID, "function": map[string]interface{}{"name": call.Function.Name, "arguments": call.Function.Arguments}})
+			}
+		}
+		return content, calls, event.Usage, false, nil
 	}
 	if protocol == chatProtocolClaude {
 		var event struct {
 			Type  string `json:"type"`
 			Delta struct {
-				Text string `json:"text"`
+				Text        string `json:"text"`
+				Type        string `json:"type"`
+				PartialJSON string `json:"partial_json"`
 			} `json:"delta"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
 			Message struct {
 				Usage struct {
 					InputTokens int `json:"input_tokens"`
@@ -536,7 +577,7 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, *Cha
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return "", nil, false, err
+			return "", nil, nil, false, err
 		}
 		eventType := eventName
 		if eventType == "" {
@@ -544,24 +585,33 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, *Cha
 		}
 		switch eventType {
 		case "message_start":
-			return "", &ChatUsage{PromptTokens: event.Message.Usage.InputTokens}, false, nil
+			return "", nil, &ChatUsage{PromptTokens: event.Message.Usage.InputTokens}, false, nil
 		case "message_delta":
-			return "", &ChatUsage{CompletionTokens: event.Usage.OutputTokens}, false, nil
+			return "", nil, &ChatUsage{CompletionTokens: event.Usage.OutputTokens}, false, nil
 		case "content_block_delta":
-			return event.Delta.Text, nil, false, nil
+			if event.Delta.Type == "input_json_delta" || event.Delta.PartialJSON != "" {
+				return "", []map[string]interface{}{{"type": "input_json_delta", "partial_json": event.Delta.PartialJSON}}, nil, false, nil
+			}
+			return event.Delta.Text, nil, nil, false, nil
+		case "content_block_start":
+			if event.ContentBlock.Type == "tool_use" {
+				return "", []map[string]interface{}{{"type": "tool_use", "id": event.ContentBlock.ID, "name": event.ContentBlock.Name}}, nil, false, nil
+			}
+			return "", nil, nil, false, nil
 		case "message_stop":
-			return "", nil, true, nil
+			return "", nil, nil, true, nil
 		case "error":
-			return "", nil, false, errors.New(connectionTestMessage(raw))
+			return "", nil, nil, false, errors.New(connectionTestMessage(raw))
 		default:
-			return "", nil, false, nil
+			return "", nil, nil, false, nil
 		}
 	}
 	var event struct {
 		Candidates []struct {
 			Content struct {
 				Parts []struct {
-					Text string `json:"text"`
+					Text         string                 `json:"text"`
+					FunctionCall map[string]interface{} `json:"functionCall"`
 				} `json:"parts"`
 			} `json:"content"`
 			FinishReason string `json:"finishReason"`
@@ -573,13 +623,17 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, *Cha
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(raw, &event); err != nil {
-		return "", nil, false, err
+		return "", nil, nil, false, err
 	}
 	var builder strings.Builder
+	calls := make([]map[string]interface{}, 0)
 	done := false
 	if len(event.Candidates) > 0 {
 		for _, part := range event.Candidates[0].Content.Parts {
 			builder.WriteString(part.Text)
+			if len(part.FunctionCall) > 0 {
+				calls = append(calls, map[string]interface{}{"functionCall": part.FunctionCall})
+			}
 		}
 		done = event.Candidates[0].FinishReason != ""
 	}
@@ -587,7 +641,7 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, *Cha
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
 		usage = nil
 	}
-	return builder.String(), usage, done, nil
+	return builder.String(), calls, usage, done, nil
 }
 
 func mergeChatUsage(target *ChatUsage, source *ChatUsage) {

@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import type { User } from "@starai/shared-types";
+import { useI18n } from "@/i18n/I18nProvider";
 
 export default function OAuthCallbackPage() {
   const router = useRouter();
   const { setAuth } = useAuthStore();
+  const { ts } = useI18n();
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -20,7 +22,7 @@ export default function OAuthCallbackPage() {
       return;
     }
     if (!session) {
-      setError("缺少登录凭证，请重新登录");
+      setError(ts("缺少登录凭证，请重新登录"));
       return;
     }
     localStorage.setItem("starai_session", "1");
@@ -31,7 +33,7 @@ export default function OAuthCallbackPage() {
       })
       .catch((e) => {
         localStorage.removeItem("starai_session");
-        setError(e instanceof Error ? e.message : "登录失败，请重试");
+        setError(e instanceof Error ? e.message : ts("登录失败，请重试"));
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -42,19 +44,19 @@ export default function OAuthCallbackPage() {
         {error ? (
           <>
             <div className="text-4xl mb-4">⚠️</div>
-            <div className="text-base font-semibold text-gray-900">登录失败</div>
+            <div className="text-base font-semibold text-gray-900">{ts("登录失败")}</div>
             <div className="text-sm text-gray-500 mt-2 break-all">{error}</div>
             <button
               onClick={() => router.replace("/")}
               className="mt-6 w-full py-3 rounded-xl bg-primary text-dark font-semibold hover:bg-primary/90 transition"
             >
-              返回首页重新登录
+              {ts("返回首页重新登录")}
             </button>
           </>
         ) : (
           <>
             <div className="w-10 h-10 mx-auto rounded-full border-2 border-gray-200 border-t-gray-900 animate-spin" />
-            <div className="text-sm text-gray-500 mt-5">正在完成登录，请稍候...</div>
+            <div className="text-sm text-gray-500 mt-5">{ts("正在完成登录，请稍候...")}</div>
           </>
         )}
       </div>

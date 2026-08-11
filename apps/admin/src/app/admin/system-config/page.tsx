@@ -48,6 +48,7 @@ interface ConfigItem {
 }
 
 const BASE_ITEMS: ConfigItem[] = [
+  { key: "api_docs_enabled", label: "开放 API 文档中心", type: "checkbox", hint: "关闭后隐藏用户前台 API 文档入口，并阻止公开文档接口；后台文档内容不会删除。" },
   { key: "payment_enabled", label: "在线支付", type: "checkbox" },
   { key: "card_recharge_enabled", label: "卡密充值", type: "checkbox" },
   { key: "payment_provider", label: "支付渠道", type: "select", options: [

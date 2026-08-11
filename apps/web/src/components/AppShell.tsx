@@ -91,7 +91,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   const pathname = usePathname();
   const router = useRouter();
   const { t, td, locale } = useI18n();
-  const { site_name, site_description } = useSiteBranding();
+  const { site_name, site_description, api_docs_enabled, api_docs_operations } = useSiteBranding();
   const { user, hydrate } = useAuthStore();
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [showRecharge, setShowRecharge] = useState(false);
@@ -119,6 +119,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   const [activeTag, setActiveTag] = useState("all");
 
   const isWorkbench = pathname === "/app" || pathname.startsWith("/app/models/") || pathname.startsWith("/app/agents/");
+  const apiDocsVisible = api_docs_enabled !== false && (!api_docs_operations || Object.keys(api_docs_operations).length === 0 || Object.values(api_docs_operations).some((value) => value !== false));
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
@@ -301,11 +302,12 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   }, [agents, agentsLoaded, agentSearch, agentCategory, t]);
 
   const showApiDocEntry = useMemo(() => {
+    if (!apiDocsVisible) return false;
     if (agentCategory !== "all" && agentCategory !== "api") return false;
     const q = agentSearch.trim().toLowerCase();
     if (!q) return true;
     return "开放api文档 api文档 open api documentation 开发者接口".includes(q);
-  }, [agentCategory, agentSearch]);
+  }, [agentCategory, agentSearch, apiDocsVisible]);
 
   const useGalleryTemplate = (code: string | undefined, prompt: string) => {
     setSection("models");
@@ -658,7 +660,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
         type="button"
         onClick={() => setDrawerOpen(true)}
         className="w-9 h-9 rounded-xl bg-gray-50 flex items-center justify-center text-gray-600 dark:bg-white/10 dark:text-gray-200"
-        aria-label="打开菜单"
+        aria-label={t("common.openMenu")}
       >
         <Menu size={18} />
       </button>
@@ -682,7 +684,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
     <div className="flex-1 overflow-y-auto px-3 py-3">
       {showHeading ? <div className="mb-2 px-2 text-[11px] font-semibold text-gray-400">{t("nav.pageNav")}</div> : null}
       <div className="grid grid-cols-3 gap-2">
-        {MOBILE_SUBPAGE_LINKS.map((l) => {
+        {MOBILE_SUBPAGE_LINKS.filter((l) => apiDocsVisible || l.href !== "/app/api-docs").map((l) => {
           const active = l.href === "/app" ? pathname === "/app" : pathname.startsWith(l.href);
           const Icon = l.icon;
           return (
@@ -721,7 +723,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   const Drawer = () =>
     drawerOpen ? (
       <div className="lg:hidden fixed inset-0 z-50 flex">
-        <button type="button" className="flex-1 bg-black/40" aria-label="关闭菜单" onClick={closeDrawer} />
+        <button type="button" className="flex-1 bg-black/40" aria-label={t("common.closeMenu")} onClick={closeDrawer} />
         <aside className="w-[min(320px,88vw)] bg-white flex flex-col shadow-xl h-full dark:bg-gray-900 dark:border-l dark:border-white/10">
           <div className="px-3.5 py-4 flex items-center justify-between border-b border-gray-50 dark:border-white/10">
             <SiteBrand
@@ -761,7 +763,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
             <aside className="hidden lg:flex w-[92px] bg-white border-r border-gray-100 flex-col items-center py-4 px-2 shrink-0 dark:bg-gray-900 dark:border-white/10">
               <SiteBrand href="/app" showName={false} className="mb-4" badgeClassName="rounded-2xl shadow-sm" />
               <div className="flex w-full flex-col gap-2">
-                {SUBPAGE_LINKS.map((l) => {
+                {SUBPAGE_LINKS.filter((l) => apiDocsVisible || l.href !== "/app/api-docs").map((l) => {
                   const active = l.href === "/app" ? pathname === "/app" : pathname.startsWith(l.href);
                   const Icon = l.icon;
                   return (

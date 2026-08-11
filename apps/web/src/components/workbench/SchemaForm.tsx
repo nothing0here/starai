@@ -1,8 +1,11 @@
 "use client";
 
+import { useI18n } from "@/i18n/I18nProvider";
+
 export interface SchemaProp {
   type?: string;
   title?: string;
+  description?: string;
   placeholder?: string;
   enum?: (string | number)[];
   "x-enum-labels"?: string[];
@@ -58,6 +61,7 @@ function isTopField(prop: SchemaProp) {
 }
 
 export function SchemaForm({ schema, values, onChange, layout = "inline", placement = "all" }: Props) {
+  const { ts } = useI18n();
   const props = schemaProperties(schema);
   const entries = Object.entries(props)
     .filter(([, prop]) => placement === "all" || (placement === "top" ? isTopField(prop) : !isTopField(prop)))
@@ -78,7 +82,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
         <select value={String(value)} onChange={(e) => set(key, coerce(prop, e.target.value))} className={controlCls}>
           {prop.enum.map((opt, index) => (
             <option key={String(opt)} value={String(opt)}>
-              {prop["x-enum-labels"]?.[index] || prop.enumLabels?.[String(opt)] || String(opt)}
+              {ts(prop["x-enum-labels"]?.[index] || prop.enumLabels?.[String(opt)] || String(opt))}
             </option>
           ))}
         </select>
@@ -110,7 +114,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       return (
         <textarea
           value={String(value)}
-          placeholder={prop.placeholder}
+          placeholder={prop.placeholder ? ts(prop.placeholder) : undefined}
           onChange={(e) => set(key, e.target.value)}
           rows={stacked ? 3 : 2}
           className={(stacked ? controlCls : "w-full " + controlCls) + " resize-none"}
@@ -121,7 +125,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       <input
         type="text"
         value={String(value)}
-        placeholder={prop.placeholder}
+        placeholder={prop.placeholder ? ts(prop.placeholder) : undefined}
         onChange={(e) => set(key, e.target.value)}
         className={controlCls}
       />
@@ -133,7 +137,8 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
       <div className="space-y-4">
         {entries.map(([key, prop]) => (
           <div key={key}>
-            <label className="mb-1 block text-sm text-gray-600 dark:text-gray-300">{prop.title || key}</label>
+            <label className="mb-1 block text-sm text-gray-600 dark:text-gray-300">{ts(prop.title || key)}</label>
+            {prop.description ? <p className="mb-1 text-xs text-gray-400">{ts(prop.description)}</p> : null}
             {renderControl(key, prop)}
           </div>
         ))}
@@ -145,7 +150,7 @@ export function SchemaForm({ schema, values, onChange, layout = "inline", placem
     <div className="flex flex-wrap items-center gap-2">
       {entries.map(([key, prop]) => (
         <label key={key} className="flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-gray-300">
-          <span className="shrink-0">{prop.title || key}</span>
+          <span className="shrink-0">{ts(prop.title || key)}</span>
           {renderControl(key, prop)}
         </label>
       ))}

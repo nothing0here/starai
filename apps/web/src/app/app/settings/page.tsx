@@ -24,7 +24,7 @@ interface ApiToken {
 }
 
 export default function SettingsPage() {
-  const { locale: currentLocale, languages: uiLanguages, setLocale: setUILocale, t } = useI18n();
+  const { locale: currentLocale, languages: uiLanguages, setLocale: setUILocale, t, ts, td } = useI18n();
   const [profile, setProfile] = useState<User | null>(null);
   const [nickname, setNickname] = useState("");
   const [locale, setLocale] = useState(currentLocale);
@@ -50,11 +50,11 @@ export default function SettingsPage() {
   const loginMethodLabel = (provider?: string) => {
     switch ((provider || "email").toLowerCase()) {
       case "google":
-        return "谷歌";
+        return ts("谷歌");
       case "github":
         return "GitHub";
       default:
-        return "注册用户";
+        return ts("注册用户");
     }
   };
 
@@ -148,11 +148,11 @@ export default function SettingsPage() {
         method: "POST",
         body: JSON.stringify({ old_password: oldPwd, new_password: newPwd }),
       });
-      setPwdMsg("密码修改成功");
+      setPwdMsg(ts("密码修改成功"));
       setOldPwd("");
       setNewPwd("");
     } catch (err) {
-      setPwdErr(err instanceof Error ? err.message : "修改失败");
+      setPwdErr(err instanceof Error ? err.message : ts("修改失败"));
     } finally {
       setSavingPwd(false);
     }
@@ -205,18 +205,18 @@ export default function SettingsPage() {
       </section>
 
       <section className="soft-card p-6">
-        <h2 className="font-semibold mb-4">修改密码</h2>
+        <h2 className="font-semibold mb-4">{ts("修改密码")}</h2>
         <form onSubmit={changePassword} className="space-y-4">
           <input
             type="password"
-            placeholder="原密码"
+            placeholder={ts("原密码")}
             value={oldPwd}
             onChange={(e) => setOldPwd(e.target.value)}
             className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm text-gray-900 focus:outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:placeholder:text-gray-500"
           />
           <input
             type="password"
-            placeholder="新密码（至少 6 位）"
+            placeholder={ts("新密码（至少 6 位）")}
             value={newPwd}
             onChange={(e) => setNewPwd(e.target.value)}
             className="w-full px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm text-gray-900 focus:outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:placeholder:text-gray-500"
@@ -228,27 +228,26 @@ export default function SettingsPage() {
             disabled={savingPwd || !oldPwd || !newPwd}
             className="px-6 py-2.5 rounded-xl bg-gray-900 text-white font-semibold text-sm disabled:opacity-50"
           >
-            {savingPwd ? "提交中..." : "修改密码"}
+            {savingPwd ? ts("提交中...") : ts("修改密码")}
           </button>
         </form>
       </section>
 
       <section className="soft-card p-6 mt-6">
-        <h2 className="font-semibold mb-4">每日签到</h2>
+        <h2 className="font-semibold mb-4">{ts("每日签到")}</h2>
         {checkin && !checkin.enabled ? (
-          <p className="text-sm text-gray-400">签到功能当前未开启</p>
+          <p className="text-sm text-gray-400">{ts("签到功能当前未开启")}</p>
         ) : (
           <div className="flex items-center justify-between">
             <div className="text-sm text-gray-600">
-              已累计签到 <span className="font-semibold text-gray-900">{checkin?.total_checkins ?? 0}</span> 天 · 每次奖励{" "}
-              <span className="font-semibold text-primary">{checkin?.reward ?? 0}</span> 算力
+              {td("settings.checkinSummary", "已累计签到 {days} 天 · 每次奖励 {reward} 算力", { days: checkin?.total_checkins ?? 0, reward: checkin?.reward ?? 0 })}
             </div>
             <button
               onClick={doCheckin}
               disabled={checkin?.checked_today}
               className="px-5 py-2 rounded-xl bg-primary text-dark font-semibold text-sm disabled:opacity-50"
             >
-              {checkin?.checked_today ? "今日已签到" : "立即签到"}
+              {checkin?.checked_today ? ts("今日已签到") : ts("立即签到")}
             </button>
           </div>
         )}
@@ -258,35 +257,35 @@ export default function SettingsPage() {
       <section className="soft-card p-6 mt-6">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
-            <h2 className="font-semibold">API 密钥</h2>
-            <p className="mt-1 text-xs text-gray-400">默认创建一个密钥即可；如需分业务调用，也可以继续新增。</p>
+            <h2 className="font-semibold">{ts("API 密钥")}</h2>
+            <p className="mt-1 text-xs text-gray-400">{ts("默认创建一个密钥即可；如需分业务调用，也可以继续新增。")}</p>
           </div>
           <span className="rounded-full bg-gray-100 px-2 py-1 text-xs text-gray-500 dark:bg-white/10 dark:text-gray-300">
-            {tokens.length} 个
+            {td("settings.tokenCount", "{count} tokens", { count: tokens.length })}
           </span>
         </div>
         <div className="flex gap-2 mb-4">
           <input
             value={tokenName}
             onChange={(e) => setTokenName(e.target.value)}
-            placeholder={tokens.length > 0 ? "新密钥名称（可选）" : "默认密钥名称（可选）"}
+            placeholder={tokens.length > 0 ? ts("新密钥名称（可选）") : ts("默认密钥名称（可选）")}
             className="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 bg-white text-sm text-gray-900 focus:outline-none focus:border-primary dark:border-white/10 dark:bg-white/5 dark:text-gray-100 dark:placeholder:text-gray-500"
           />
           <button onClick={createToken} className="px-5 py-2.5 rounded-xl bg-gray-900 text-white font-semibold text-sm">
-            {tokens.length > 0 ? "新增密钥" : "创建密钥"}
+            {tokens.length > 0 ? ts("新增密钥") : ts("创建密钥")}
           </button>
         </div>
         {newToken && (
           <div className="mb-4 flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50 p-3 dark:border-amber-400/20 dark:bg-amber-400/10">
             <div className="min-w-0 flex-1">
-              <div className="mb-1 text-xs text-amber-700 dark:text-amber-200">密钥已创建，请点击复制后妥善保存</div>
+              <div className="mb-1 text-xs text-amber-700 dark:text-amber-200">{ts("密钥已创建，请点击复制后妥善保存")}</div>
               <code className="block truncate text-xs font-mono text-amber-900 dark:text-amber-100">{maskToken(newToken)}</code>
             </div>
             <button
               onClick={() => copyToken("new", newToken)}
               className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-amber-200 bg-white text-amber-700 hover:bg-amber-50 dark:border-amber-400/20 dark:bg-white/10 dark:text-amber-100"
-              aria-label="复制 API 密钥"
-              title="复制"
+              aria-label={ts("复制 API 密钥")}
+              title={ts("复制")}
             >
               {copiedKey === "new" ? <Check size={16} /> : <Copy size={16} />}
             </button>
@@ -294,27 +293,27 @@ export default function SettingsPage() {
         )}
         <div className="divide-y">
           {tokens.length === 0 ? (
-            <div className="text-center text-sm text-gray-400 py-6">暂无密钥</div>
+            <div className="text-center text-sm text-gray-400 py-6">{ts("暂无密钥")}</div>
           ) : (
             tokens.map((t) => (
               <div key={t.id} className="flex items-center justify-between py-3">
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-gray-900">{t.name}</div>
                   <div className="mt-0.5 truncate font-mono text-xs text-gray-400">{maskToken(t.token, t.prefix)}</div>
-                  {!t.token && <div className="mt-1 text-[11px] text-amber-500">旧密钥仅可显示前缀，请重新创建后复制完整密钥</div>}
+                  {!t.token && <div className="mt-1 text-[11px] text-amber-500">{ts("旧密钥仅可显示前缀，请重新创建后复制完整密钥")}</div>}
                 </div>
                 <div className="ml-3 flex shrink-0 items-center gap-2">
                   <button
                     onClick={() => copyToken(String(t.id), t.token)}
                     disabled={!t.token}
                     className="grid h-8 w-8 place-items-center rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-35 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/10"
-                    aria-label="复制 API 密钥"
-                    title={t.token ? "复制" : "旧密钥不可复制完整值"}
+                    aria-label={ts("复制 API 密钥")}
+                    title={t.token ? ts("复制") : ts("旧密钥不可复制完整值")}
                   >
                     {copiedKey === String(t.id) ? <Check size={15} /> : <Copy size={15} />}
                   </button>
                   <button onClick={() => deleteToken(t.id)} className="text-xs text-red-500 hover:underline">
-                    删除
+                    {ts("删除")}
                   </button>
                 </div>
               </div>

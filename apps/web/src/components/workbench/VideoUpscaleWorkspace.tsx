@@ -303,17 +303,17 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
     setError("");
     const maxMB = Math.max(1, Number(config.max_input_size_mb || 500));
     if (!file.type.startsWith("video/")) {
-      setError("请选择视频文件");
+      setError(ts("请选择视频文件"));
       return;
     }
     if (file.size > maxMB * 1024 * 1024) {
-      setError(`视频不能超过 ${maxMB} MB`);
+      setError(td("videoUpscale.maxSize", "Video must not exceed {size} MB", { size: maxMB }));
       return;
     }
     const duration = await readVideoDuration(file);
     const maxDuration = Math.max(1, Number(config.max_input_duration_sec || 300));
     if (duration > maxDuration) {
-      setError(`视频时长不能超过 ${maxDuration} 秒`);
+      setError(td("videoUpscale.maxDuration", "Video duration must not exceed {seconds} seconds", { seconds: maxDuration }));
       return;
     }
     setUploading(true);
@@ -323,7 +323,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       setProject(null);
       window.localStorage.removeItem(activeProjectKey);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "视频上传失败");
+      setError(err instanceof Error ? err.message : ts("视频上传失败"));
     } finally {
       setUploading(false);
     }
@@ -332,7 +332,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
   const selectStyleFile = async (file?: File | null) => {
     if (!file) return;
     if (!file.type.startsWith("image/")) {
-      setError("请选择图片文件作为风格参考");
+      setError(ts("请选择图片文件作为风格参考"));
       return;
     }
     setUploading(true);
@@ -341,7 +341,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       const asset = await uploadAsset(file, { name: file.name, kind: "image", asset_type: "video_redraw_style_reference" });
       setStyleReference({ url: asset.url, name: asset.name || file.name, public_id: asset.public_id });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "风格参考图上传失败");
+      setError(err instanceof Error ? err.message : ts("风格参考图上传失败"));
     } finally {
       setUploading(false);
     }
@@ -354,7 +354,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       setStyleAssets((result.items || []) as AssetItem[]);
     } catch (err) {
       setStyleAssets([]);
-      setError(err instanceof Error ? err.message : "图片资产库加载失败");
+      setError(err instanceof Error ? err.message : ts("图片资产库加载失败"));
     }
   };
 
@@ -366,13 +366,13 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       setAssets((result.items || []) as AssetItem[]);
     } catch (err) {
       setAssets([]);
-      setError(err instanceof Error ? err.message : "资产库加载失败");
+      setError(err instanceof Error ? err.message : ts("资产库加载失败"));
     }
   };
 
   const run = async () => {
     if (!source || submitting || busy) {
-      if (!source) setError("请先上传或从资产库选择源视频");
+      if (!source) setError(ts("请先上传或从资产库选择源视频"));
       return;
     }
     setSubmitting(true);
@@ -414,7 +414,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       window.localStorage.setItem(activeProjectKey, next.public_id);
       startPolling(next.public_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "任务启动失败");
+      setError(err instanceof Error ? err.message : ts("任务启动失败"));
     } finally {
       setSubmitting(false);
     }
@@ -427,7 +427,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       await api(`/api/agent-projects/${project.public_id}/retry`, { method: "POST" });
       startPolling(project.public_id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "重试失败");
+      setError(err instanceof Error ? err.message : ts("重试失败"));
     }
   };
 
@@ -440,7 +440,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       setProject(next);
       if (pollRef.current) clearInterval(pollRef.current);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "取消任务失败");
+      setError(err instanceof Error ? err.message : ts("取消任务失败"));
     }
   };
 
@@ -623,7 +623,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
           </section>
 
           <section className="flex flex-col rounded-3xl border border-gray-100 bg-white/90 p-4 shadow-sm backdrop-blur dark:border-white/10 dark:bg-[#111827]/90 sm:p-5">
-            <div className="font-semibold">{isRedraw ? "转绘设置" : isSubtitle ? "去字幕设置" : t("upscale.settings")}</div>
+            <div className="font-semibold">{isRedraw ? ts("转绘设置") : isSubtitle ? ts("去字幕设置") : t("upscale.settings")}</div>
             {isUpscale && <div className="mt-5">
               <div className="mb-2 text-xs text-gray-400">{t("upscale.resolution")}</div>
               <div className="grid grid-cols-3 gap-2">
@@ -639,37 +639,37 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
             {isRedraw && (
               <>
                 <div className="mt-5">
-                  <div className="mb-2 flex items-center justify-between text-xs text-gray-400"><span>风格强度</span><span>{Math.round(styleStrength * 100)}%</span></div>
+                  <div className="mb-2 flex items-center justify-between text-xs text-gray-400"><span>{ts("风格强度")}</span><span>{Math.round(styleStrength * 100)}%</span></div>
                   <input type="range" min={0} max={1} step={0.05} value={styleStrength} onChange={(event) => setStyleStrength(Number(event.target.value))} className="w-full accent-violet-500" />
                 </div>
                 <div className="mt-4 rounded-2xl border border-violet-100 bg-violet-50/40 p-3 dark:border-violet-400/15 dark:bg-violet-400/5">
-                  <div className="mb-2 flex items-center justify-between"><span className="flex items-center gap-2 text-sm font-medium"><ImageIcon size={15} />风格参考图（可选）</span>{styleReference && <button type="button" onClick={() => setStyleReference(null)} className="text-gray-400"><X size={14} /></button>}</div>
+                  <div className="mb-2 flex items-center justify-between"><span className="flex items-center gap-2 text-sm font-medium"><ImageIcon size={15} />{ts("风格参考图（可选）")}</span>{styleReference && <button type="button" onClick={() => setStyleReference(null)} className="text-gray-400"><X size={14} /></button>}</div>
                   {styleReference ? <div className="flex items-center gap-3"><img src={styleReference.url} alt="" className="h-16 w-16 rounded-xl object-cover" /><span className="min-w-0 flex-1 truncate text-xs">{styleReference.name}</span></div> : <div className="grid grid-cols-2 gap-2">
-                    <label className="flex h-10 cursor-pointer items-center justify-center gap-2 rounded-xl border border-violet-200 bg-white text-xs text-violet-700 dark:bg-white/5"><Upload size={14} />上传图片<input type="file" accept="image/*" className="hidden" onChange={(event) => { void selectStyleFile(event.target.files?.[0]); event.target.value = ""; }} /></label>
-                    <button type="button" onClick={openStyleAssets} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-violet-200 bg-white text-xs text-violet-700 dark:bg-white/5"><FolderOpen size={14} />资产库</button>
+                    <label className="flex h-10 cursor-pointer items-center justify-center gap-2 rounded-xl border border-violet-200 bg-white text-xs text-violet-700 dark:bg-white/5"><Upload size={14} />{ts("上传图片")}<input type="file" accept="image/*" className="hidden" onChange={(event) => { void selectStyleFile(event.target.files?.[0]); event.target.value = ""; }} /></label>
+                      <button type="button" onClick={openStyleAssets} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-violet-200 bg-white text-xs text-violet-700 dark:bg-white/5"><FolderOpen size={14} />{ts("资产库")}</button>
                   </div>}
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
-                  <label className="flex items-center gap-2 rounded-xl border border-gray-100 px-3 py-2 dark:border-white/10"><input type="checkbox" checked={preserveMotion} onChange={(e) => setPreserveMotion(e.target.checked)} />保留动作</label>
-                  <label className="flex items-center gap-2 rounded-xl border border-gray-100 px-3 py-2 dark:border-white/10"><input type="checkbox" checked={preserveIdentity} onChange={(e) => setPreserveIdentity(e.target.checked)} />保留人物</label>
+                  <label className="flex items-center gap-2 rounded-xl border border-gray-100 px-3 py-2 dark:border-white/10"><input type="checkbox" checked={preserveMotion} onChange={(e) => setPreserveMotion(e.target.checked)} />{ts("保留动作")}</label>
+                  <label className="flex items-center gap-2 rounded-xl border border-gray-100 px-3 py-2 dark:border-white/10"><input type="checkbox" checked={preserveIdentity} onChange={(e) => setPreserveIdentity(e.target.checked)} />{ts("保留人物")}</label>
                 </div>
               </>
             )}
             {isSubtitle && (
               <>
                 <div className="mt-5">
-                  <div className="mb-2 text-xs text-gray-400">处理模式</div>
+                  <div className="mb-2 text-xs text-gray-400">{ts("处理模式")}</div>
                   <div className="grid grid-cols-3 gap-2">
                     {[["auto", "自动识别"], ["soft_track", "字幕轨"], ["hardcoded_ai", "硬字幕 AI"]].map(([value, label]) => <button key={value} type="button" onClick={() => setSubtitleMode(value)} className={`min-h-10 rounded-xl border px-2 text-xs ${subtitleMode === value ? "border-emerald-400 bg-emerald-50 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-200" : "border-gray-100 text-gray-500 dark:border-white/10"}`}>{label}</button>)}
                   </div>
                 </div>
                 <div className="mt-4">
-                  <div className="mb-2 text-xs text-gray-400">字幕区域</div>
+                  <div className="mb-2 text-xs text-gray-400">{ts("字幕区域")}</div>
                   <select value={subtitleRegion} onChange={(e) => setSubtitleRegion(e.target.value)} className="h-11 w-full rounded-xl border border-gray-100 bg-gray-50 px-3 text-sm outline-none dark:border-white/10 dark:bg-white/5">
                     <option value="bottom_15">底部 15%</option><option value="bottom_25">底部 25%</option><option value="bottom_35">底部 35%</option><option value="full">全画面</option>
                   </select>
                 </div>
-                <label className="mt-4 flex items-center justify-between rounded-xl border border-gray-100 px-3 py-3 text-sm dark:border-white/10"><span><span className="font-medium">保护水印与 Logo</span><span className="mt-0.5 block text-[11px] text-gray-400">限制 AI 只修复指定字幕区域</span></span><input type="checkbox" checked={protectWatermark} onChange={(e) => setProtectWatermark(e.target.checked)} /></label>
+                <label className="mt-4 flex items-center justify-between rounded-xl border border-gray-100 px-3 py-3 text-sm dark:border-white/10"><span><span className="font-medium">{ts("保护水印与 Logo")}</span><span className="mt-0.5 block text-[11px] text-gray-400">{ts("限制 AI 只修复指定字幕区域")}</span></span><input type="checkbox" checked={protectWatermark} onChange={(e) => setProtectWatermark(e.target.checked)} /></label>
               </>
             )}
             <label className="mt-4 flex cursor-pointer items-center justify-between rounded-xl border border-gray-100 px-3 py-3 text-sm dark:border-white/10">
@@ -703,7 +703,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
         {resultURL && (
           <section className="mt-4 rounded-3xl border border-emerald-100 bg-white/95 p-4 shadow-sm dark:border-emerald-400/15 dark:bg-[#111827]/95 sm:p-5">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 font-semibold"><CheckCircle2 size={18} className="text-emerald-500" />{isRedraw ? "转绘结果" : isSubtitle ? "无字幕视频" : `${t("upscale.result")} · ${project?.outputs?.target_resolution || resolution}`}</div>
+              <div className="flex items-center gap-2 font-semibold"><CheckCircle2 size={18} className="text-emerald-500" />{isRedraw ? ts("转绘结果") : isSubtitle ? ts("无字幕视频") : `${t("upscale.result")} · ${project?.outputs?.target_resolution || resolution}`}</div>
               <a href={resultURL} target="_blank" rel="noreferrer" download className="flex h-9 items-center gap-2 rounded-xl bg-gray-900 px-3 text-xs font-medium text-white dark:bg-white dark:text-gray-950"><Download size={15} />{t("upscale.download")}</a>
             </div>
             <video src={resultURL} controls preload="metadata" className="mx-auto max-h-[58vh] w-full rounded-2xl bg-black object-contain" />
@@ -720,7 +720,7 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
               {assets.map((asset) => <button key={asset.public_id} type="button" onClick={() => {
                 const maxBytes = Math.max(1, Number(config.max_input_size_mb || 500)) * 1024 * 1024;
                 if (asset.size_bytes && asset.size_bytes > maxBytes) {
-                  setError(`视频不能超过 ${config.max_input_size_mb || 500} MB`);
+                  setError(td("videoUpscale.maxSize", "Video must not exceed {size} MB", { size: config.max_input_size_mb || 500 }));
                   setAssetOpen(false);
                   return;
                 }
@@ -741,13 +741,13 @@ export function VideoUpscaleWorkspace({ workflow }: { workflow: WorkflowLike }) 
       {styleAssetOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setStyleAssetOpen(false)}>
           <div className="w-full max-w-3xl rounded-2xl bg-white p-4 shadow-2xl dark:border dark:border-white/10 dark:bg-gray-900" onClick={(event) => event.stopPropagation()}>
-            <div className="flex items-center justify-between"><div><div className="font-semibold">选择风格参考图</div><div className="mt-1 text-xs text-gray-400">只显示当前账号可访问的图片资产</div></div><button onClick={() => setStyleAssetOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/10"><X size={16} /></button></div>
+                <div className="flex items-center justify-between"><div><div className="font-semibold">{ts("选择风格参考图")}</div><div className="mt-1 text-xs text-gray-400">{ts("只显示当前账号可访问的图片资产")}</div></div><button onClick={() => setStyleAssetOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-100 dark:bg-white/10"><X size={16} /></button></div>
             <div className="mt-4 grid max-h-[60vh] grid-cols-2 gap-3 overflow-y-auto pr-1 sm:grid-cols-4">
               {styleAssets.map((asset) => <button key={asset.public_id} type="button" onClick={() => { setStyleReference({ url: asset.url, name: asset.name || "风格参考图", public_id: asset.public_id }); setStyleAssetOpen(false); }} className="overflow-hidden rounded-xl border border-gray-100 bg-gray-50 text-left hover:border-violet-300 dark:border-white/10 dark:bg-white/5">
                 <img src={asset.url} alt="" className="aspect-square w-full object-cover" />
                 <div className="truncate px-3 py-2 text-xs font-medium">{asset.name || "图片资产"}</div>
               </button>)}
-              {styleAssets.length === 0 && <div className="col-span-full py-16 text-center text-sm text-gray-400">暂无可用图片资产</div>}
+              {styleAssets.length === 0 && <div className="col-span-full py-16 text-center text-sm text-gray-400">{ts("暂无可用图片资产")}</div>}
             </div>
           </div>
         </div>

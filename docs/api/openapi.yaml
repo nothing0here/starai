@@ -1,46 +1,296 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
-  title: StarAI Platform API
-  version: 0.3.1
+  title: StarAI Public API
+  version: 1.0.0
+  description: Unified OpenAI-compatible API for chat, image, video and audio generation.
 servers:
-  - url: http://localhost:8080
+  - url: https://api.your-starai-domain.com
+security:
+  - bearerAuth: []
+tags:
+  - name: Chat & Text
+  - name: Images
+  - name: Videos
+  - name: Audio
+  - name: Platform
 paths:
-  /health:
+  /v1/models:
     get:
-      summary: Health check
-  /api/auth/login/password:
+      tags: [Platform]
+      operationId: listModels
+      summary: List models
+      responses:
+        '200':
+          description: Enabled models available to the current API key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelList' }
+  /v1/chat/completions:
     post:
-      summary: User login
-  /api/models:
+      tags: [Chat & Text]
+      operationId: createChatCompletion
+      summary: Create a chat completion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatCompletionRequest' }
+      responses:
+        '200':
+          description: Chat completion or an SSE stream when stream=true.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatCompletion' }
+            text/event-stream:
+              schema: { type: string }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/messages:
+    post:
+      security:
+        - anthropicApiKey: []
+      tags: [Chat & Text]
+      operationId: createAnthropicMessage
+      summary: Create a native Anthropic message
+      description: Anthropic Messages-compatible request and response shape. The platform resolves the model and provider internally.
+      parameters:
+        - { name: anthropic-version, in: header, required: false, schema: { type: string, default: '2023-06-01' } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/AnthropicMessageRequest' } }
+      responses:
+        '200': { description: Anthropic message response, content: { application/json: { schema: { $ref: '#/components/schemas/AnthropicMessage' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1beta/models/{model}:generateContent:
+    post:
+      security:
+        - geminiApiKey: []
+      tags: [Chat & Text]
+      operationId: generateGeminiContent
+      summary: Generate content using the native Gemini API
+      parameters:
+        - { name: model, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/GeminiGenerateContentRequest' } }
+      responses:
+        '200': { description: Gemini candidates response, content: { application/json: { schema: { $ref: '#/components/schemas/GeminiGenerateContentResponse' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      security:
+        - geminiApiKey: []
+      tags: [Chat & Text]
+      operationId: streamGeminiContent
+      summary: Stream content using the native Gemini API
+      parameters:
+        - { name: model, in: path, required: true, schema: { type: string } }
+        - { name: alt, in: query, required: false, schema: { type: string, enum: [sse] } }
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/GeminiGenerateContentRequest' } }
+      responses:
+        '200': { description: Server-sent Gemini GenerateContentResponse objects, content: { text/event-stream: { schema: { type: string } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/images/generations:
+    post:
+      tags: [Images]
+      operationId: createImageGeneration
+      summary: Generate images
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ImageGenerationRequest' } }
+      responses:
+        '200': { description: Image generation task, content: { application/json: { schema: { $ref: '#/components/schemas/Task' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/video/generations:
+    post:
+      tags: [Videos]
+      operationId: createVideoGeneration
+      summary: Start a video generation task
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/MediaTaskRequest' } }
+      responses:
+        '200': { description: Task created, content: { application/json: { schema: { $ref: '#/components/schemas/Task' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/audio/speech:
+    post:
+      tags: [Audio]
+      operationId: createSpeech
+      summary: Generate speech audio
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/SpeechRequest' } }
+      responses:
+        '200': { description: Audio generation task, content: { application/json: { schema: { $ref: '#/components/schemas/Task' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/tasks/{task_no}:
     get:
-      summary: List public models
-  /api/chat/completions:
-    post:
-      summary: Chat completion (supports SSE stream)
-  /api/tasks:
-    post:
-      summary: Create async task
-  /api/recharge/card:
-    post:
-      summary: Redeem card
-  /api/payment/orders:
-    post:
-      summary: Create a mock-paid or external pending payment order
-  /api/payment/orders/{order_no}:
+      tags: [Platform]
+      operationId: getTask
+      summary: Retrieve a task
+      parameters:
+        - { name: task_no, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Task status, content: { application/json: { schema: { $ref: '#/components/schemas/Task' } } } }
+        default: { $ref: '#/components/responses/Error' }
+  /v1/tasks/{task_no}/events:
     get:
-      summary: Get the authenticated user's payment order status
-  /api/payment/webhooks/generic:
-    post:
-      summary: Confirm a generic external payment using timestamped HMAC-SHA256
-  /api/payment/webhooks/stripe:
-    post:
-      summary: Receive and verify Stripe Checkout events
-  /api/payment/webhooks/paypal:
-    post:
-      summary: Receive and verify PayPal Orders/Capture events
-  /admin/api/login:
-    post:
-      summary: Admin login
-  /admin/api/models:
-    post:
-      summary: Create model
+      tags: [Platform]
+      operationId: listTaskEvents
+      summary: List task progress events
+      parameters:
+        - { name: task_no, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Task events, content: { application/json: { schema: { $ref: '#/components/schemas/TaskEvents' } } } }
+        default: { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API_KEY
+    anthropicApiKey:
+      type: apiKey
+      in: header
+      name: x-api-key
+    geminiApiKey:
+      type: apiKey
+      in: header
+      name: x-goog-api-key
+  responses:
+    Error:
+      description: API error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    ChatCompletionRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string, description: Platform model code }
+        messages: { type: array, items: { type: object, required: [role, content], properties: { role: { type: string, enum: [system, user, assistant, tool] }, content: {} } } }
+        stream: { type: boolean, default: false }
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        max_tokens: { type: integer, minimum: 1 }
+        tools: { type: array, items: { type: object } }
+    ChatCompletion:
+      type: object
+      required: [id, object, choices]
+      properties:
+        id: { type: string }
+        object: { type: string, const: chat.completion }
+        model: { type: string }
+        choices: { type: array, items: { type: object } }
+        usage: { type: object }
+    AnthropicMessageRequest:
+      type: object
+      required: [model, max_tokens, messages]
+      properties:
+        model: { type: string }
+        max_tokens: { type: integer, minimum: 1 }
+        system: {}
+        messages: { type: array, items: { type: object, required: [role, content], properties: { role: { type: string, enum: [user, assistant] }, content: {} } } }
+        stream: { type: boolean, default: false }
+        temperature: { type: number }
+        top_p: { type: number }
+        tools: { type: array, items: { type: object } }
+    AnthropicMessage:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string, const: message }
+        role: { type: string, const: assistant }
+        content: { type: array, items: { type: object } }
+        model: { type: string }
+        stop_reason: { type: string }
+        usage: { type: object }
+    GeminiGenerateContentRequest:
+      type: object
+      required: [contents]
+      properties:
+        contents: { type: array, items: { type: object, required: [parts], properties: { role: { type: string, enum: [user, model] }, parts: { type: array, items: { type: object } } } } }
+        systemInstruction: { type: object }
+        generationConfig: { type: object }
+        tools: { type: array, items: { type: object } }
+    GeminiGenerateContentResponse:
+      type: object
+      properties:
+        candidates: { type: array, items: { type: object } }
+        usageMetadata: { type: object }
+    ImageGenerationRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model: { type: string }
+        prompt: { type: string }
+        n: { type: integer, minimum: 1, maximum: 10 }
+        size: { type: string }
+        quality: { type: string }
+        response_format: { type: string, enum: [url, b64_json] }
+        aspect_ratio: { type: string }
+        image_size: { type: string }
+        image: { oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+    MediaTaskRequest:
+      type: object
+      required: [model, prompt]
+      properties:
+        model: { type: string }
+        prompt: { type: string }
+        size: { type: string }
+        duration: { oneOf: [{ type: number }, { type: string }] }
+        orientation: { type: string, enum: [portrait, landscape] }
+        aspect_ratio: { type: string }
+        image: { oneOf: [{ type: string }, { type: array, items: { type: string } }] }
+    SpeechRequest:
+      type: object
+      required: [model, input, voice]
+      properties:
+        model: { type: string }
+        input: { type: string }
+        voice: { type: string }
+        format: { type: string, enum: [mp3, opus, aac, flac, wav, pcm] }
+    Task:
+      type: object
+      required: [task_no, status]
+      properties:
+        task_no: { type: string }
+        type: { type: string, enum: [image, video, audio] }
+        status: { type: string, enum: [queued, processing, succeeded, failed] }
+        model_code: { type: string }
+        estimated_cost: { type: number }
+        created_at: { type: string, format: date-time }
+        poll_url: { type: string }
+        upstream_task_id: { type: string }
+        output: {}
+        error_code: { type: string }
+        error_message: { type: string }
+    TaskEvents:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              progress: { type: number }
+              created_at: { type: string, format: date-time }
+              payload: {}
+    ModelList:
+      type: object
+      properties:
+        object: { type: string, const: list }
+        data: { type: array, items: { type: object, properties: { id: { type: string }, object: { type: string }, owned_by: { type: string } } } }
+    Error:
+      type: object
+      properties:
+        error: { type: object, properties: { code: { type: string }, message: { type: string }, type: { type: string }, request_id: { type: string } } }
