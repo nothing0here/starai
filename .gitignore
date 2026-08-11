@@ -69,3 +69,5 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
+.tmp-i18n-hardcoded.txt
+.tmp-i18n-hardcoded.txt
