@@ -3,13 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -28,7 +33,10 @@ import (
 	"github.com/starai/worker/videoparams"
 )
 
-var objectStore storage.Store
+var (
+	objectStore         storage.Store
+	modelRouteCipherKey string
+)
 
 const (
 	TypeImageTask    = "image:generate"
@@ -57,6 +65,7 @@ type ComposeTaskPayload struct {
 
 func main() {
 	_ = godotenv.Load("../../.env.local", "../../.env", ".env.local", ".env")
+	modelRouteCipherKey = getenv("MODEL_ROUTE_CIPHER_KEY", getenv("ADMIN_JWT_SECRET", "dev-admin-jwt-secret"))
 	dbURL := getenv("DATABASE_URL", "postgres://starai:starai@localhost:5432/starai?sslmode=disable")
 	redisURL := getenv("REDIS_URL", "redis://localhost:6379/0")
 	newAPIBase := getenv("NEW_API_BASE_URL", "http://localhost:3002")
@@ -231,9 +240,8 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	isAudio := requestMode == "audio"
 	isImage := !isVideo && !isAudio
 
-	runtimeRule := videoparams.ParseRuntimeRuleJSON(runtimeRuleRaw)
-	extraParams := videoparams.ParseExtraParamsJSON(extraParamsRaw)
-	conn := parseConnection(extraParams, baseURL, token)
+	legacyRuntimeRule := videoparams.ParseRuntimeRuleJSON(runtimeRuleRaw)
+	legacyExtraParams := videoparams.ParseExtraParamsJSON(extraParamsRaw)
 	prompt, _ := p.Input["prompt"].(string)
 	workPrompt := prompt
 	if rawUserPrompt, ok := p.Input["user_prompt"].(string); ok && strings.TrimSpace(rawUserPrompt) != "" {
@@ -244,99 +252,71 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		p.Input["prompt"] = prompt
 	}
 
-	var body []byte
-	generationCount := 1
-	if isVideo {
-		if endpoint == "" {
-			endpoint = "/v1/video/generations"
-		}
-		payload := videoparams.BuildUpstreamVideoPayload(p.ModelCode, newAPIModel, runtimeRule, extraParams, p.Input)
-		body, _ = json.Marshal(payload)
-	} else if isAudio {
-		if endpoint == "" {
-			endpoint = "/v1/audio/speech"
-		}
-		payload := videoparams.BuildUpstreamVideoPayload(p.ModelCode, newAPIModel, runtimeRule, extraParams, p.Input)
-		body, _ = json.Marshal(payload)
-	} else {
-		if endpoint == "" {
-			endpoint = "/v1/images/generations"
-		}
-		generationCount = intAny(p.Input["n"])
-		if generationCount <= 0 {
-			generationCount = intAny(p.Input["count"])
-		}
-		if generationCount < 1 {
-			generationCount = 1
-		}
-		if generationCount > 50 {
-			generationCount = 50
-		}
-		resolveImageGenerationInput(p.Input, runtimeRule, endpoint, newAPIModel)
-		persistTaskInput(ctx, pool, p.TaskNo, p.Input)
-		if isGeminiNativeImageAPI(endpoint, newAPIModel) {
-			imgBody := buildGeminiNativeImagePayload(ctx, newAPIModel, p.ModelCode, prompt, p.Input)
-			body, _ = json.Marshal(imgBody)
-		} else if isVideoImageAPI(endpoint, newAPIModel) {
-			imgBody := buildVideoImagePayload(ctx, runtimeRule, endpoint, newAPIModel, p.ModelCode, prompt, p.Input)
-			body, _ = json.Marshal(imgBody)
-		} else {
-			size, _ := p.Input["size"].(string)
-			if size == "" {
-				size = "1024x1024"
-			}
-			imgBody := map[string]interface{}{
-				"model": newAPIModel, "prompt": prompt, "n": generationCount, "size": size,
-			}
-			if imgBody["model"] == "" {
-				imgBody["model"] = p.ModelCode
-			}
-			if v, ok := p.Input["aspect_ratio"]; ok {
-				imgBody["aspect_ratio"] = v
-			}
-			if refs, ok := p.Input["reference_images"]; ok {
-				imgBody["image"] = normalizeReferenceImages(ctx, refs)
-			}
-			body, _ = json.Marshal(imgBody)
-		}
-	}
-
-	var payloadMap map[string]interface{}
-	_ = json.Unmarshal(body, &payloadMap)
-	if isVideo {
-		payloadMap = videoparams.SanitizeUpstreamPayload(payloadMap, endpoint)
-	}
-	normalizePayloadMedia(ctx, payloadMap, endpoint)
-
-	var respBody []byte
-	var statusCode int
-	var resultData []mediaItem
-	var upstreamID string
-	if isImage && isVideoImageAPI(endpoint, newAPIModel) {
-		resultData, upstreamID, err = runBananaImageBatch(ctx, pool, conn, endpoint, payloadMap, runtimeRule, p.TaskNo, generationCount)
-		if err != nil {
-			log.Printf("Task %s banana image batch failed: %v", p.TaskNo, err)
-			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
-		}
-		if upstreamID != "" {
-			pool.Exec(ctx, `UPDATE tasks SET upstream_task_id=$1, updated_at=now() WHERE task_no=$2`, upstreamID, p.TaskNo)
-		}
-	} else if isVideo {
-		respBody, statusCode, err = postVideoUpstream(ctx, conn, endpoint, payloadMap, p.TaskNo)
-	} else {
-		body, _ = json.Marshal(payloadMap)
-		respBody, statusCode, err = doJSONRequestWithLimit(ctx, conn, "POST", joinBaseEndpoint(conn.BaseURL, resolveModelEndpoint(endpoint, newAPIModel)), body, upstreamRequestTimeout(runtimeRule, isAudio), 96<<20)
-	}
+	routes, err := loadWorkerModelRoutes(ctx, pool, p.ModelID, baseURL, token, newAPIModel, endpoint, legacyExtraParams, legacyRuntimeRule)
 	if err != nil {
-		return failTask(ctx, pool, p, "MODEL_TIMEOUT", "生成超时，请重试")
+		return failTask(ctx, pool, p, "MODEL_ROUTE_ERROR", "无法加载模型线路")
 	}
-	if statusCode >= 400 {
-		msg := upstreamErrorMessage(respBody)
-		if statusCode == 524 {
-			msg = "上游网关超时(524)，参考图过大或上游繁忙，请换小图或稍后重试"
+	var selected workerGenerationAttemptResult
+	var lastRouteErr error
+	attempt := 0
+	selectedOK := false
+routeLoop:
+	for _, route := range routes {
+		if !acquireWorkerRouteProbe(ctx, pool, route) {
+			continue
 		}
-		log.Printf("Task %s upstream error %d: %s", p.TaskNo, statusCode, truncateText(string(respBody), 800))
-		return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", msg)
+		for retry := 0; retry <= route.MaxRetries; retry++ {
+			if attempt >= maxWorkerRouteAttempts {
+				break routeLoop
+			}
+			attempt++
+			started := time.Now()
+			candidate, callErr := executeWorkerGenerationAttempt(ctx, pool, p, route, isVideo, isAudio, isImage, prompt)
+			latency := int(time.Since(started).Milliseconds())
+			if callErr == nil && candidate.StatusCode < 400 && len(candidate.ResultData) == 0 {
+				candidate.ResultData, candidate.UpstreamTaskID = parseUpstreamMedia(candidate.ResponseBody)
+				if len(candidate.ResultData) == 0 && candidate.UpstreamTaskID == "" {
+					callErr = fmt.Errorf("upstream returned no usable result")
+				}
+			}
+			if callErr == nil && candidate.StatusCode < 400 {
+				selected = candidate
+				selectedOK = true
+				markWorkerRouteSuccess(ctx, pool, route.ID)
+				logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "success", candidate.StatusCode, latency)
+				break
+			}
+			lastRouteErr = callErr
+			if callErr == nil {
+				lastRouteErr = fmt.Errorf("upstream HTTP %d: %s", candidate.StatusCode, upstreamErrorMessage(candidate.ResponseBody))
+			}
+			if callErr == nil && !workerStatusCanFailover(candidate.StatusCode) {
+				logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "rejected", candidate.StatusCode, latency)
+				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", upstreamErrorMessage(candidate.ResponseBody))
+			}
+			markWorkerRouteFailure(ctx, pool, route.ID)
+			logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "failed", candidate.StatusCode, latency)
+			log.Printf("Task %s route %d failed status=%d: %s", p.TaskNo, route.ID, candidate.StatusCode, truncateText(fmt.Sprint(lastRouteErr), 800))
+			if retry < route.MaxRetries && workerShouldRetrySameRoute(callErr, candidate.StatusCode) && waitWorkerRouteRetry(ctx, retry) {
+				continue
+			}
+			break
+		}
+		if selectedOK {
+			break
+		}
+	}
+	if !selectedOK {
+		message := "所有可用线路均调用失败"
+		if lastRouteErr != nil && strings.TrimSpace(lastRouteErr.Error()) != "" {
+			message += "：" + lastRouteErr.Error()
+		}
+		return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", message)
+	}
+	runtimeRule, conn, endpoint, newAPIModel := selected.RuntimeRule, selected.Connection, selected.Endpoint, selected.UpstreamModel
+	respBody, resultData, upstreamID := selected.ResponseBody, selected.ResultData, selected.UpstreamTaskID
+	if upstreamID != "" {
+		_, _ = pool.Exec(ctx, `UPDATE tasks SET upstream_task_id=$1,route_id=$2,updated_at=now() WHERE task_no=$3`, upstreamID, nullableRouteID(selected.Route.ID), p.TaskNo)
 	}
 
 	promptTokens, outputTokens := upstreamUsageTokens(respBody)
@@ -381,6 +361,8 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	if promptTokens > 0 || outputTokens > 0 {
 		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, p.Input, promptTokens, outputTokens)
 	}
+	providerCost := workerRouteProviderCost(selected.Route, p.Input, promptTokens, outputTokens)
+	updateWorkerRouteAttemptProviderCost(ctx, pool, p.TaskNo, selected.Route.ID, providerCost)
 
 	var output, meta []byte
 	workType := "image"
@@ -491,14 +473,14 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	}
 	if boolInput(p.Input, "_skip_billing") {
 		if _, err := pool.Exec(ctx, `
-			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$3`,
-			output, actualCost, p.TaskNo); err != nil {
+			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, route_id=$3, provider_cost=$4, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$5`,
+			output, actualCost, nullableRouteID(selected.Route.ID), providerCost, p.TaskNo); err != nil {
 			return fmt.Errorf("task %s finalize: %w", p.TaskNo, err)
 		}
 	} else if err := chargeBillingWithFinalize(ctx, pool, p.UserID, estimated, actualCost, "task", p.TaskNo, txType, remark, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
-			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$3 AND status='running'`,
-			output, actualCost, p.TaskNo)
+			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, route_id=$3, provider_cost=$4, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$5 AND status='running'`,
+			output, actualCost, nullableRouteID(selected.Route.ID), providerCost, p.TaskNo)
 		if err != nil {
 			return err
 		}
@@ -557,6 +539,354 @@ type connectionConfig struct {
 	APIKeyHeader string
 	Headers      map[string]string
 }
+
+type workerModelRoute struct {
+	ID                  int64
+	Protocol            string
+	UpstreamModel       string
+	Endpoint            string
+	Connection          connectionConfig
+	ExtraParams         map[string]interface{}
+	RuntimeRule         map[string]interface{}
+	CostRule            map[string]interface{}
+	Priority            int
+	Weight              int
+	TimeoutSeconds      int
+	MaxRetries          int
+	HealthStatus        string
+	ConsecutiveFailures int
+}
+
+func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int64, fallbackBaseURL, fallbackToken, legacyModel, legacyEndpoint string, legacyExtra, legacyRuntime map[string]interface{}) ([]workerModelRoute, error) {
+	rows, err := pool.Query(ctx, `SELECT id,protocol,upstream_model,endpoint,base_url,api_key,auth_type,api_key_header,headers,extra_params,runtime_rule,cost_rule,priority,weight,timeout_seconds,max_retries,health_status,consecutive_failures
+		FROM model_routes WHERE model_id=$1 AND is_enabled=true AND (cooldown_until IS NULL OR cooldown_until<=now()) ORDER BY priority,id`, modelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	routes := []workerModelRoute{}
+	for rows.Next() {
+		var route workerModelRoute
+		var baseURL, apiKey, authType, apiKeyHeader string
+		var headersRaw, extraRaw, runtimeRaw, costRaw []byte
+		if err := rows.Scan(&route.ID, &route.Protocol, &route.UpstreamModel, &route.Endpoint, &baseURL, &apiKey, &authType, &apiKeyHeader, &headersRaw, &extraRaw, &runtimeRaw, &costRaw, &route.Priority, &route.Weight, &route.TimeoutSeconds, &route.MaxRetries, &route.HealthStatus, &route.ConsecutiveFailures); err != nil {
+			return nil, err
+		}
+		var headers map[string]interface{}
+		_ = json.Unmarshal(headersRaw, &headers)
+		apiKey, err = decryptWorkerRouteSecret(apiKey, modelRouteCipherKey)
+		if err != nil {
+			return nil, fmt.Errorf("route %d API key decrypt failed; check MODEL_ROUTE_CIPHER_KEY: %w", route.ID, err)
+		}
+		route.Connection = connectionConfig{BaseURL: trimRightSlash(baseURL), APIKey: apiKey, AuthType: authType, APIKeyHeader: apiKeyHeader, Headers: map[string]string{}}
+		for key, value := range headers {
+			if text, ok := value.(string); ok {
+				route.Connection.Headers[key] = text
+			}
+		}
+		_ = json.Unmarshal(extraRaw, &route.ExtraParams)
+		_ = json.Unmarshal(runtimeRaw, &route.RuntimeRule)
+		_ = json.Unmarshal(costRaw, &route.CostRule)
+		legacyExtraWithoutConnection := mergeWorkerMaps(legacyExtra, map[string]interface{}{})
+		delete(legacyExtraWithoutConnection, "connection")
+		route.ExtraParams = mergeWorkerMaps(legacyExtraWithoutConnection, route.ExtraParams)
+		route.RuntimeRule = mergeWorkerMaps(legacyRuntime, route.RuntimeRule)
+		routes = append(routes, route)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		var configured bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1)`, modelID).Scan(&configured); err != nil {
+			return nil, err
+		}
+		if configured {
+			return nil, fmt.Errorf("all model routes are cooling down")
+		}
+		protocol := strings.ToLower(strings.TrimSpace(stringAny(legacyExtra["protocol"])))
+		if connection, ok := legacyExtra["connection"].(map[string]interface{}); ok {
+			protocol = strings.ToLower(strings.TrimSpace(firstNonEmpty(stringAny(connection["protocol"]), protocol)))
+		}
+		if protocol == "" {
+			protocol = "openai"
+		}
+		routes = append(routes, workerModelRoute{Protocol: protocol, UpstreamModel: legacyModel, Endpoint: legacyEndpoint, Connection: parseConnection(legacyExtra, fallbackBaseURL, fallbackToken), ExtraParams: legacyExtra, RuntimeRule: legacyRuntime, Weight: 100, TimeoutSeconds: 120})
+	}
+	for start := 0; start < len(routes); {
+		end := start + 1
+		for end < len(routes) && routes[end].Priority == routes[start].Priority {
+			end++
+		}
+		weightedWorkerRouteOrder(routes[start:end])
+		start = end
+	}
+	return routes, nil
+}
+
+func decryptWorkerRouteSecret(value, secret string) (string, error) {
+	const prefix = "enc:v1:"
+	if value == "" || !strings.HasPrefix(value, prefix) {
+		return value, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
+	if err != nil {
+		return "", err
+	}
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) < gcm.NonceSize() {
+		return "", errors.New("invalid encrypted route secret")
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+func weightedWorkerRouteOrder(routes []workerModelRoute) {
+	for pos := 0; pos < len(routes)-1; pos++ {
+		total := 0
+		for index := pos; index < len(routes); index++ {
+			total += routes[index].Weight
+		}
+		if total <= 0 {
+			return
+		}
+		pick := rand.Intn(total)
+		selected := pos
+		for index := pos; index < len(routes); index++ {
+			pick -= routes[index].Weight
+			if pick < 0 {
+				selected = index
+				break
+			}
+		}
+		routes[pos], routes[selected] = routes[selected], routes[pos]
+	}
+}
+
+func mergeWorkerMaps(base, override map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for key, value := range base {
+		out[key] = value
+	}
+	for key, value := range override {
+		baseMap, baseOK := out[key].(map[string]interface{})
+		overrideMap, overrideOK := value.(map[string]interface{})
+		if baseOK && overrideOK {
+			out[key] = mergeWorkerMaps(baseMap, overrideMap)
+		} else {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+func markWorkerRouteSuccess(ctx context.Context, pool *pgxpool.Pool, routeID int64) {
+	if routeID <= 0 {
+		return
+	}
+	_, _ = pool.Exec(ctx, `UPDATE model_routes SET health_status='healthy',consecutive_failures=0,success_count=success_count+1,last_success_at=now(),cooldown_until=NULL,updated_at=now() WHERE id=$1`, routeID)
+}
+
+func acquireWorkerRouteProbe(ctx context.Context, pool *pgxpool.Pool, route workerModelRoute) bool {
+	if route.ID <= 0 || (route.HealthStatus != "open" && route.HealthStatus != "half_open") {
+		return true
+	}
+	tag, err := pool.Exec(ctx, `UPDATE model_routes SET health_status='half_open',cooldown_until=now()+interval '30 seconds',updated_at=now() WHERE id=$1 AND health_status IN ('open','half_open') AND (cooldown_until IS NULL OR cooldown_until<=now())`, route.ID)
+	return err == nil && tag.RowsAffected() == 1
+}
+
+func nullableRouteID(routeID int64) interface{} {
+	if routeID <= 0 {
+		return nil
+	}
+	return routeID
+}
+
+func markWorkerRouteFailure(ctx context.Context, pool *pgxpool.Pool, routeID int64) {
+	if routeID <= 0 {
+		return
+	}
+	_, _ = pool.Exec(ctx, `UPDATE model_routes SET consecutive_failures=consecutive_failures+1,failure_count=failure_count+1,last_failure_at=now(),health_status=CASE WHEN consecutive_failures+1>=5 THEN 'open' ELSE 'degraded' END,cooldown_until=CASE WHEN consecutive_failures+1>=5 THEN now()+interval '60 seconds' ELSE cooldown_until END,updated_at=now() WHERE id=$1`, routeID)
+}
+
+func logWorkerRouteAttempt(ctx context.Context, pool *pgxpool.Pool, taskNo string, modelID, routeID int64, attempt int, status string, statusCode, latencyMS int) {
+	var routeRef interface{} = routeID
+	if routeID <= 0 {
+		routeRef = nil
+	}
+	_, _ = pool.Exec(ctx, `INSERT INTO model_route_attempts(request_id,model_id,route_id,attempt,status,status_code,latency_ms) VALUES($1,$2,$3,$4,$5,NULLIF($6,0),$7)`, taskNo, modelID, routeRef, attempt, status, statusCode, latencyMS)
+}
+
+func updateWorkerRouteAttemptProviderCost(ctx context.Context, pool *pgxpool.Pool, requestID string, routeID int64, providerCost float64) {
+	if strings.TrimSpace(requestID) == "" || routeID <= 0 || providerCost < 0 {
+		return
+	}
+	_, _ = pool.Exec(ctx, `UPDATE model_route_attempts SET provider_cost=$1 WHERE id=(
+		SELECT id FROM model_route_attempts WHERE request_id=$2 AND route_id=$3 AND status IN ('success','SUCCESS') ORDER BY attempt DESC,id DESC LIMIT 1
+	)`, providerCost, requestID, routeID)
+}
+
+func workerRouteProviderCost(route workerModelRoute, input map[string]interface{}, promptTokens, outputTokens int) float64 {
+	typeName := strings.ToLower(strings.TrimSpace(fmt.Sprint(route.CostRule["billing_type"])))
+	value := func(key string) float64 { return floatAny(route.CostRule[key]) }
+	switch typeName {
+	case "per_token":
+		return float64(promptTokens)/1_000_000*value("input_cost_per_m") + float64(outputTokens)/1_000_000*value("output_cost_per_m")
+	case "per_image", "per_request":
+		count := intAny(input["n"])
+		if count <= 0 {
+			count = intAny(input["count"])
+		}
+		if count <= 0 {
+			count = 1
+		}
+		return float64(count) * value("unit_cost")
+	case "per_second":
+		seconds := floatAny(input["duration"])
+		if seconds <= 0 {
+			seconds = 1
+		}
+		return seconds * value("unit_cost")
+	default:
+		return value("unit_cost")
+	}
+}
+
+type workerGenerationAttemptResult struct {
+	Route           workerModelRoute
+	RuntimeRule     map[string]interface{}
+	Connection      connectionConfig
+	Endpoint        string
+	UpstreamModel   string
+	ResponseBody    []byte
+	StatusCode      int
+	ResultData      []mediaItem
+	UpstreamTaskID  string
+	GenerationCount int
+}
+
+func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, route workerModelRoute, isVideo, isAudio, isImage bool, prompt string) (workerGenerationAttemptResult, error) {
+	if route.Connection.Headers == nil {
+		route.Connection.Headers = map[string]string{}
+	}
+	if _, exists := route.Connection.Headers["Idempotency-Key"]; !exists {
+		route.Connection.Headers["Idempotency-Key"] = p.TaskNo
+	}
+	result := workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint, UpstreamModel: route.UpstreamModel, GenerationCount: 1}
+	extraParams := mergeWorkerMaps(route.ExtraParams, map[string]interface{}{})
+	extraParams["connection"] = map[string]interface{}{"base_url": route.Connection.BaseURL, "api_key": route.Connection.APIKey, "auth_type": route.Connection.AuthType, "api_key_header": route.Connection.APIKeyHeader}
+	endpoint, upstreamModel := result.Endpoint, result.UpstreamModel
+	var body []byte
+	if isVideo {
+		if endpoint == "" {
+			endpoint = "/v1/video/generations"
+		}
+		body, _ = json.Marshal(videoparams.BuildUpstreamVideoPayload(p.ModelCode, upstreamModel, route.RuntimeRule, extraParams, p.Input))
+	} else if isAudio {
+		if endpoint == "" {
+			endpoint = "/v1/audio/speech"
+		}
+		body, _ = json.Marshal(videoparams.BuildUpstreamVideoPayload(p.ModelCode, upstreamModel, route.RuntimeRule, extraParams, p.Input))
+	} else {
+		if endpoint == "" {
+			endpoint = "/v1/images/generations"
+		}
+		result.GenerationCount = intAny(p.Input["n"])
+		if result.GenerationCount <= 0 {
+			result.GenerationCount = intAny(p.Input["count"])
+		}
+		if result.GenerationCount < 1 {
+			result.GenerationCount = 1
+		}
+		if result.GenerationCount > 50 {
+			result.GenerationCount = 50
+		}
+		resolveImageGenerationInput(p.Input, route.RuntimeRule, endpoint, upstreamModel)
+		persistTaskInput(ctx, pool, p.TaskNo, p.Input)
+		if isGeminiNativeImageAPI(endpoint, upstreamModel) {
+			body, _ = json.Marshal(buildGeminiNativeImagePayload(ctx, upstreamModel, p.ModelCode, prompt, p.Input))
+		} else if isVideoImageAPI(endpoint, upstreamModel) {
+			body, _ = json.Marshal(buildVideoImagePayload(ctx, route.RuntimeRule, endpoint, upstreamModel, p.ModelCode, prompt, p.Input))
+		} else {
+			size, _ := p.Input["size"].(string)
+			if size == "" {
+				size = "1024x1024"
+			}
+			imageBody := map[string]interface{}{"model": upstreamModel, "prompt": prompt, "n": result.GenerationCount, "size": size}
+			if imageBody["model"] == "" {
+				imageBody["model"] = p.ModelCode
+			}
+			if value, ok := p.Input["aspect_ratio"]; ok {
+				imageBody["aspect_ratio"] = value
+			}
+			if refs, ok := p.Input["reference_images"]; ok {
+				imageBody["image"] = normalizeReferenceImages(ctx, refs)
+			}
+			body, _ = json.Marshal(imageBody)
+		}
+	}
+	result.Endpoint = endpoint
+	var payload map[string]interface{}
+	_ = json.Unmarshal(body, &payload)
+	if isVideo {
+		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
+	}
+	normalizePayloadMedia(ctx, payload, endpoint)
+	var err error
+	if isImage && isVideoImageAPI(endpoint, upstreamModel) {
+		result.ResultData, result.UpstreamTaskID, err = runBananaImageBatch(ctx, pool, route.Connection, endpoint, payload, route.RuntimeRule, p.TaskNo, result.GenerationCount)
+	} else if isVideo {
+		result.ResponseBody, result.StatusCode, err = postVideoUpstream(ctx, route.Connection, endpoint, payload, p.TaskNo)
+	} else {
+		body, _ = json.Marshal(payload)
+		timeout := upstreamRequestTimeout(route.RuntimeRule, isAudio)
+		if route.TimeoutSeconds > 0 {
+			timeout = time.Duration(route.TimeoutSeconds) * time.Second
+		}
+		result.ResponseBody, result.StatusCode, err = doJSONRequestWithLimit(ctx, route.Connection, "POST", joinBaseEndpoint(route.Connection.BaseURL, resolveModelEndpoint(endpoint, upstreamModel)), body, timeout, 96<<20)
+	}
+	return result, err
+}
+
+func workerStatusCanFailover(status int) bool {
+	switch status {
+	case 0, 401, 403, 404, 408, 409, 429, 500, 502, 503, 504, 520, 521, 522, 524:
+		return true
+	default:
+		return false
+	}
+}
+
+func workerShouldRetrySameRoute(err error, status int) bool {
+	if err != nil {
+		return true
+	}
+	return status == 408 || status >= 500
+}
+
+func waitWorkerRouteRetry(ctx context.Context, retry int) bool {
+	timer := time.NewTimer(time.Duration(retry+1) * 200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+const maxWorkerRouteAttempts = 8
 
 func parseConnection(extra map[string]interface{}, fallbackBaseURL, fallbackToken string) connectionConfig {
 	cfg := connectionConfig{BaseURL: trimRightSlash(fallbackBaseURL), APIKey: fallbackToken, AuthType: "bearer", APIKeyHeader: "Authorization", Headers: map[string]string{}}

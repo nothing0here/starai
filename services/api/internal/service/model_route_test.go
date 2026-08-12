@@ -1,0 +1,84 @@
+package service
+
+import (
+	"testing"
+
+	"github.com/starai/api/internal/runtime"
+)
+
+func TestEstimateRouteProviderCostIsIndependentFromModelPrice(t *testing.T) {
+	route := &ModelRoute{CostRule: map[string]interface{}{
+		"billing_type": "per_token", "input_cost_per_m": 0.25, "output_cost_per_m": 1.25,
+	}}
+	got := EstimateRouteProviderCost(route, nil, 2_000_000, 1_000_000)
+	if got != 1.75 {
+		t.Fatalf("provider cost = %v, want 1.75", got)
+	}
+}
+
+func TestEstimateRouteProviderCostForMedia(t *testing.T) {
+	route := &ModelRoute{CostRule: map[string]interface{}{"billing_type": "per_image", "unit_cost": 0.02}}
+	got := EstimateRouteProviderCost(route, map[string]interface{}{"n": float64(3)}, 0, 0)
+	if got != 0.06 {
+		t.Fatalf("provider cost = %v, want 0.06", got)
+	}
+}
+
+func TestNormalizeModelRouteDefaults(t *testing.T) {
+	input := ModelRouteInput{RouteName: " Primary ", UpstreamModel: " model-a ", BaseURL: "https://example.com/", IsEnabled: true}
+	if err := normalizeModelRouteInput(&input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Protocol != "openai" || input.AuthType != "bearer" || input.Weight != 100 || input.TimeoutSeconds != 120 {
+		t.Fatalf("defaults not applied: %#v", input)
+	}
+	if input.BaseURL != "https://example.com" {
+		t.Fatalf("base URL = %q", input.BaseURL)
+	}
+}
+
+func TestNormalizeLegacyOpenAIProtocol(t *testing.T) {
+	for _, protocol := range []string{"openai_compatible", "new_api"} {
+		input := ModelRouteInput{RouteName: "Primary", Protocol: protocol, UpstreamModel: "model-a", BaseURL: "https://example.com"}
+		if err := normalizeModelRouteInput(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Protocol != "openai" {
+			t.Fatalf("protocol %q normalized to %q", protocol, input.Protocol)
+		}
+	}
+}
+
+func TestLegacyRouteCostInfersPerTokenBilling(t *testing.T) {
+	rule := map[string]interface{}{"input_cost_per_m": 0.25, "output_cost_per_m": 1.25}
+	if err := validateRouteCostRule(rule); err != nil {
+		t.Fatal(err)
+	}
+	if rule["billing_type"] != "per_token" {
+		t.Fatalf("billing type = %#v", rule["billing_type"])
+	}
+}
+
+func TestRouteFailureClassification(t *testing.T) {
+	badRequest := &runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", StatusCode: 400}
+	if isRouteFailoverError(badRequest) {
+		t.Fatal("400 must not fail over or degrade a route")
+	}
+	if shouldRetrySameRoute(&runtime.PlatformError{Code: "MODEL_RATE_LIMITED", StatusCode: 429}) {
+		t.Fatal("429 should move to another route immediately")
+	}
+	if !shouldRetrySameRoute(&runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", StatusCode: 503}) {
+		t.Fatal("503 should retry the same route when configured")
+	}
+}
+
+func TestRouteRequestAddsIdempotencyKey(t *testing.T) {
+	model := &ModelFull{NewAPIExtraParams: map[string]interface{}{}}
+	route := ModelRoute{Headers: map[string]interface{}{"X-Custom": "yes"}}
+	extra := route.RequestExtraForRequest(model, "req_123")
+	connection := extra["connection"].(map[string]interface{})
+	headers := connection["headers"].(map[string]interface{})
+	if headers["Idempotency-Key"] != "req_123" || headers["X-Custom"] != "yes" {
+		t.Fatalf("headers = %#v", headers)
+	}
+}

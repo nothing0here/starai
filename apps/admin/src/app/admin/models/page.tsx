@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { adminApi, adminUploadFile } from "@/lib/api";
 import { UpstreamIncludeEditor } from "@/components/UpstreamIncludeEditor";
 import { AdminPagination } from "@/components/AdminPagination";
+import { ModelRoutesEditor } from "@/components/ModelRoutesEditor";
 
 interface AdminModel {
   id: number;
@@ -468,7 +469,7 @@ const emptyForm: FormState = {
 export default function ModelsPage() {
   const [models, setModels] = useState<AdminModel[]>([]);
   const [showForm, setShowForm] = useState(false);
-  const [formMount, setFormMount] = useState<HTMLTableCellElement | null>(null);
+  const [formMount, setFormMount] = useState<HTMLElement | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
   const [batchRows, setBatchRows] = useState<BatchRow[]>([emptyBatchRow()]);
   const [err, setErr] = useState("");
@@ -694,6 +695,7 @@ export default function ModelsPage() {
     const c = (extra?.connection ?? {}) as Record<string, any>;
     return {
       extra,
+      provider: String(c.provider ?? ""),
       base_url: String(c.base_url ?? ""),
       api_key: String(c.api_key ?? ""),
       auth_type: String(c.auth_type ?? "bearer"),
@@ -3122,6 +3124,10 @@ export default function ModelsPage() {
         </div>
       )}
 
+      {showForm && !form.id && (
+        <div ref={setFormMount} className="mb-5 overflow-hidden rounded-2xl border border-blue-100 bg-white shadow-sm" />
+      )}
+
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 mb-4">
         <input
@@ -3230,6 +3236,15 @@ export default function ModelsPage() {
                 </select>
               )}
               {field(
+                "渠道标识（可选）",
+                <input
+                  className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
+                  placeholder="例如：openai-official / proxy-a"
+                  value={getConnection(form.new_api_extra_params).provider}
+                  onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { provider: e.target.value }) }))}
+                />
+              )}
+              {field(
                 "Base URL（必选）",
                 <input
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
@@ -3243,7 +3258,7 @@ export default function ModelsPage() {
                 "API Key（必选）",
                 <input
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                  placeholder="仅后台保存；生产建议后续改为加密存储"
+                  placeholder="仅后台保存；线路密钥会加密入库"
                   value={getConnection(form.new_api_extra_params).api_key}
                   required={getConnection(form.new_api_extra_params).auth_type !== "none"}
                   onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { api_key: e.target.value }) }))}
@@ -4626,6 +4641,29 @@ export default function ModelsPage() {
             />
             启用
           </label>
+          {form.id !== null && form.id > 0 && form.category !== "multi_collab" && (
+            <ModelRoutesEditor
+              modelId={form.id}
+              upstreamModel={form.new_api_model}
+              endpoint={form.new_api_endpoint}
+              onPrimaryConnectionChange={(connection) => {
+                setForm((current) => ({
+                  ...current,
+                  new_api_model: connection.upstreamModel,
+                  new_api_endpoint: connection.endpoint,
+                  new_api_extra_params: setConnection(current.new_api_extra_params, {
+                    provider: connection.provider,
+                    protocol: connection.protocol === "openai" ? "openai_compatible" : connection.protocol,
+                    base_url: connection.baseUrl,
+                    ...(connection.apiKey !== undefined ? { api_key: connection.apiKey } : {}),
+                    auth_type: connection.authType,
+                    api_key_header: connection.apiKeyHeader,
+                  }),
+                }));
+                void load();
+              }}
+            />
+          )}
           {err && <p className="col-span-2 text-sm text-red-500">{err}</p>}
           <button type="submit" className="col-span-2 py-2 bg-primary rounded-xl text-dark font-semibold">
             {form.id ? "保存修改" : "创建"}
@@ -4714,11 +4752,6 @@ export default function ModelsPage() {
               )}
               </Fragment>
             ))}
-            {showForm && !form.id && (
-              <tr>
-                <td ref={setFormMount} colSpan={8} className="p-0 align-top" />
-              </tr>
-            )}
             {filtered.length === 0 && (
               <tr>
                 <td colSpan={8} className="text-center text-gray-400 py-10">

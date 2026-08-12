@@ -282,8 +282,9 @@ func applyAuthHeaders(req *http.Request, cfg RequestConfig) {
 }
 
 type PlatformError struct {
-	Code    string
-	Message string
+	Code       string
+	Message    string
+	StatusCode int
 }
 
 func (e *PlatformError) Error() string {
@@ -302,17 +303,17 @@ func normalizeHTTPError(resp *http.Response) error {
 	msg := string(body)
 	switch resp.StatusCode {
 	case 401, 403:
-		return &PlatformError{Code: "MODEL_AUTH_FAILED", Message: "模型暂不可用"}
+		return &PlatformError{Code: "MODEL_AUTH_FAILED", Message: "模型暂不可用", StatusCode: resp.StatusCode}
 	case 429:
-		return &PlatformError{Code: "MODEL_RATE_LIMITED", Message: "当前使用人数较多，请稍后重试"}
+		return &PlatformError{Code: "MODEL_RATE_LIMITED", Message: "当前使用人数较多，请稍后重试", StatusCode: resp.StatusCode}
 	default:
 		if strings.Contains(msg, "content_policy") || strings.Contains(msg, "CONTENT") {
-			return &PlatformError{Code: "CONTENT_REJECTED", Message: "内容不符合平台规范"}
+			return &PlatformError{Code: "CONTENT_REJECTED", Message: "内容不符合平台规范", StatusCode: resp.StatusCode}
 		}
 		if strings.Contains(msg, "insufficient_quota") {
-			return &PlatformError{Code: "MODEL_QUOTA_EXHAUSTED", Message: "模型额度不足，平台处理中"}
+			return &PlatformError{Code: "MODEL_QUOTA_EXHAUSTED", Message: "模型额度不足，平台处理中", StatusCode: resp.StatusCode}
 		}
-		return &PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "模型服务异常"}
+		return &PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "模型服务异常", StatusCode: resp.StatusCode}
 	}
 }
 

@@ -250,6 +250,16 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			adm.PATCH("/models/:id/status", superAdminOnly, h.AdminSetModelEnabled)
 			adm.PATCH("/models/:id", superAdminOnly, h.AdminUpdateModel)
 			adm.POST("/models/:id/test-connection", superAdminOnly, h.AdminTestModelConnection)
+			adm.GET("/models/:id/routes", h.AdminListModelRoutes)
+			adm.GET("/models/:id/route-attempts", h.AdminListModelRouteAttempts)
+			adm.GET("/models/:id/route-profit", h.AdminModelRouteProfit)
+			adm.POST("/models/:id/routes/test-all", superAdminOnly, h.AdminTestAllModelRoutes)
+			adm.POST("/models/:id/routes", superAdminOnly, h.AdminCreateModelRoute)
+			adm.PATCH("/models/:id/routes/:routeId", superAdminOnly, h.AdminUpdateModelRoute)
+			adm.PATCH("/models/:id/routes/:routeId/enabled", superAdminOnly, h.AdminSetModelRouteEnabled)
+			adm.DELETE("/models/:id/routes/:routeId", superAdminOnly, h.AdminDeleteModelRoute)
+			adm.POST("/models/:id/routes/:routeId/test", superAdminOnly, h.AdminTestModelRoute)
+			adm.POST("/models/:id/routes/:routeId/reset-health", superAdminOnly, h.AdminResetModelRouteHealth)
 			adm.DELETE("/models/:id", superAdminOnly, h.AdminDeleteModel)
 			adm.GET("/api-docs", h.AdminListAPIDocs)
 			adm.POST("/api-docs", h.AdminCreateAPIDoc)
@@ -2942,19 +2952,252 @@ func (h *Handler) AdminTestModelConnection(c *gin.Context) {
 		})
 		return
 	}
-	result := h.runtime.TestModelConnection(
-		c.Request.Context(),
-		model.NewAPIEndpoint,
-		model.RequestMode,
-		model.NewAPIModel,
-		model.NewAPIExtraParams,
-	)
+	endpoint, upstreamModel, extra := model.NewAPIEndpoint, model.NewAPIModel, model.NewAPIExtraParams
+	selectedRouteID := int64(0)
+	if routes, routeErr := h.models.ListModelRoutes(c.Request.Context(), model.ID, false); routeErr == nil {
+		hasConfiguredRoutes := len(routes) > 0
+		for index := range routes {
+			if !routes[index].IsEnabled {
+				continue
+			}
+			selectedRouteID = routes[index].ID
+			endpoint, upstreamModel, extra = routes[index].Endpoint, routes[index].UpstreamModel, routes[index].RequestExtra(model)
+			break
+		}
+		if hasConfiguredRoutes && selectedRouteID == 0 {
+			util.OK(c, runtime.ConnectionTestResult{OK: false, Message: "该模型没有启用的上游线路"})
+			return
+		}
+	}
+	result := h.runtime.TestModelConnection(c.Request.Context(), endpoint, model.RequestMode, upstreamModel, extra)
+	if selectedRouteID > 0 {
+		if result.OK {
+			h.models.MarkRouteSuccess(c.Request.Context(), selectedRouteID)
+		} else {
+			h.models.MarkRouteFailure(c.Request.Context(), selectedRouteID)
+		}
+	}
 	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "test_model_connection", "model", model.Code, map[string]interface{}{
 		"ok":          result.OK,
 		"status_code": result.StatusCode,
 		"latency_ms":  result.LatencyMS,
+		"route_id":    selectedRouteID,
 	})
 	util.OK(c, result)
+}
+
+func (h *Handler) AdminListModelRoutes(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	routes, err := h.models.ListModelRoutes(c.Request.Context(), modelID, true)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	util.OK(c, routes)
+}
+
+func (h *Handler) AdminListModelRouteAttempts(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	routeID, _ := strconv.ParseInt(c.Query("route_id"), 10, 64)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	items, err := h.models.ListModelRouteAttempts(c.Request.Context(), modelID, routeID, limit)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	util.OK(c, items)
+}
+
+func (h *Handler) AdminModelRouteProfit(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "30"))
+	items, err := h.models.ModelRouteProfit(c.Request.Context(), modelID, days)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	util.OK(c, items)
+}
+
+func (h *Handler) AdminTestAllModelRoutes(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	model, err := h.models.GetFullByIDForAdmin(c.Request.Context(), modelID)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	routes, err := h.models.ListModelRoutes(c.Request.Context(), modelID, false)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	type routeTestItem struct {
+		RouteID   int64                        `json:"route_id"`
+		RouteName string                       `json:"route_name"`
+		Result    runtime.ConnectionTestResult `json:"result"`
+	}
+	results := make([]routeTestItem, 0, len(routes))
+	for index := range routes {
+		route := &routes[index]
+		if !route.IsEnabled {
+			continue
+		}
+		result := h.runtime.TestModelConnection(c.Request.Context(), route.Endpoint, model.RequestMode, route.UpstreamModel, route.RequestExtra(model))
+		if result.OK {
+			h.models.MarkRouteSuccess(c.Request.Context(), route.ID)
+		} else {
+			h.models.MarkRouteFailure(c.Request.Context(), route.ID)
+		}
+		results = append(results, routeTestItem{RouteID: route.ID, RouteName: route.RouteName, Result: result})
+	}
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "test_all_model_routes", "model", fmt.Sprintf("%d", modelID), map[string]interface{}{"tested": len(results)})
+	util.OK(c, results)
+}
+
+func (h *Handler) AdminCreateModelRoute(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		util.BadRequest(c, "模型 ID 无效")
+		return
+	}
+	var input service.ModelRouteInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		util.BadRequest(c, "线路参数无效")
+		return
+	}
+	route, err := h.models.CreateModelRoute(c.Request.Context(), modelID, input)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "create_model_route", "model_route", fmt.Sprintf("%d", route.ID), map[string]interface{}{"model_id": modelID, "route_name": route.RouteName})
+	route.APIKey = ""
+	util.Created(c, route)
+}
+
+func (h *Handler) AdminUpdateModelRoute(c *gin.Context) {
+	modelID, err1 := strconv.ParseInt(c.Param("id"), 10, 64)
+	routeID, err2 := strconv.ParseInt(c.Param("routeId"), 10, 64)
+	if err1 != nil || err2 != nil || modelID <= 0 || routeID <= 0 {
+		util.BadRequest(c, "模型或线路 ID 无效")
+		return
+	}
+	var input service.ModelRouteInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		util.BadRequest(c, "线路参数无效")
+		return
+	}
+	route, err := h.models.UpdateModelRoute(c.Request.Context(), modelID, routeID, input)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "update_model_route", "model_route", fmt.Sprintf("%d", routeID), map[string]interface{}{"model_id": modelID, "route_name": route.RouteName})
+	route.APIKey = ""
+	util.OK(c, route)
+}
+
+func (h *Handler) AdminSetModelRouteEnabled(c *gin.Context) {
+	modelID, err1 := strconv.ParseInt(c.Param("id"), 10, 64)
+	routeID, err2 := strconv.ParseInt(c.Param("routeId"), 10, 64)
+	if err1 != nil || err2 != nil || modelID <= 0 || routeID <= 0 {
+		util.BadRequest(c, "模型或线路 ID 无效")
+		return
+	}
+	var input struct {
+		IsEnabled *bool `json:"is_enabled"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || input.IsEnabled == nil {
+		util.BadRequest(c, "缺少线路启用状态")
+		return
+	}
+	route, err := h.models.SetModelRouteEnabled(c.Request.Context(), modelID, routeID, *input.IsEnabled)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "set_model_route_enabled", "model_route", fmt.Sprintf("%d", routeID), map[string]interface{}{"model_id": modelID, "is_enabled": *input.IsEnabled})
+	route.APIKey = ""
+	util.OK(c, route)
+}
+
+func (h *Handler) AdminDeleteModelRoute(c *gin.Context) {
+	modelID, err1 := strconv.ParseInt(c.Param("id"), 10, 64)
+	routeID, err2 := strconv.ParseInt(c.Param("routeId"), 10, 64)
+	if err1 != nil || err2 != nil || modelID <= 0 || routeID <= 0 {
+		util.BadRequest(c, "模型或线路 ID 无效")
+		return
+	}
+	if err := h.models.DeleteModelRoute(c.Request.Context(), modelID, routeID); err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "delete_model_route", "model_route", fmt.Sprintf("%d", routeID), map[string]interface{}{"model_id": modelID})
+	util.OK(c, nil)
+}
+
+func (h *Handler) AdminTestModelRoute(c *gin.Context) {
+	modelID, err1 := strconv.ParseInt(c.Param("id"), 10, 64)
+	routeID, err2 := strconv.ParseInt(c.Param("routeId"), 10, 64)
+	if err1 != nil || err2 != nil || modelID <= 0 || routeID <= 0 {
+		util.BadRequest(c, "模型或线路 ID 无效")
+		return
+	}
+	model, err := h.models.GetFullByIDForAdmin(c.Request.Context(), modelID)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	routes, err := h.models.ListModelRoutes(c.Request.Context(), modelID, false)
+	if err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	for _, route := range routes {
+		if route.ID != routeID {
+			continue
+		}
+		result := h.runtime.TestModelConnection(c.Request.Context(), route.Endpoint, model.RequestMode, route.UpstreamModel, route.RequestExtra(model))
+		if result.OK {
+			h.models.MarkRouteSuccess(c.Request.Context(), route.ID)
+		} else {
+			h.models.MarkRouteFailure(c.Request.Context(), route.ID)
+		}
+		h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "test_model_route", "model_route", fmt.Sprintf("%d", route.ID), map[string]interface{}{"ok": result.OK, "status_code": result.StatusCode, "latency_ms": result.LatencyMS})
+		util.OK(c, result)
+		return
+	}
+	util.BadRequest(c, "线路不存在")
+}
+
+func (h *Handler) AdminResetModelRouteHealth(c *gin.Context) {
+	modelID, err1 := strconv.ParseInt(c.Param("id"), 10, 64)
+	routeID, err2 := strconv.ParseInt(c.Param("routeId"), 10, 64)
+	if err1 != nil || err2 != nil || modelID <= 0 || routeID <= 0 {
+		util.BadRequest(c, "模型或线路 ID 无效")
+		return
+	}
+	if err := h.models.ResetModelRouteHealth(c.Request.Context(), modelID, routeID); err != nil {
+		util.InternalError(c, err.Error())
+		return
+	}
+	util.OK(c, nil)
 }
 
 type adminUpstreamModelsRequest struct {

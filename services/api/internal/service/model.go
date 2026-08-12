@@ -15,11 +15,16 @@ import (
 )
 
 type ModelService struct {
-	db *pgxpool.Pool
+	db             *pgxpool.Pool
+	routeCipherKey string
 }
 
-func NewModelService(db *pgxpool.Pool) *ModelService {
-	return &ModelService{db: db}
+func NewModelService(db *pgxpool.Pool, routeCipherKey ...string) *ModelService {
+	key := ""
+	if len(routeCipherKey) > 0 {
+		key = routeCipherKey[0]
+	}
+	return &ModelService{db: db, routeCipherKey: key}
 }
 
 type ModelDTO struct {
@@ -1325,6 +1330,9 @@ func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*Mod
 		}
 		return nil, err
 	}
+	if err := s.SyncPrimaryModelRoute(ctx, id, input); err != nil {
+		return nil, err
+	}
 	return s.GetByID(ctx, id)
 }
 
@@ -1365,6 +1373,9 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 		input.DisplayName, input.NewAPIModel, input.NewAPIEndpoint, input.RequestMode, input.Category,
 		input.IconURL, input.Description, tags, runtime, schema, defaults, extra, price, input.IsEnabled, input.SortOrder, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.SyncPrimaryModelRoute(ctx, id, input); err != nil {
 		return nil, err
 	}
 	return s.GetByID(ctx, id)

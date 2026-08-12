@@ -875,40 +875,18 @@ dialogue 只能填写画面中角色实际说出的话；narration 只能填写�
 	modelCodes := comicDialogueModelCandidates(inputs, runtimeCfg)
 	failures := make([]string, 0, len(modelCodes))
 	for _, modelCode := range modelCodes {
-		upstreamModel, endpoint, requestMode, extraParams, errMsg := loadAgentAnalysisModel(ctx, pool, modelCode)
+		model, errMsg := loadAgentAnalysisModel(ctx, pool, modelCode)
 		if errMsg != "" {
 			failures = append(failures, modelCode+"："+errMsg)
 			continue
 		}
-		bodyMap := copyLLMExtraParams(extraParams)
-		bodyMap["model"] = firstNonEmpty(upstreamModel, modelCode)
-		setLLMRequestContent(bodyMap, requestMode, system, user)
-		if _, ok := bodyMap["temperature"]; !ok {
-			bodyMap["temperature"] = 0.7
-		}
-		body, _ := json.Marshal(bodyMap)
-		conn := parseConnection(extraParams, baseURL, token)
-		target := strings.TrimSpace(endpoint)
-		if target == "" {
-			if requestMode == "responses" {
-				target = "/v1/responses"
-			} else {
-				target = "/v1/chat/completions"
-			}
-		}
-		if strings.HasPrefix(target, "/") {
-			target = trimRightSlash(conn.BaseURL) + target
-		}
-		respBody, status, err := doJSONRequest(ctx, conn, "POST", target, body, 120*time.Second)
+		requestID := fmt.Sprintf("workflow_%d_comic_%s", workflowProjectID, modelCode)
+		result, err := executeWorkerLLMWithRoutes(ctx, pool, baseURL, token, requestID, model, system, user, 0.7, 120*time.Second)
 		if err != nil {
-			failures = append(failures, modelCode+"：模型服务异常："+err.Error())
+			failures = append(failures, modelCode+"："+err.Error())
 			continue
 		}
-		if status >= 400 {
-			failures = append(failures, fmt.Sprintf("%s：HTTP %d %s", modelCode, status, compactUpstreamError(respBody)))
-			continue
-		}
-		text := extractLLMText(respBody)
+		text := extractLLMText(result.ResponseBody)
 		if strings.TrimSpace(text) == "" {
 			failures = append(failures, modelCode+"：模型未返回漫剧规划内容")
 			continue
@@ -919,8 +897,10 @@ dialogue 只能填写画面中角色实际说出的话；narration 只能填写�
 		}
 		out = normalizeComicDramaPlan(out, inputs, runtimeCfg)
 		persistComicDramaPlan(ctx, pool, workflowProjectID, userID, inputs, out)
-		pt, ct := chatUsageTokens(respBody)
-		out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, bodyMap, pt, ct)
+		pt, ct := chatUsageTokens(result.ResponseBody)
+		out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
+		out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct)
+		out["_route_id"] = nullableRouteID(result.Route.ID)
 		out["_dialogue_model_code"] = modelCode
 		out["raw_text"] = text
 		return out, ""
@@ -1646,7 +1626,7 @@ func runAgentAnalysis(ctx context.Context, pool *pgxpool.Pool, baseURL, token, m
 	if modelCode == "" {
 		modelCode = "chat_demo_v1"
 	}
-	upstreamModel, endpoint, requestMode, extraParams, errMsg := loadAgentAnalysisModel(ctx, pool, modelCode)
+	model, errMsg := loadAgentAnalysisModel(ctx, pool, modelCode)
 	if errMsg != "" {
 		return nil, errMsg
 	}
@@ -1657,56 +1637,202 @@ func runAgentAnalysis(ctx context.Context, pool *pgxpool.Pool, baseURL, token, m
 	if hasSubjectReferenceImage(inputs) {
 		content += "\n参考图是生成主体的唯一视觉真值。不得猜测、替换或重新发明主体品类；如果无法从 URL 直接识别图片内容，候选提示词必须写成严格保持参考图主体，不得擅自写成手机、无人机或其他具体品类。"
 	}
-	bodyMap := copyLLMExtraParams(extraParams)
-	bodyMap["model"] = firstNonEmpty(upstreamModel, modelCode)
-	setLLMRequestContent(bodyMap, requestMode, system, content)
-	if _, ok := bodyMap["temperature"]; !ok {
-		bodyMap["temperature"] = 0.65
-	}
-	body, _ := json.Marshal(bodyMap)
-	conn := parseConnection(extraParams, baseURL, token)
-	target := strings.TrimSpace(endpoint)
-	if target == "" {
-		if requestMode == "responses" {
-			target = "/v1/responses"
-		} else {
-			target = "/v1/chat/completions"
-		}
-	}
-	if strings.HasPrefix(target, "/") {
-		target = trimRightSlash(conn.BaseURL) + target
-	}
-	respBody, status, err := doJSONRequest(ctx, conn, "POST", target, body, 90*time.Second)
+	requestID := fmt.Sprintf("agent_%s_%d", modelCode, time.Now().UnixNano())
+	result, err := executeWorkerLLMWithRoutes(ctx, pool, baseURL, token, requestID, model, system, content, 0.65, 90*time.Second)
 	if err != nil {
 		return nil, "模型服务异常：" + err.Error()
 	}
-	if status >= 400 {
-		return nil, fmt.Sprintf("模型服务异常：HTTP %d %s", status, string(respBody))
-	}
-	text := extractLLMText(respBody)
+	text := extractLLMText(result.ResponseBody)
 	if strings.TrimSpace(text) == "" {
 		return nil, "模型未返回分析内容"
 	}
 	out := normalizeAgentAnalysisOutput(text, category)
-	pt, ct := chatUsageTokens(respBody)
-	out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, bodyMap, pt, ct)
+	pt, ct := chatUsageTokens(result.ResponseBody)
+	out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
+	out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct)
+	out["_route_id"] = nullableRouteID(result.Route.ID)
 	return out, ""
 }
 
-func loadAgentAnalysisModel(ctx context.Context, pool *pgxpool.Pool, modelCode string) (string, string, string, map[string]interface{}, string) {
-	var upstreamModel, endpoint, requestMode string
-	var extraRaw []byte
+type agentAnalysisModel struct {
+	ID            int64
+	Code          string
+	UpstreamModel string
+	Endpoint      string
+	RequestMode   string
+	ExtraParams   map[string]interface{}
+	RuntimeRule   map[string]interface{}
+}
+
+type workerLLMResult struct {
+	Route        workerModelRoute
+	RequestBody  map[string]interface{}
+	ResponseBody []byte
+}
+
+func loadAgentAnalysisModel(ctx context.Context, pool *pgxpool.Pool, modelCode string) (agentAnalysisModel, string) {
+	model := agentAnalysisModel{Code: modelCode}
+	var extraRaw, runtimeRaw []byte
 	if err := pool.QueryRow(ctx, `
-		SELECT COALESCE(new_api_model,''), COALESCE(new_api_endpoint,''), COALESCE(request_mode,''), COALESCE(new_api_extra_params,'{}'::jsonb)
-		FROM models WHERE code=$1 AND is_enabled=true AND category='chat'`, modelCode).Scan(&upstreamModel, &endpoint, &requestMode, &extraRaw); err != nil {
-		return "", "", "", nil, "分析模型不存在、类型不匹配或未启用：" + modelCode
+		SELECT id, COALESCE(new_api_model,''), COALESCE(new_api_endpoint,''), COALESCE(request_mode,''),
+		       COALESCE(new_api_extra_params,'{}'::jsonb), COALESCE(runtime_rule,'{}'::jsonb)
+		FROM models WHERE code=$1 AND is_enabled=true AND category='chat'`, modelCode).Scan(&model.ID, &model.UpstreamModel, &model.Endpoint, &model.RequestMode, &extraRaw, &runtimeRaw); err != nil {
+		return agentAnalysisModel{}, "分析模型不存在、类型不匹配或未启用：" + modelCode
 	}
-	extra := map[string]interface{}{}
-	_ = json.Unmarshal(extraRaw, &extra)
-	if extra == nil {
-		extra = map[string]interface{}{}
+	_ = json.Unmarshal(extraRaw, &model.ExtraParams)
+	_ = json.Unmarshal(runtimeRaw, &model.RuntimeRule)
+	if model.ExtraParams == nil {
+		model.ExtraParams = map[string]interface{}{}
 	}
-	return upstreamModel, endpoint, requestMode, extra, ""
+	if model.RuntimeRule == nil {
+		model.RuntimeRule = map[string]interface{}{}
+	}
+	return model, ""
+}
+
+func executeWorkerLLMWithRoutes(ctx context.Context, pool *pgxpool.Pool, baseURL, token, requestID string, model agentAnalysisModel, system, user string, temperature float64, defaultTimeout time.Duration) (workerLLMResult, error) {
+	routes, err := loadWorkerModelRoutes(ctx, pool, model.ID, baseURL, token, model.UpstreamModel, model.Endpoint, model.ExtraParams, model.RuntimeRule)
+	if err != nil {
+		return workerLLMResult{}, err
+	}
+	requestID = strings.TrimSpace(requestID)
+	if len(requestID) > 64 {
+		requestID = requestID[:64]
+	}
+	attempt := 0
+	failures := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if attempt >= maxWorkerRouteAttempts {
+			break
+		}
+		if !acquireWorkerRouteProbe(ctx, pool, route) {
+			continue
+		}
+		bodyMap, endpoint := buildWorkerLLMRequest(route, model.RequestMode, model.Code, system, user, temperature)
+		body, marshalErr := json.Marshal(bodyMap)
+		if marshalErr != nil {
+			return workerLLMResult{}, marshalErr
+		}
+		conn := route.Connection
+		if conn.Headers == nil {
+			conn.Headers = map[string]string{}
+		}
+		if !hasWorkerHeader(conn.Headers, "Idempotency-Key") && requestID != "" {
+			conn.Headers["Idempotency-Key"] = requestID
+		}
+		if normalizeWorkerLLMProtocol(route.Protocol) == "claude" && !hasWorkerHeader(conn.Headers, "anthropic-version") {
+			conn.Headers["anthropic-version"] = "2023-06-01"
+		}
+		timeout := defaultTimeout
+		if route.TimeoutSeconds > 0 {
+			timeout = time.Duration(route.TimeoutSeconds) * time.Second
+		}
+		retries := route.MaxRetries
+		if retries < 0 {
+			retries = 0
+		}
+		for retry := 0; retry <= retries && attempt < maxWorkerRouteAttempts; retry++ {
+			attempt++
+			started := time.Now()
+			responseBody, status, requestErr := doJSONRequest(ctx, conn, "POST", joinBaseEndpoint(conn.BaseURL, resolveModelEndpoint(endpoint, route.UpstreamModel)), body, timeout)
+			latencyMS := int(time.Since(started).Milliseconds())
+			if requestErr == nil && status >= 200 && status < 300 {
+				markWorkerRouteSuccess(ctx, pool, route.ID)
+				logWorkerRouteAttempt(ctx, pool, requestID, model.ID, route.ID, attempt, "SUCCESS", status, latencyMS)
+				promptTokens, outputTokens := chatUsageTokens(responseBody)
+				updateWorkerRouteAttemptProviderCost(ctx, pool, requestID, route.ID, workerRouteProviderCost(route, bodyMap, promptTokens, outputTokens))
+				return workerLLMResult{Route: route, RequestBody: bodyMap, ResponseBody: responseBody}, nil
+			}
+			statusLabel := "ERROR"
+			if status > 0 {
+				statusLabel = fmt.Sprintf("HTTP_%d", status)
+			}
+			logWorkerRouteAttempt(ctx, pool, requestID, model.ID, route.ID, attempt, statusLabel, status, latencyMS)
+			if workerStatusCanFailover(status) {
+				markWorkerRouteFailure(ctx, pool, route.ID)
+			}
+			message := compactUpstreamError(responseBody)
+			if requestErr != nil {
+				message = requestErr.Error()
+			}
+			failures = append(failures, fmt.Sprintf("%s (HTTP %d): %s", firstNonEmpty(route.UpstreamModel, model.Code), status, message))
+			if !workerStatusCanFailover(status) {
+				return workerLLMResult{}, fmt.Errorf("上游拒绝请求：HTTP %d %s", status, message)
+			}
+			if retry < retries && workerShouldRetrySameRoute(requestErr, status) && waitWorkerRouteRetry(ctx, retry) {
+				continue
+			}
+			break
+		}
+	}
+	if len(failures) == 0 {
+		return workerLLMResult{}, errors.New("没有可用线路，线路可能已禁用、正在冷却或被其他请求探测")
+	}
+	return workerLLMResult{}, errors.New(strings.Join(failures, "；"))
+}
+
+func buildWorkerLLMRequest(route workerModelRoute, requestMode, fallbackModel, system, user string, temperature float64) (map[string]interface{}, string) {
+	body := copyLLMExtraParams(route.ExtraParams)
+	model := firstNonEmpty(route.UpstreamModel, fallbackModel)
+	body["model"] = model
+	protocol := normalizeWorkerLLMProtocol(route.Protocol)
+	switch protocol {
+	case "claude":
+		delete(body, "input")
+		body["system"] = system
+		body["messages"] = []map[string]string{{"role": "user", "content": user}}
+		if _, ok := body["max_tokens"]; !ok {
+			body["max_tokens"] = 4096
+		}
+		if _, ok := body["temperature"]; !ok {
+			body["temperature"] = temperature
+		}
+		return body, firstNonEmpty(strings.TrimSpace(route.Endpoint), "/v1/messages")
+	case "gemini":
+		delete(body, "messages")
+		delete(body, "input")
+		delete(body, "temperature")
+		body["systemInstruction"] = map[string]interface{}{"parts": []map[string]string{{"text": system}}}
+		body["contents"] = []map[string]interface{}{{"role": "user", "parts": []map[string]string{{"text": user}}}}
+		generationConfig, _ := body["generationConfig"].(map[string]interface{})
+		if generationConfig == nil {
+			generationConfig = map[string]interface{}{}
+		}
+		if _, ok := generationConfig["temperature"]; !ok {
+			generationConfig["temperature"] = temperature
+		}
+		body["generationConfig"] = generationConfig
+		return body, firstNonEmpty(strings.TrimSpace(route.Endpoint), "/v1beta/models/{model}:generateContent")
+	default:
+		setLLMRequestContent(body, requestMode, system, user)
+		if _, ok := body["temperature"]; !ok {
+			body["temperature"] = temperature
+		}
+		if requestMode == "responses" {
+			return body, firstNonEmpty(strings.TrimSpace(route.Endpoint), "/v1/responses")
+		}
+		return body, firstNonEmpty(strings.TrimSpace(route.Endpoint), "/v1/chat/completions")
+	}
+}
+
+func normalizeWorkerLLMProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "anthropic", "anthropic_messages", "claude":
+		return "claude"
+	case "google", "google_gemini", "gemini":
+		return "gemini"
+	default:
+		return "openai"
+	}
+}
+
+func hasWorkerHeader(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func setLLMRequestContent(body map[string]interface{}, requestMode, system, user string) {
@@ -2034,6 +2160,9 @@ func chatUsageTokens(body []byte) (int, int) {
 	if usage, ok := raw["usage"].(map[string]interface{}); ok {
 		return intAny(firstNonNil(usage["prompt_tokens"], usage["input_tokens"])), intAny(firstNonNil(usage["completion_tokens"], usage["output_tokens"]))
 	}
+	if usage, ok := raw["usageMetadata"].(map[string]interface{}); ok {
+		return intAny(usage["promptTokenCount"]), intAny(firstNonNil(usage["candidatesTokenCount"], usage["responseTokenCount"]))
+	}
 	return 0, 0
 }
 
@@ -2341,6 +2470,31 @@ func extractLLMText(body []byte) string {
 	}
 	if s := stringAny(raw["output_text"]); s != "" {
 		return s
+	}
+	if content, ok := raw["content"].([]interface{}); ok {
+		items := make([]string, 0, len(content))
+		for _, part := range content {
+			if item, ok := part.(map[string]interface{}); ok && (stringAny(item["type"]) == "text" || item["type"] == nil) {
+				items = append(items, stringAny(item["text"]))
+			}
+		}
+		if text := strings.TrimSpace(strings.Join(items, "\n")); text != "" {
+			return text
+		}
+	}
+	if candidates, ok := raw["candidates"].([]interface{}); ok && len(candidates) > 0 {
+		candidate, _ := candidates[0].(map[string]interface{})
+		content, _ := candidate["content"].(map[string]interface{})
+		parts, _ := content["parts"].([]interface{})
+		items := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if item, ok := part.(map[string]interface{}); ok {
+				items = append(items, stringAny(item["text"]))
+			}
+		}
+		if text := strings.TrimSpace(strings.Join(items, "\n")); text != "" {
+			return text
+		}
 	}
 	if choices, ok := raw["choices"].([]interface{}); ok && len(choices) > 0 {
 		if choice, ok := choices[0].(map[string]interface{}); ok {

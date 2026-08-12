@@ -10,6 +10,7 @@ type Config struct {
 	RedisURL              string
 	JWTSecret             string
 	AdminJWT              string
+	ModelRouteCipherKey   string
 	APIPort               string
 	AppEnv                string
 	BaseURL               string
@@ -35,6 +36,7 @@ func Load() *Config {
 		RedisURL:               getEnv("REDIS_URL", "redis://localhost:6379/0"),
 		JWTSecret:              getEnv("JWT_SECRET", "dev-jwt-secret-starai"),
 		AdminJWT:               getEnv("ADMIN_JWT_SECRET", "dev-admin-jwt-secret"),
+		ModelRouteCipherKey:    getEnv("MODEL_ROUTE_CIPHER_KEY", getEnv("ADMIN_JWT_SECRET", "dev-admin-jwt-secret")),
 		APIPort:                getEnv("API_PORT", "8080"),
 		AppEnv:                 getEnv("APP_ENV", "development"),
 		BaseURL:                getEnv("BASE_URL", ""),

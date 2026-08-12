@@ -166,14 +166,14 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 		Extra:       chatUpstreamParams(input.Params),
 	}
 	start := time.Now()
-	resp, err := s.runtime.ChatCompletionWithConfig(ctx, model.NewAPIEndpoint, req, model.NewAPIExtraParams)
+	resp, selectedRoute, err := s.chatCompletionWithFailover(ctx, requestID, model, req)
 	duration := int(time.Since(start).Milliseconds())
 	if err != nil {
 		if unfreezeErr := s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID); unfreezeErr != nil {
 			s.logCall(ctx, requestID, userID, model.ID, nil, 0, 0, 0, 0, "billing_failed", unfreezeErr, duration)
 			return nil, fmt.Errorf("模型调用失败: %v；释放冻结额度失败: %w", err, unfreezeErr)
 		}
-		s.logCall(ctx, requestID, userID, model.ID, nil, 0, 0, 0, 0, "failed", err, duration)
+		s.logCallWithRoute(ctx, requestID, userID, model.ID, routeID(selectedRoute), nil, 0, 0, 0, 0, 0, "failed", err, duration)
 		return nil, err
 	}
 	content := ""
@@ -182,11 +182,15 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	}
 	usage := normalizedChatUsage(resp.Usage, input, content)
 	actualCost := s.models.EstimateCostWithTokenDetails(model, input.Params, usage.PromptTokens, usage.CompletionTokens, usage.CachedInputTokens(), usage.CacheCreationInputTokens)
+	providerCost := EstimateRouteProviderCostWithTokenDetails(selectedRoute, input.Params, usage.PromptTokens, usage.CompletionTokens, usage.CachedInputTokens(), usage.CacheCreationInputTokens)
+	if selectedRoute != nil {
+		s.models.UpdateSuccessfulRouteAttemptCost(ctx, requestID, selectedRoute.ID, providerCost)
+	}
 	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
 		s.logCall(ctx, requestID, userID, model.ID, nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, 0, "billing_failed", err, duration)
 		return nil, fmt.Errorf("对话结算失败: %w", err)
 	}
-	s.logCall(ctx, requestID, userID, model.ID, nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, actualCost, "success", nil, duration)
+	s.logCallWithRoute(ctx, requestID, userID, model.ID, routeID(selectedRoute), nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, actualCost, providerCost, "success", nil, duration)
 
 	convID := input.ConversationID
 	if !input.Ephemeral {
@@ -235,7 +239,7 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(v)*time.Second)
 		defer cancel()
 	}
-	ch, err := s.runtime.ChatCompletionStreamWithConfig(ctx, model.NewAPIEndpoint, req, model.NewAPIExtraParams)
+	ch, _, err := s.chatCompletionStreamWithFailover(ctx, requestID, model, req)
 	if err != nil {
 		if unfreezeErr := s.billing.Unfreeze(ctx, userID, estimated, "chat", requestID); unfreezeErr != nil {
 			return "", nil, 0, fmt.Errorf("模型流启动失败: %v；释放冻结额度失败: %w", err, unfreezeErr)
@@ -314,6 +318,209 @@ func stringSliceParam(value interface{}) []string {
 	return out
 }
 
+func routeID(route *ModelRoute) int64 {
+	if route == nil {
+		return 0
+	}
+	return route.ID
+}
+
+func legacyModelRoute(model *ModelFull) ModelRoute {
+	conn, _ := model.NewAPIExtraParams["connection"].(map[string]interface{})
+	return ModelRoute{
+		ModelID: model.ID, RouteName: "legacy", UpstreamModel: model.NewAPIModel,
+		Endpoint: model.NewAPIEndpoint, BaseURL: stringValue(conn["base_url"]),
+		APIKey: stringValue(conn["api_key"]), AuthType: stringValue(conn["auth_type"]),
+		APIKeyHeader: stringValue(conn["api_key_header"]), Protocol: stringValue(conn["protocol"]),
+		Headers: mapValue(conn["headers"]), ExtraParams: copyMap(model.NewAPIExtraParams),
+		TimeoutSeconds: 120, IsEnabled: true, HealthStatus: "healthy", Weight: 100,
+	}
+}
+
+func mapValue(value interface{}) map[string]interface{} {
+	if typed, ok := value.(map[string]interface{}); ok {
+		return typed
+	}
+	return map[string]interface{}{}
+}
+
+func routeErrorDetails(err error) (int, string) {
+	var platformErr *runtime.PlatformError
+	if errors.As(err, &platformErr) {
+		return platformErr.StatusCode, platformErr.Code
+	}
+	return 0, "UNKNOWN"
+}
+
+func isRouteFailoverError(err error) bool {
+	var platformErr *runtime.PlatformError
+	if !errors.As(err, &platformErr) {
+		return true
+	}
+	if platformErr.Code == "CONTENT_REJECTED" {
+		return false
+	}
+	if platformErr.StatusCode == 400 || platformErr.StatusCode == 422 {
+		return false
+	}
+	return true
+}
+
+func shouldRetrySameRoute(err error) bool {
+	var platformErr *runtime.PlatformError
+	if !errors.As(err, &platformErr) {
+		return true
+	}
+	if platformErr.StatusCode == 408 || platformErr.StatusCode >= 500 {
+		return true
+	}
+	return platformErr.StatusCode == 0 && (platformErr.Code == "MODEL_TIMEOUT" || platformErr.Code == "MODEL_PROVIDER_ERROR")
+}
+
+func waitRouteRetry(ctx context.Context, retry int) bool {
+	delay := time.Duration(retry+1) * 200 * time.Millisecond
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+const maxRouteAttemptsPerRequest = 8
+
+func (s *ChatService) modelRuntimeRoutes(ctx context.Context, model *ModelFull) ([]ModelRoute, error) {
+	routes, err := s.models.RuntimeRoutes(ctx, model)
+	if err != nil {
+		return nil, &runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "模型所有线路暂时不可用，请稍后重试"}
+	}
+	if len(routes) == 0 {
+		routes = []ModelRoute{legacyModelRoute(model)}
+	}
+	return routes, nil
+}
+
+func (s *ChatService) chatCompletionWithFailover(ctx context.Context, requestID string, model *ModelFull, req runtime.ChatRequest) (*runtime.ChatResponse, *ModelRoute, error) {
+	routes, err := s.modelRuntimeRoutes(ctx, model)
+	if err != nil {
+		return nil, nil, err
+	}
+	var lastErr error
+	attempt := 0
+routeLoop:
+	for i := range routes {
+		route := &routes[i]
+		if !s.models.AcquireRouteProbe(ctx, route) {
+			continue
+		}
+		for retry := 0; retry <= route.MaxRetries; retry++ {
+			if attempt >= maxRouteAttemptsPerRequest {
+				break routeLoop
+			}
+			attempt++
+			attemptReq := req
+			attemptReq.Model = route.UpstreamModel
+			started := time.Now()
+			attemptCtx := ctx
+			var cancel context.CancelFunc
+			if route.TimeoutSeconds > 0 {
+				attemptCtx, cancel = context.WithTimeout(ctx, time.Duration(route.TimeoutSeconds)*time.Second)
+			}
+			response, callErr := s.runtime.ChatCompletionWithConfig(attemptCtx, route.Endpoint, attemptReq, route.RequestExtraForRequest(model, requestID))
+			if cancel != nil {
+				cancel()
+			}
+			latency := int(time.Since(started).Milliseconds())
+			if callErr == nil {
+				s.models.MarkRouteSuccess(ctx, route.ID)
+				s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "success", 200, "", latency, 0)
+				return response, route, nil
+			}
+			lastErr = callErr
+			statusCode, errorCode := routeErrorDetails(callErr)
+			if !isRouteFailoverError(callErr) {
+				s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "rejected", statusCode, errorCode, latency, 0)
+				return nil, route, callErr
+			}
+			s.models.MarkRouteFailure(ctx, route.ID)
+			s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "failed", statusCode, errorCode, latency, 0)
+			if retry < route.MaxRetries && shouldRetrySameRoute(callErr) && waitRouteRetry(ctx, retry) {
+				continue
+			}
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = &runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "模型线路正在恢复探测，请稍后重试"}
+	}
+	return nil, nil, lastErr
+}
+
+func (s *ChatService) chatCompletionStreamWithFailover(ctx context.Context, requestID string, model *ModelFull, req runtime.ChatRequest) (<-chan runtime.StreamChunk, *ModelRoute, error) {
+	routes, err := s.modelRuntimeRoutes(ctx, model)
+	if err != nil {
+		return nil, nil, err
+	}
+	var lastErr error
+	attempt := 0
+routeLoop:
+	for i := range routes {
+		route := &routes[i]
+		if !s.models.AcquireRouteProbe(ctx, route) {
+			continue
+		}
+		for retry := 0; retry <= route.MaxRetries; retry++ {
+			if attempt >= maxRouteAttemptsPerRequest {
+				break routeLoop
+			}
+			attempt++
+			attemptReq := req
+			attemptReq.Model = route.UpstreamModel
+			started := time.Now()
+			chunks, callErr := s.runtime.ChatCompletionStreamWithConfig(ctx, route.Endpoint, attemptReq, route.RequestExtraForRequest(model, requestID))
+			latency := int(time.Since(started).Milliseconds())
+			if callErr == nil {
+				s.models.MarkRouteSuccess(ctx, route.ID)
+				s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "success", 200, "", latency, 0)
+				forwarded := make(chan runtime.StreamChunk, 32)
+				go func(selectedRouteID int64, selectedAttempt int) {
+					defer close(forwarded)
+					streamFailed := false
+					for chunk := range chunks {
+						if chunk.Error != nil {
+							streamFailed = true
+						}
+						forwarded <- chunk
+					}
+					if streamFailed {
+						s.models.MarkRouteFailure(context.Background(), selectedRouteID)
+						s.models.MarkStreamRouteAttemptFailed(context.Background(), requestID, selectedRouteID, selectedAttempt)
+					}
+				}(route.ID, attempt)
+				return forwarded, route, nil
+			}
+			lastErr = callErr
+			statusCode, errorCode := routeErrorDetails(callErr)
+			if !isRouteFailoverError(callErr) {
+				s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "rejected", statusCode, errorCode, latency, 0)
+				return nil, route, callErr
+			}
+			s.models.MarkRouteFailure(ctx, route.ID)
+			s.models.LogRouteAttempt(ctx, requestID, model.ID, route.ID, attempt, "failed", statusCode, errorCode, latency, 0)
+			if retry < route.MaxRetries && shouldRetrySameRoute(callErr) && waitRouteRetry(ctx, retry) {
+				continue
+			}
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = &runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "模型线路正在恢复探测，请稍后重试"}
+	}
+	return nil, nil, lastErr
+}
+
 func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent string, usage *runtime.ChatUsage, estimated float64) (string, error) {
 	model, err := s.ResolveInputModel(ctx, &input)
 	if err != nil {
@@ -325,11 +532,16 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	}
 	normalized = normalizedChatUsage(normalized, input, fullContent)
 	actualCost := s.models.EstimateCostWithTokenDetails(model, input.Params, normalized.PromptTokens, normalized.CompletionTokens, normalized.CachedInputTokens(), normalized.CacheCreationInputTokens)
+	selectedRoute, _ := s.models.SuccessfulRouteForRequest(ctx, requestID)
+	providerCost := EstimateRouteProviderCostWithTokenDetails(selectedRoute, input.Params, normalized.PromptTokens, normalized.CompletionTokens, normalized.CachedInputTokens(), normalized.CacheCreationInputTokens)
+	if selectedRoute != nil {
+		s.models.UpdateSuccessfulRouteAttemptCost(ctx, requestID, selectedRoute.ID, providerCost)
+	}
 	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
 		s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, 0, "billing_failed", err, 0)
 		return "", fmt.Errorf("对话结算失败: %w", err)
 	}
-	s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, actualCost, "success", nil, 0)
+	s.logCallWithRoute(ctx, requestID, userID, model.ID, routeID(selectedRoute), nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, actualCost, providerCost, "success", nil, 0)
 
 	convID := input.ConversationID
 	if convID == "" && len(input.Messages) > 0 {
@@ -467,6 +679,10 @@ func (s *ChatService) recordBalanceFailure(ctx context.Context, userID int64, in
 }
 
 func (s *ChatService) logCall(ctx context.Context, requestID string, userID, modelID int64, convID *int64, prompt, completion, total int, cost float64, status string, err error, duration int) {
+	s.logCallWithRoute(ctx, requestID, userID, modelID, 0, convID, prompt, completion, total, cost, 0, status, err, duration)
+}
+
+func (s *ChatService) logCallWithRoute(ctx context.Context, requestID string, userID, modelID, selectedRouteID int64, convID *int64, prompt, completion, total int, cost, providerCost float64, status string, err error, duration int) {
 	errCode := ""
 	if err != nil {
 		if pe, ok := err.(*runtime.PlatformError); ok {
@@ -476,10 +692,14 @@ func (s *ChatService) logCall(ctx context.Context, requestID string, userID, mod
 		}
 		status = "failed"
 	}
+	var routeRef interface{} = selectedRouteID
+	if selectedRouteID <= 0 {
+		routeRef = nil
+	}
 	s.db.Exec(ctx, `
-		INSERT INTO ai_call_logs (request_id, user_id, model_id, conversation_id, prompt_tokens, completion_tokens, total_tokens, cost, status, error_code, duration_ms)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		requestID, userID, modelID, convID, prompt, completion, total, cost, status, errCode, duration)
+		INSERT INTO ai_call_logs (request_id, user_id, model_id, route_id, conversation_id, prompt_tokens, completion_tokens, total_tokens, cost, provider_cost, gross_profit, status, error_code, duration_ms)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9-$10,$11,$12,$13)`,
+		requestID, userID, modelID, routeRef, convID, prompt, completion, total, cost, providerCost, status, errCode, duration)
 }
 
 func (s *ChatService) saveMessages(ctx context.Context, convPublicID string, userID int64, messages []runtime.ChatMessage, assistantContent string) {

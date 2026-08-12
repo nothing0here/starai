@@ -118,6 +118,7 @@ REDIS_MAXMEMORY=1gb
 # JWT
 JWT_SECRET=replace_with_a_long_random_secret
 ADMIN_JWT_SECRET=replace_with_another_long_random_secret
+MODEL_ROUTE_CIPHER_KEY=replace_with_a_stable_32_plus_character_secret
 JWT_EXPIRE_HOURS=72
 
 # API

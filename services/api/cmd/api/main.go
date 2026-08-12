@@ -49,7 +49,7 @@ func main() {
 	billingSvc := billing.New(pool)
 	authSvc := service.NewAuthService(pool, billingSvc, cfg.JWTSecret)
 	walletSvc := service.NewWalletService(pool, billingSvc)
-	modelSvc := service.NewModelService(pool)
+	modelSvc := service.NewModelService(pool, cfg.ModelRouteCipherKey)
 	contentI18nSvc := service.NewContentI18nService(pool)
 	rtClient := runtime.NewClient(cfg.NewAPIBaseURL, cfg.NewAPIToken, cfg.NewAPITimeoutSec, cfg.NewAPIStreamTimeoutSec)
 	opsSvc := service.NewOpsService(pool, billingSvc, cfg.AdminJWT)
