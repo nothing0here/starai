@@ -144,6 +144,10 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	if err != nil {
 		return nil, err
 	}
+	upstreamParams, err := buildChatUpstreamParams(model, input.Params)
+	if err != nil {
+		return nil, err
+	}
 	prepareChatBillingParams(&input)
 	estimated := s.models.EstimateCost(model, input.Params, 0, 0)
 	requestID := util.NewRequestID()
@@ -163,7 +167,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 		Model:       model.NewAPIModel,
 		Messages:    chatRequestMessages(input.Messages, input.Params),
 		Temperature: temperature,
-		Extra:       chatUpstreamParams(input.Params),
+		Extra:       upstreamParams,
 	}
 	start := time.Now()
 	resp, selectedRoute, err := s.chatCompletionWithFailover(ctx, requestID, model, req)
@@ -219,6 +223,10 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 	if err != nil {
 		return "", nil, 0, err
 	}
+	upstreamParams, err := buildChatUpstreamParams(model, input.Params)
+	if err != nil {
+		return "", nil, 0, err
+	}
 	prepareChatBillingParams(&input)
 	estimated := s.models.EstimateCost(model, input.Params, 0, 0)
 	requestID := util.NewRequestID()
@@ -232,7 +240,7 @@ func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input 
 	if v, ok := input.Params["temperature"].(float64); ok {
 		temperature = runtime.Float64Ptr(v)
 	}
-	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: chatRequestMessages(input.Messages, input.Params), Temperature: temperature, Extra: chatUpstreamParams(input.Params)}
+	req := runtime.ChatRequest{Model: model.NewAPIModel, Messages: chatRequestMessages(input.Messages, input.Params), Temperature: temperature, Extra: upstreamParams}
 	// per-request timeout override (seconds)
 	if v, ok := input.Params["timeout_sec"].(float64); ok && v > 0 && v <= 600 {
 		var cancel context.CancelFunc
@@ -299,6 +307,76 @@ func chatUpstreamParams(params map[string]interface{}) map[string]interface{} {
 		}
 	}
 	return out
+}
+
+func buildChatUpstreamParams(model *ModelFull, params map[string]interface{}) (map[string]interface{}, error) {
+	merged := make(map[string]interface{}, len(model.DefaultParams)+len(params))
+	for key, value := range model.DefaultParams {
+		merged[key] = value
+	}
+	for key, value := range params {
+		merged[key] = value
+	}
+	out := chatUpstreamParams(merged)
+	reasoning, _ := model.RuntimeRule["reasoning"].(map[string]interface{})
+	if strings.ToLower(strings.TrimSpace(stringValue(reasoning["mode"]))) != "nvidia_chat_template" {
+		return out, nil
+	}
+
+	enabled, err := reasoningEnabled(merged, reasoning)
+	if err != nil {
+		return nil, err
+	}
+	out["chat_template_kwargs"] = map[string]interface{}{"enable_thinking": enabled}
+	if !enabled {
+		return out, nil
+	}
+	budget, err := reasoningBudget(merged, reasoning)
+	if err != nil {
+		return nil, err
+	}
+	if budget > 0 {
+		out["reasoning_budget"] = budget
+	}
+	return out, nil
+}
+
+func reasoningEnabled(params, config map[string]interface{}) (bool, error) {
+	if raw, ok := params["deep_think"]; ok && raw != nil {
+		value, ok := raw.(bool)
+		if !ok {
+			return false, errors.New("deep_think must be a boolean")
+		}
+		return value, nil
+	}
+	if raw, ok := params["chat_template_kwargs"].(map[string]interface{}); ok {
+		if value, exists := raw["enable_thinking"]; exists {
+			enabled, ok := value.(bool)
+			if !ok {
+				return false, errors.New("chat_template_kwargs.enable_thinking must be a boolean")
+			}
+			return enabled, nil
+		}
+	}
+	if value, ok := config["default_enabled"].(bool); ok {
+		return value, nil
+	}
+	return false, nil
+}
+
+func reasoningBudget(params, config map[string]interface{}) (int, error) {
+	budget := firstPositiveIntValue(params, "reasoning_budget")
+	if raw, supplied := params["reasoning_budget"]; supplied && raw != nil && budget <= 0 {
+		return 0, errors.New("reasoning_budget must be a positive integer")
+	}
+	if budget <= 0 {
+		budget = firstPositiveIntValue(config, "default_budget")
+	}
+	maximum := firstPositiveIntValue(config, "max_budget")
+	if maximum > 0 && budget > maximum {
+		return 0, errors.New("reasoning_budget exceeds the model limit")
+	}
+	return budget, nil
 }
 
 func stringSliceParam(value interface{}) []string {
