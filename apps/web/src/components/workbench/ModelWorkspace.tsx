@@ -53,6 +53,7 @@ import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } f
 interface Message {
   role: "user" | "assistant";
   content: string;
+  reasoning_content?: string;
 }
 
 type MultiModelResult = {
@@ -807,6 +808,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     asset_ids: [],
     files: [],
   });
+  const [deepThink, setDeepThink] = useState(false);
   const [menuWallet, setMenuWallet] = useState<{ compute_balance?: number } | null>(null);
   const [conversationId, setConversationId] = useState<string>("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -880,6 +882,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
   const caps = (model.runtime_rule as any)?.capabilities || {};
   const capWebSearch = !!caps.web_search;
   const capDeepThink = !!caps.deep_think;
+  const reasoningConfig = ((model.runtime_rule as any)?.reasoning || {}) as Record<string, unknown>;
   const rawMaxRefImages = (model.runtime_rule as any)?.image?.max_reference_images ?? (model.default_params as any)?.max_reference_images;
   const maxRefImages = Math.max(
     0,
@@ -986,8 +989,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       ...prev,
       channel_key: typeof defaults.channel_key === "string" && defaults.channel_key ? defaults.channel_key : prev.channel_key,
     }));
+    setDeepThink(capDeepThink && reasoningConfig.default_enabled === true);
     setPrompt(initialPrompt || "");
-  }, [model.code, initialPrompt, isVideo, isAudio, isImage, workbenchInputSchema, model.default_params, model.runtime_rule]);
+  }, [model.code, initialPrompt, isVideo, isAudio, isImage, workbenchInputSchema, model.default_params, model.runtime_rule, capDeepThink, reasoningConfig.default_enabled]);
 
   useEffect(() => {
     const selectedAssets = bottom.asset_ids?.length ? { asset_ids: bottom.asset_ids } : {};
@@ -1256,7 +1260,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     try {
       const conv = await api<{
         public_id: string;
-        messages: { role: string; content: string }[];
+        messages: { role: string; content: string; reasoning_content?: string }[];
       }>(`/api/chat/conversations/${publicId}`);
       const raw = conv.messages || [];
       const displayMessages: Message[] = [];
@@ -1280,7 +1284,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
           }
           continue;
         }
-        displayMessages.push({ role: "assistant", content: m.content });
+        displayMessages.push({ role: "assistant", content: m.content, reasoning_content: m.reasoning_content });
       }
 
       setMessages(displayMessages);
@@ -1375,6 +1379,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     setMmSummary("");
     const newMessages = [...messages, userMsg];
     let assistantContent = "";
+    let assistantReasoning = "";
     let receivedReply = false;
     let receivedMultiModelEvent = false;
 
@@ -1426,6 +1431,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 }
               : {}),
             ...(isChatSingle && capWebSearch ? { web_search: bottom.web_search } : {}),
+            ...(isChatSingle && capDeepThink ? { deep_think: deepThink } : {}),
+            ...(isChatSingle && capDeepThink && typeof reasoningConfig.default_budget === "number"
+              ? { reasoning_budget: reasoningConfig.default_budget }
+              : {}),
             asset_ids: bottom.asset_ids,
             file_asset_ids: bottom.files.map((f) => f.public_id),
           },
@@ -1448,12 +1457,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       let buffer = "";
-      const applyDelta = (content: string) => {
+      const applyDelta = (content: string, reasoning = "") => {
         receivedReply = true;
         assistantContent += content;
+        assistantReasoning += reasoning;
         setMessages((prev) => {
           const updated = [...prev];
-          updated[updated.length - 1] = { role: "assistant", content: assistantContent };
+          updated[updated.length - 1] = { role: "assistant", content: assistantContent, reasoning_content: assistantReasoning };
           return updated;
         });
       };
@@ -1588,9 +1598,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
             } else if (!eventType && typeof data.content === "string") {
               applyDelta(data.content);
             } else if (!eventType && Array.isArray(data.choices)) {
-              const choice = data.choices[0] as { delta?: { content?: unknown; tool_calls?: unknown[] } } | undefined;
-              if (typeof choice?.delta?.content === "string") {
-                applyDelta(choice.delta.content);
+              const choice = data.choices[0] as { delta?: { content?: unknown; reasoning_content?: unknown; tool_calls?: unknown[] } } | undefined;
+              const content = typeof choice?.delta?.content === "string" ? choice.delta.content : "";
+              const reasoning = typeof choice?.delta?.reasoning_content === "string" ? choice.delta.reasoning_content : "";
+              if (content || reasoning) {
+                applyDelta(content, reasoning);
               } else if (Array.isArray(choice?.delta?.tool_calls) && choice.delta.tool_calls.length > 0) {
                 receivedReply = true;
               }
@@ -2178,6 +2190,12 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                         </>
                       ) : (
                         <>
+                          {msg.reasoning_content && (
+                            <details className="mb-3 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+                              <summary className="cursor-pointer font-semibold">{streaming && i === messages.length - 1 ? t("workspace.reasoningThinking") : t("workspace.reasoningProcess")}</summary>
+                              <div className="mt-2 whitespace-pre-wrap leading-relaxed">{msg.reasoning_content}</div>
+                            </details>
+                          )}
                           <RichMarkdown content={msg.content} emptyText={streaming && i === messages.length - 1 ? UI_TEXT.thinking : ""} />
                           <div className="mt-2 flex items-center justify-end">
                             <CopyOutputButton
@@ -2612,9 +2630,15 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                     {capDeepThink && (
                       <button
                         type="button"
-                        className="h-9 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"
+                        onClick={() => setDeepThink((enabled) => !enabled)}
+                        aria-pressed={deepThink}
+                        className={`h-9 rounded-xl border px-3 text-sm ${
+                          deepThink
+                            ? "border-primary/30 bg-primary/10 text-primary"
+                            : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"
+                        }`}
                       >
-                        Deep think
+                        {t("workspace.deepThink")}
                       </button>
                     )}
                     {capWebSearch && (

@@ -712,6 +712,31 @@ export default function ModelsPage() {
     return JSON.stringify({ ...extra, connection: { ...prev, ...patch } }, null, 2);
   };
 
+  const applyNvidiaIntegratePreset = (prev: FormState): FormState => {
+    const runtime = safeParseJson(prev.runtime_rule, {}) as Record<string, any>;
+    return {
+      ...prev,
+      category: "chat",
+      request_mode: "chat_completions",
+      new_api_model: prev.new_api_model || "nvidia/nemotron-3-ultra-550b-a55b",
+      new_api_endpoint: "/v1/chat/completions",
+      default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), temperature: 1, top_p: 0.95, max_tokens: 16384 }, null, 2),
+      new_api_extra_params: setConnection(prev.new_api_extra_params, {
+        provider: "nvidia",
+        protocol: "openai_compatible",
+        base_url: "https://integrate.api.nvidia.com/v1",
+        auth_type: "bearer",
+        api_key_header: "Authorization",
+        models_endpoint: "/v1/models",
+      }),
+      runtime_rule: JSON.stringify({
+        ...runtime,
+        capabilities: { ...(runtime.capabilities || {}), deep_think: true },
+        reasoning: { mode: "nvidia_chat_template", default_enabled: false, default_budget: 16384, max_budget: 16384 },
+      }, null, 2),
+    };
+  };
+
   const listUpstreamModels = async () => {
     setUpstreamModelsLoading(true);
     setUpstreamModelsError("");
@@ -3193,6 +3218,15 @@ export default function ModelsPage() {
                 }
               >
                 填入模板
+              </button>
+            </div>
+            <div className="flex justify-end -mt-1 mb-1">
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs hover:bg-emerald-700"
+                onClick={() => setForm((prev) => applyNvidiaIntegratePreset(prev))}
+              >
+                NVIDIA Integrate 预设
               </button>
             </div>
             <div className="grid grid-cols-2 gap-4">

@@ -207,7 +207,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 				convID = conv.PublicID
 			}
 		}
-		s.saveMessages(ctx, convID, userID, input.Messages, content)
+		s.saveMessages(ctx, convID, userID, input.Messages, content, reasoningContent)
 	}
 
 	var blocks []interface{}
@@ -632,7 +632,7 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 		}
 	}
 	if convID != "" && len(input.Messages) > 0 {
-		s.saveMessages(ctx, convID, userID, input.Messages, fullContent)
+		s.saveMessages(ctx, convID, userID, input.Messages, fullContent, reasoningContent)
 	}
 	return convID, nil
 }
@@ -747,7 +747,7 @@ func (s *ChatService) recordBalanceFailure(ctx context.Context, userID int64, in
 	}
 	errMsg := fmt.Sprintf("[%s]", billing.InsufficientBalanceMsg)
 	if convID != "" && len(input.Messages) > 0 {
-		s.saveMessages(ctx, convID, userID, input.Messages, errMsg)
+		s.saveMessages(ctx, convID, userID, input.Messages, errMsg, "")
 	}
 	s.db.Exec(ctx, `
 		INSERT INTO ai_call_logs (request_id, user_id, model_id, conversation_id, prompt_tokens, completion_tokens, total_tokens, cost, status, error_code, duration_ms)
@@ -783,7 +783,7 @@ func (s *ChatService) logCallWithRoute(ctx context.Context, requestID string, us
 		requestID, userID, modelID, routeRef, convID, prompt, completion, total, cost, providerCost, status, errCode, duration)
 }
 
-func (s *ChatService) saveMessages(ctx context.Context, convPublicID string, userID int64, messages []runtime.ChatMessage, assistantContent string) {
+func (s *ChatService) saveMessages(ctx context.Context, convPublicID string, userID int64, messages []runtime.ChatMessage, assistantContent, reasoningContent string) {
 	var convID int64
 	err := s.db.QueryRow(ctx, `SELECT id FROM conversations WHERE public_id=$1 AND user_id=$2`, convPublicID, userID).Scan(&convID)
 	if err != nil {
@@ -791,7 +791,7 @@ func (s *ChatService) saveMessages(ctx context.Context, convPublicID string, use
 	}
 	last := messages[len(messages)-1]
 	s.db.Exec(ctx, `INSERT INTO conversation_messages (conversation_id, role, content) VALUES ($1,$2,$3)`, convID, last.Role, last.Content)
-	s.db.Exec(ctx, `INSERT INTO conversation_messages (conversation_id, role, content) VALUES ($1,'assistant',$2)`, convID, assistantContent)
+	s.db.Exec(ctx, `INSERT INTO conversation_messages (conversation_id, role, content, reasoning_content) VALUES ($1,'assistant',$2,$3)`, convID, assistantContent, reasoningContent)
 	s.db.Exec(ctx, `UPDATE conversations SET updated_at=now() WHERE id=$1`, convID)
 }
 
@@ -846,17 +846,17 @@ func (s *ChatService) GetConversation(ctx context.Context, userID int64, publicI
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(ctx, `SELECT role, content, created_at FROM conversation_messages WHERE conversation_id=$1 ORDER BY created_at`, convID)
+	rows, err := s.db.Query(ctx, `SELECT role, content, COALESCE(reasoning_content, ''), created_at FROM conversation_messages WHERE conversation_id=$1 ORDER BY created_at`, convID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var messages []map[string]string
 	for rows.Next() {
-		var role, content string
+		var role, content, reasoningContent string
 		var t time.Time
-		rows.Scan(&role, &content, &t)
-		messages = append(messages, map[string]string{"role": role, "content": content, "created_at": t.Format(time.RFC3339)})
+		rows.Scan(&role, &content, &reasoningContent, &t)
+		messages = append(messages, map[string]string{"role": role, "content": content, "reasoning_content": reasoningContent, "created_at": t.Format(time.RFC3339)})
 	}
 	result, _ := json.Marshal(messages)
 	_ = result
