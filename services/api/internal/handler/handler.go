@@ -1384,7 +1384,7 @@ func (h *Handler) nativeChatStream(c *gin.Context, input service.CompletionInput
 			break
 		}
 	}
-	_, finalizeErr := h.chat.FinalizeStream(context.Background(), c.GetInt64("user_id"), requestID, input, fullContent, usage, estimated)
+	_, finalizeErr := h.chat.FinalizeStream(context.Background(), c.GetInt64("user_id"), requestID, input, fullContent, "", usage, estimated)
 	if finalizeErr != nil {
 		writeNativeSSE(c, "error", map[string]interface{}{"type": "error", "error": map[string]interface{}{"type": "api_error", "message": "费用结算失败"}})
 		flusher.Flush()
@@ -1772,7 +1772,7 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 	c.Writer.WriteHeader(http.StatusOK)
 	flusher, _ := c.Writer.(http.Flusher)
 
-	var fullContent string
+	var fullContent, fullReasoningContent string
 	var usage *runtime.ChatUsage
 	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"role": "assistant"}, "", nil)
 	flusher.Flush()
@@ -1792,6 +1792,11 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"content": chunk.Content}, "", nil)
 			flusher.Flush()
 		}
+		if chunk.ReasoningContent != "" {
+			fullReasoningContent += chunk.ReasoningContent
+			writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"reasoning_content": chunk.ReasoningContent}, "", nil)
+			flusher.Flush()
+		}
 		if len(chunk.ToolCalls) > 0 {
 			writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"tool_calls": chunk.ToolCalls}, "", nil)
 			flusher.Flush()
@@ -1803,7 +1808,7 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			break
 		}
 	}
-	_, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, usage, estimated)
+	_, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, fullReasoningContent, usage, estimated)
 	if finalizeErr != nil {
 		openAIStreamError(c, "费用结算失败，请联系客服核对账单")
 		flusher.Flush()
@@ -1815,6 +1820,12 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 }
 
 func writeOpenAIStreamChunk(c *gin.Context, requestID, model string, delta map[string]interface{}, finishReason string, usage *runtime.ChatUsage) {
+	payload := buildOpenAIStreamPayload(requestID, model, delta, finishReason, usage)
+	data, _ := json.Marshal(payload)
+	_, _ = c.Writer.Write([]byte("data: " + string(data) + "\n\n"))
+}
+
+func buildOpenAIStreamPayload(requestID, model string, delta map[string]interface{}, finishReason string, usage *runtime.ChatUsage) map[string]interface{} {
 	choice := map[string]interface{}{"index": 0, "delta": delta}
 	if finishReason != "" {
 		choice["finish_reason"] = finishReason
@@ -1828,8 +1839,7 @@ func writeOpenAIStreamChunk(c *gin.Context, requestID, model string, delta map[s
 	if usage != nil {
 		payload["usage"] = usage
 	}
-	data, _ := json.Marshal(payload)
-	_, _ = c.Writer.Write([]byte("data: " + string(data) + "\n\n"))
+	return payload
 }
 
 func openAIStreamError(c *gin.Context, message string) {

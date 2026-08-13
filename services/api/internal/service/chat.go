@@ -99,13 +99,14 @@ type CompletionInput struct {
 }
 
 type CompletionResult struct {
-	RequestID      string                   `json:"request_id"`
-	ConversationID string                   `json:"conversation_id"`
-	Content        string                   `json:"content"`
-	ContentBlocks  []interface{}            `json:"content_blocks,omitempty"`
-	ToolCalls      []map[string]interface{} `json:"tool_calls,omitempty"`
-	Usage          runtime.ChatUsage        `json:"usage"`
-	Cost           float64                  `json:"cost"`
+	RequestID        string                   `json:"request_id"`
+	ConversationID   string                   `json:"conversation_id"`
+	Content          string                   `json:"content"`
+	ReasoningContent string                   `json:"reasoning_content,omitempty"`
+	ContentBlocks    []interface{}            `json:"content_blocks,omitempty"`
+	ToolCalls        []map[string]interface{} `json:"tool_calls,omitempty"`
+	Usage            runtime.ChatUsage        `json:"usage"`
+	Cost             float64                  `json:"cost"`
 }
 
 type BalanceError struct {
@@ -181,8 +182,10 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 		return nil, err
 	}
 	content := ""
+	reasoningContent := ""
 	if len(resp.Choices) > 0 {
 		content = resp.Choices[0].Message.Content
+		reasoningContent = resp.Choices[0].Message.ReasoningContent
 	}
 	usage := normalizedChatUsage(resp.Usage, input, content)
 	actualCost := s.models.EstimateCostWithTokenDetails(model, input.Params, usage.PromptTokens, usage.CompletionTokens, usage.CachedInputTokens(), usage.CacheCreationInputTokens)
@@ -215,7 +218,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	if len(resp.Choices) > 0 {
 		toolCalls = resp.Choices[0].ToolCalls
 	}
-	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, ContentBlocks: blocks, ToolCalls: toolCalls, Usage: usage, Cost: actualCost}, nil
+	return &CompletionResult{RequestID: requestID, ConversationID: convID, Content: content, ReasoningContent: reasoningContent, ContentBlocks: blocks, ToolCalls: toolCalls, Usage: usage, Cost: actualCost}, nil
 }
 
 func (s *ChatService) CompletionStream(ctx context.Context, userID int64, input CompletionInput) (string, <-chan runtime.StreamChunk, float64, error) {
@@ -599,7 +602,7 @@ routeLoop:
 	return nil, nil, lastErr
 }
 
-func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent string, usage *runtime.ChatUsage, estimated float64) (string, error) {
+func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent, reasoningContent string, usage *runtime.ChatUsage, estimated float64) (string, error) {
 	model, err := s.ResolveInputModel(ctx, &input)
 	if err != nil {
 		return "", err
