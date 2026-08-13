@@ -3,7 +3,8 @@ package runtime
 import "testing"
 
 func TestDecodeChatStreamEventPreservesOpenAIToolCalls(t *testing.T) {
-	_, calls, _, _, err := decodeChatStreamEvent("openai", "", []byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"weather","arguments":"{\"city\":\"Sh"}}]}}]}`))
+	event, err := decodeChatStreamEvent("openai", "", []byte(`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"weather","arguments":"{\"city\":\"Sh"}}]}}]}`))
+	calls := event.ToolCalls
 	if err != nil || len(calls) != 1 {
 		t.Fatalf("calls=%#v err=%v", calls, err)
 	}
@@ -13,11 +14,13 @@ func TestDecodeChatStreamEventPreservesOpenAIToolCalls(t *testing.T) {
 }
 
 func TestDecodeChatStreamEventPreservesNativeToolDeltas(t *testing.T) {
-	_, claudeCalls, _, _, err := decodeChatStreamEvent("claude", "content_block_delta", []byte(`{"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Sh"}}`))
+	claudeEvent, err := decodeChatStreamEvent("claude", "content_block_delta", []byte(`{"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Sh"}}`))
+	claudeCalls := claudeEvent.ToolCalls
 	if err != nil || len(claudeCalls) != 1 || claudeCalls[0]["partial_json"] != `{"city":"Sh` {
 		t.Fatalf("claude calls=%#v err=%v", claudeCalls, err)
 	}
-	_, geminiCalls, _, _, err := decodeChatStreamEvent("gemini", "", []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Shanghai"}}}]}}]}`))
+	geminiEvent, err := decodeChatStreamEvent("gemini", "", []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Shanghai"}}}]}}]}`))
+	geminiCalls := geminiEvent.ToolCalls
 	if err != nil || len(geminiCalls) != 1 {
 		t.Fatalf("gemini calls=%#v err=%v", geminiCalls, err)
 	}

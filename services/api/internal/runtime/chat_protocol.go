@@ -491,24 +491,24 @@ func consumeChatStream(reader io.Reader, protocol string, ch chan<- StreamChunk)
 			ch <- StreamChunk{Done: true}
 			return
 		}
-		content, toolCalls, nextUsage, done, err := decodeChatStreamEvent(protocol, eventName, []byte(data))
+		event, err := decodeChatStreamEvent(protocol, eventName, []byte(data))
 		if err != nil {
 			ch <- StreamChunk{Error: err}
 			return
 		}
-		if content != "" {
-			ch <- StreamChunk{Content: content}
+		if event.Content != "" || event.ReasoningContent != "" {
+			ch <- StreamChunk{Content: event.Content, ReasoningContent: event.ReasoningContent}
 		}
-		if len(toolCalls) > 0 {
-			ch <- StreamChunk{ToolCalls: toolCalls}
+		if len(event.ToolCalls) > 0 {
+			ch <- StreamChunk{ToolCalls: event.ToolCalls}
 		}
-		if nextUsage != nil {
-			mergeChatUsage(&usage, nextUsage)
+		if event.Usage != nil {
+			mergeChatUsage(&usage, event.Usage)
 			hasUsage = true
 			current := usage
 			ch <- StreamChunk{Usage: &current}
 		}
-		if done {
+		if event.Done {
 			ch <- StreamChunk{Done: true}
 			return
 		}
@@ -521,13 +521,22 @@ func consumeChatStream(reader io.Reader, protocol string, ch chan<- StreamChunk)
 	ch <- StreamChunk{Done: true}
 }
 
-func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []map[string]interface{}, *ChatUsage, bool, error) {
+type decodedChatStreamEvent struct {
+	Content          string
+	ReasoningContent string
+	ToolCalls        []map[string]interface{}
+	Usage            *ChatUsage
+	Done             bool
+}
+
+func decodeChatStreamEvent(protocol, eventName string, raw []byte) (decodedChatStreamEvent, error) {
 	if protocol == chatProtocolOpenAI {
 		var event struct {
 			Choices []struct {
 				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					ToolCalls        []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
 						Function struct {
@@ -540,19 +549,19 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []ma
 			Usage *ChatUsage `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return "", nil, nil, false, nil
+			return decodedChatStreamEvent{}, nil
 		}
-		content := ""
+		result := decodedChatStreamEvent{Usage: event.Usage}
 		if len(event.Choices) > 0 {
-			content = event.Choices[0].Delta.Content
+			result.Content = event.Choices[0].Delta.Content
+			result.ReasoningContent = event.Choices[0].Delta.ReasoningContent
 		}
-		calls := make([]map[string]interface{}, 0)
 		if len(event.Choices) > 0 {
 			for _, call := range event.Choices[0].Delta.ToolCalls {
-				calls = append(calls, map[string]interface{}{"index": call.Index, "id": call.ID, "function": map[string]interface{}{"name": call.Function.Name, "arguments": call.Function.Arguments}})
+				result.ToolCalls = append(result.ToolCalls, map[string]interface{}{"index": call.Index, "id": call.ID, "function": map[string]interface{}{"name": call.Function.Name, "arguments": call.Function.Arguments}})
 			}
 		}
-		return content, calls, event.Usage, false, nil
+		return result, nil
 	}
 	if protocol == chatProtocolClaude {
 		var event struct {
@@ -577,7 +586,7 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []ma
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return "", nil, nil, false, err
+			return decodedChatStreamEvent{}, err
 		}
 		eventType := eventName
 		if eventType == "" {
@@ -585,25 +594,25 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []ma
 		}
 		switch eventType {
 		case "message_start":
-			return "", nil, &ChatUsage{PromptTokens: event.Message.Usage.InputTokens}, false, nil
+			return decodedChatStreamEvent{Usage: &ChatUsage{PromptTokens: event.Message.Usage.InputTokens}}, nil
 		case "message_delta":
-			return "", nil, &ChatUsage{CompletionTokens: event.Usage.OutputTokens}, false, nil
+			return decodedChatStreamEvent{Usage: &ChatUsage{CompletionTokens: event.Usage.OutputTokens}}, nil
 		case "content_block_delta":
 			if event.Delta.Type == "input_json_delta" || event.Delta.PartialJSON != "" {
-				return "", []map[string]interface{}{{"type": "input_json_delta", "partial_json": event.Delta.PartialJSON}}, nil, false, nil
+				return decodedChatStreamEvent{ToolCalls: []map[string]interface{}{{"type": "input_json_delta", "partial_json": event.Delta.PartialJSON}}}, nil
 			}
-			return event.Delta.Text, nil, nil, false, nil
+			return decodedChatStreamEvent{Content: event.Delta.Text}, nil
 		case "content_block_start":
 			if event.ContentBlock.Type == "tool_use" {
-				return "", []map[string]interface{}{{"type": "tool_use", "id": event.ContentBlock.ID, "name": event.ContentBlock.Name}}, nil, false, nil
+				return decodedChatStreamEvent{ToolCalls: []map[string]interface{}{{"type": "tool_use", "id": event.ContentBlock.ID, "name": event.ContentBlock.Name}}}, nil
 			}
-			return "", nil, nil, false, nil
+			return decodedChatStreamEvent{}, nil
 		case "message_stop":
-			return "", nil, nil, true, nil
+			return decodedChatStreamEvent{Done: true}, nil
 		case "error":
-			return "", nil, nil, false, errors.New(connectionTestMessage(raw))
+			return decodedChatStreamEvent{}, errors.New(connectionTestMessage(raw))
 		default:
-			return "", nil, nil, false, nil
+			return decodedChatStreamEvent{}, nil
 		}
 	}
 	var event struct {
@@ -623,7 +632,7 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []ma
 		} `json:"usageMetadata"`
 	}
 	if err := json.Unmarshal(raw, &event); err != nil {
-		return "", nil, nil, false, err
+		return decodedChatStreamEvent{}, err
 	}
 	var builder strings.Builder
 	calls := make([]map[string]interface{}, 0)
@@ -641,7 +650,7 @@ func decodeChatStreamEvent(protocol, eventName string, raw []byte) (string, []ma
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
 		usage = nil
 	}
-	return builder.String(), calls, usage, done, nil
+	return decodedChatStreamEvent{Content: builder.String(), ToolCalls: calls, Usage: usage, Done: done}, nil
 }
 
 func mergeChatUsage(target *ChatUsage, source *ChatUsage) {

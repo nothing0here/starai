@@ -50,8 +50,9 @@ func NewClient(baseURL, token string, timeoutSec, streamTimeoutSec int) *Client 
 }
 
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type ChatRequest struct {
@@ -111,11 +112,12 @@ type UpstreamModel struct {
 }
 
 type StreamChunk struct {
-	Content   string
-	ToolCalls []map[string]interface{}
-	Done      bool
-	Usage     *ChatUsage
-	Error     error
+	Content          string
+	ReasoningContent string
+	ToolCalls        []map[string]interface{}
+	Done             bool
+	Usage            *ChatUsage
+	Error            error
 }
 
 func (c *Client) ChatCompletion(ctx context.Context, endpoint string, req ChatRequest) (*ChatResponse, error) {
