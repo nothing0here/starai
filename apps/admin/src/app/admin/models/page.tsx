@@ -307,6 +307,44 @@ const LOBE_LOGOS: LobeLogoOption[] = [
   { slug: "azure", label: "Azure", file: "azure-color.png", keywords: ["microsoft"] },
   { slug: "bedrock", label: "Bedrock", file: "bedrock-color.png", keywords: ["aws", "amazon"] },
   { slug: "aws", label: "AWS", file: "aws-color.png", keywords: ["amazon", "bedrock"] },
+  { slug: "nvidia", label: "NVIDIA", file: "nvidia-color.png", keywords: ["nemotron"] },
+  { slug: "groq", label: "Groq", file: "groq.png", keywords: ["llama", "mixtral"] },
+  { slug: "openrouter", label: "OpenRouter", file: "openrouter.png", keywords: ["router", "provider"] },
+  { slug: "ollama", label: "Ollama", file: "ollama.png", keywords: ["local", "llama", "qwen"] },
+  { slug: "huggingface", label: "Hugging Face", file: "huggingface-color.png", keywords: ["hf", "transformers"] },
+  { slug: "siliconcloud", label: "SiliconCloud", file: "siliconcloud-color.png", keywords: ["siliconflow", "硅基流动"] },
+  { slug: "deepinfra", label: "Deep Infra", file: "deepinfra-color.png", keywords: ["inference"] },
+  { slug: "fireworks", label: "Fireworks AI", file: "fireworks-color.png", keywords: [] },
+  { slug: "together", label: "Together AI", file: "together-color.png", keywords: [] },
+  { slug: "replicate", label: "Replicate", file: "replicate.png", keywords: [] },
+  { slug: "novita", label: "Novita AI", file: "novita-color.png", keywords: [] },
+  { slug: "sambanova", label: "SambaNova", file: "sambanova-color.png", keywords: [] },
+  { slug: "cerebras", label: "Cerebras", file: "cerebras-color.png", keywords: [] },
+  { slug: "yi", label: "01.AI / Yi", file: "yi.png", keywords: ["01ai", "零一万物"] },
+  { slug: "baichuan", label: "Baichuan", file: "baichuan-color.png", keywords: ["百川"] },
+  { slug: "baidu", label: "Baidu / ERNIE", file: "baidu-color.png", keywords: ["文心", "ernie", "百度"] },
+  { slug: "stepfun", label: "StepFun", file: "stepfun-color.png", keywords: ["step", "阶跃星辰"] },
+  { slug: "internlm", label: "InternLM", file: "internlm-color.png", keywords: ["书生"] },
+  { slug: "kling", label: "Kling", file: "kling-color.png", keywords: ["可灵", "video"] },
+  { slug: "runway", label: "Runway", file: "runway.png", keywords: ["gen-3", "gen-4", "video"] },
+  { slug: "pika", label: "Pika", file: "pika.png", keywords: ["video"] },
+  { slug: "vidu", label: "Vidu", file: "vidu-color.png", keywords: ["video", "生数"] },
+  { slug: "luma", label: "Luma", file: "luma-color.png", keywords: ["dream machine", "video"] },
+  { slug: "ideogram", label: "Ideogram", file: "ideogram.png", keywords: ["image", "text"] },
+  { slug: "flux", label: "FLUX", file: "flux.png", keywords: ["black forest labs", "image"] },
+  { slug: "recraft", label: "Recraft", file: "recraft.png", keywords: ["image"] },
+  { slug: "fal", label: "fal.ai", file: "fal-color.png", keywords: ["image", "video"] },
+  { slug: "vertexai", label: "Vertex AI", file: "vertexai.png", keywords: ["google", "gemini"] },
+  { slug: "cloudflare", label: "Cloudflare Workers AI", file: "cloudflare-color.png", keywords: ["workers ai"] },
+  { slug: "newapi", label: "New API", file: "newapi-color.png", keywords: ["new-api", "代理"] },
+  { slug: "aihubmix", label: "AiHubMix", file: "aihubmix-color.png", keywords: ["聚合", "proxy"] },
+  { slug: "cometapi", label: "CometAPI", file: "cometapi-color.png", keywords: ["聚合", "proxy"] },
+  { slug: "vllm", label: "vLLM", file: "vllm-color.png", keywords: ["self-hosted", "local"] },
+  { slug: "lmstudio", label: "LM Studio", file: "lmstudio.png", keywords: ["local"] },
+  { slug: "manus", label: "Manus", file: "manus.png", keywords: ["agent"] },
+  { slug: "dify", label: "Dify", file: "dify-color.png", keywords: ["workflow", "agent"] },
+  { slug: "langchain", label: "LangChain", file: "langchain-color.png", keywords: ["agent", "framework"] },
+  { slug: "mcp", label: "MCP", file: "mcp.png", keywords: ["model context protocol", "tool"] },
 ];
 
 const lobeLogoUrls = (file: string) => [
@@ -314,6 +352,26 @@ const lobeLogoUrls = (file: string) => [
   `https://unpkg.com/@lobehub/icons-static-png@1.91.0/light/${file}`,
 ];
 const lobeLogoUrl = (file: string) => lobeLogoUrls(file)[0];
+
+function LobeLogoImage({ logo, className = "h-6 w-6" }: { logo: LobeLogoOption; className?: string }) {
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <span className={`${className} flex items-center justify-center rounded-md bg-gray-100 text-[10px] font-semibold text-gray-500`}>{logo.label.slice(0, 1)}</span>;
+  }
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={lobeLogoUrls(logo.file)[sourceIndex]}
+      alt=""
+      className={`${className} object-contain`}
+      onError={() => {
+        if (sourceIndex < lobeLogoUrls(logo.file).length - 1) setSourceIndex((index) => index + 1);
+        else setFailed(true);
+      }}
+    />
+  );
+}
 
 /** gpt-5.5 -> "GPT 5.5", gpt-image-2 -> "GPT Image 2", deepseek-v4-pro -> "DeepSeek V4 Pro" */
 function suggestDisplayName(model: string): string {
@@ -3220,7 +3278,27 @@ export default function ModelsPage() {
                 填入模板
               </button>
             </div>
-            <div className="flex justify-end -mt-1 mb-1">
+            <div className="flex flex-wrap justify-end items-center gap-2 -mt-1 mb-1">
+              <label className="text-xs text-gray-500 flex items-center gap-2">
+                接入服务商预设
+                <select
+                  className="px-2 py-1.5 rounded-lg border border-blue-100 bg-white text-xs text-gray-700"
+                  value={
+                    getConnection(form.new_api_extra_params).provider === "nvidia" ||
+                    getConnection(form.new_api_extra_params).base_url === "https://integrate.api.nvidia.com/v1"
+                      ? "nvidia_integrate"
+                      : "custom"
+                  }
+                  onChange={(e) => {
+                    if (e.target.value === "nvidia_integrate") {
+                      setForm((prev) => applyNvidiaIntegratePreset(prev));
+                    }
+                  }}
+                >
+                  <option value="custom">通用 / 自定义</option>
+                  <option value="nvidia_integrate">NVIDIA Integrate（OpenAI 兼容）</option>
+                </select>
+              </label>
               <button
                 type="button"
                 className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs hover:bg-emerald-700"
@@ -3251,7 +3329,7 @@ export default function ModelsPage() {
                     }));
                   }}
                 >
-                  <option value="openai_compatible">OpenAI / NEW API 兼容</option>
+                  <option value="openai_compatible">OpenAI / NVIDIA / NEW API 兼容</option>
                   <option value="claude">原生 Claude Messages</option>
                   <option value="gemini">原生 Gemini</option>
                   <option value="custom_http">自定义 HTTP（先按兼容格式解析响应）</option>
@@ -3505,17 +3583,7 @@ export default function ModelsPage() {
                         className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white border text-left hover:border-primary hover:bg-primary/5 disabled:opacity-60"
                       >
                         <span className="w-8 h-8 rounded-lg bg-gray-50 border border-gray-100 flex items-center justify-center overflow-hidden shrink-0">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={lobeLogoUrl(logo.file)}
-                            alt=""
-                            className="w-6 h-6 object-contain"
-                            onError={(e) => {
-                              const img = e.currentTarget;
-                              const fallback = lobeLogoUrls(logo.file)[1];
-                              if (img.src !== fallback) img.src = fallback;
-                            }}
-                          />
+                          <LobeLogoImage logo={logo} />
                         </span>
                         <span className="min-w-0">
                           <span className="block text-xs font-medium text-gray-800 truncate">{logo.label}</span>

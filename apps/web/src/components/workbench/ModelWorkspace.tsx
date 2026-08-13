@@ -1496,7 +1496,10 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          // Reverse proxies may normalize SSE boundaries to CRLF. Normalize
+          // them before splitting so a valid upstream answer never remains in
+          // the incomplete buffer and appears only after reopening history.
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
           const events = buffer.split("\n\n");
           buffer = events.pop() || "";
           for (const evt of events) {
