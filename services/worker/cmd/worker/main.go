@@ -1610,7 +1610,8 @@ func normalizeReferenceImage(ctx context.Context, src string) string {
 	if err != nil {
 		return src
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// 参考图规范化同样需要超时，不可达的 URL 不能让任务挂死。
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return src
 	}
@@ -1784,7 +1785,8 @@ func loadMediaBytes(ctx context.Context, src string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	// 参考图下载必须有超时，否则不可达的 URL 会让任务永久挂起占用并发槽位。
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1859,10 +1861,11 @@ func doJSONRequestWithLimit(ctx context.Context, conn connectionConfig, method, 
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Timeout: timeout}
+	// timeout<=0 表示调用方未指定超时，兜底 5 分钟，避免无超时客户端挂死并发槽位。
 	if timeout <= 0 {
-		client = http.DefaultClient
+		timeout = 5 * time.Minute
 	}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err

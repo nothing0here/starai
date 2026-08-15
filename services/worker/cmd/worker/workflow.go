@@ -3164,7 +3164,7 @@ func postJSON(ctx context.Context, url, token string, body []byte, out interface
 	req, _ := http.NewRequestWithContext(ctx, "POST", url, jsonReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
 		return false
 	}
