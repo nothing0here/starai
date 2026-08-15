@@ -54,9 +54,11 @@ type OperationalOverview struct {
 }
 
 type ReconcileResult struct {
-	ReleasedChatFreezes int `json:"released_chat_freezes"`
-	FailedTasks         int `json:"failed_tasks"`
-	FailedWorkflows     int `json:"failed_workflows"`
+	ReleasedChatFreezes     int `json:"released_chat_freezes"`
+	FailedTasks             int `json:"failed_tasks"`
+	FailedWorkflows         int `json:"failed_workflows"`
+	FailedOrphanedTasks     int `json:"failed_orphaned_tasks"`
+	FailedOrphanedWorkflows int `json:"failed_orphaned_workflows"`
 }
 
 func (s *OpsService) OperationalOverview(ctx context.Context, workerHeartbeat *time.Time) (*OperationalOverview, error) {
@@ -178,6 +180,18 @@ func (s *OpsService) ReleaseFrozenBalance(ctx context.Context, freezeID int64) (
 	if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='released', released_at=now() WHERE id=$1 AND status='frozen'`, freezeID); err != nil {
 		return nil, err
 	}
+	// 手动释放冻结时同步终结仍在途的任务/工作流，避免产生永远卡住的孤儿任务
+	//（运维守卫依赖冻结记录 JOIN，冻结释放后不会再扫到它们）。
+	switch item.RefType {
+	case "task":
+		if _, err = tx.Exec(ctx, `UPDATE tasks SET status='failed', error_code='STALE_TIMEOUT', error_message='Task released by admin', finished_at=now(), updated_at=now() WHERE task_no=$1 AND status IN ('pending','running')`, item.RefID); err != nil {
+			return nil, err
+		}
+	case "workflow":
+		if _, err = tx.Exec(ctx, `UPDATE workflow_projects SET status='failed', error_message='Workflow released by admin', finished_at=now(), updated_at=now() WHERE public_id=$1 AND status IN ('pending','running')`, item.RefID); err != nil {
+			return nil, err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -219,6 +233,16 @@ func (s *OpsService) ReconcileFrozenBalances(ctx context.Context) (*ReconcileRes
 		return nil, err
 	} else {
 		result.FailedWorkflows = n
+	}
+	if n, err := s.failOrphanedStaleTasks(ctx); err != nil {
+		return nil, err
+	} else {
+		result.FailedOrphanedTasks = n
+	}
+	if n, err := s.failOrphanedStaleWorkflows(ctx); err != nil {
+		return nil, err
+	} else {
+		result.FailedOrphanedWorkflows = n
 	}
 	return &result, nil
 }
@@ -377,6 +401,55 @@ func (s *OpsService) failStaleWorkflows(ctx context.Context) (int, error) {
 		n++
 	}
 	return n, rows.Err()
+}
+
+// failOrphanedStaleTasks 清理没有活动冻结记录的卡住任务（如冻结已被手动释放），
+// 否则守卫的冻结 JOIN 永远扫不到它们。
+func (s *OpsService) failOrphanedStaleTasks(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `
+		WITH orphans AS (
+			UPDATE tasks t SET status='failed', error_code='STALE_TIMEOUT',
+				error_message='Task timed out by operational guard',
+				finished_at=now(), updated_at=now()
+			WHERE t.status IN ('pending','running')
+			  AND t.created_at < now() - interval '6 hours'
+			  AND NOT EXISTS (
+				SELECT 1 FROM balance_freezes f
+				WHERE f.ref_type='task' AND f.ref_id=t.task_no AND f.status='frozen'
+			  )
+			RETURNING 1
+		)
+		SELECT COUNT(*) FROM orphans`).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func (s *OpsService) failOrphanedStaleWorkflows(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `
+		WITH orphans AS (
+			UPDATE workflow_projects p SET status='failed',
+				error_message='Workflow timed out by operational guard',
+				finished_at=now(), updated_at=now()
+			WHERE p.status IN ('pending','running')
+			  AND p.created_at < now() - interval '12 hours'
+			  AND NOT EXISTS (
+				SELECT 1 FROM balance_freezes f
+				WHERE f.ref_type='workflow' AND f.ref_id=p.public_id AND f.status='frozen'
+			  )
+			RETURNING 1
+		)
+		SELECT COUNT(*) FROM orphans`).Scan(&n)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return n, nil
 }
 
 func (s *OpsService) listRecentFailedTasks(ctx context.Context, page, pageSize int) ([]TaskDTO, int, error) {

@@ -472,9 +472,11 @@ func (s *TaskService) cancelTask(ctx context.Context, taskNo string, expectedUse
 		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, -taskID).Scan(&lockAvailable); err != nil {
 			return err
 		}
-		if !lockAvailable {
+		if !lockAvailable && !byAdmin {
 			return errors.New("任务正在生成，暂时无法安全取消")
 		}
+		// 管理员强制取消不等锁：worker 收尾写入带 status='running' 条件，
+		// 任务被取消后迟到结果不会覆盖状态，也不会重复扣费。
 		tag, err := tx.Exec(ctx, `UPDATE tasks SET status='cancelled', finished_at=now(), updated_at=now() WHERE id=$1 AND status IN ('pending','running')`, taskID)
 		if err != nil {
 			return err

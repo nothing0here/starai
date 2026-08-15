@@ -3407,9 +3407,11 @@ func (h *Handler) AdminReconcileFrozenBalances(c *gin.Context) {
 		return
 	}
 	h.admin.LogOperation(c.Request.Context(), c.GetInt64("admin_id"), "ops_reconcile", "billing", "frozen_balances", map[string]interface{}{
-		"released_chat_freezes": result.ReleasedChatFreezes,
-		"failed_tasks":          result.FailedTasks,
-		"failed_workflows":      result.FailedWorkflows,
+		"released_chat_freezes":     result.ReleasedChatFreezes,
+		"failed_tasks":              result.FailedTasks,
+		"failed_workflows":          result.FailedWorkflows,
+		"failed_orphaned_tasks":     result.FailedOrphanedTasks,
+		"failed_orphaned_workflows": result.FailedOrphanedWorkflows,
 	})
 	util.OK(c, result)
 }
