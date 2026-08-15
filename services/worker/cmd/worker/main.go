@@ -78,7 +78,18 @@ func main() {
 	localStoragePublicURL, localStoragePublicErr := configuredLocalStoragePublicURL(appEnv, baseURL, getenv("LOCAL_STORAGE_PUBLIC_URL", ""))
 
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dbURL)
+	concurrency := getenvInt("WORKER_CONCURRENCY", 20)
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// 每个任务处理期间会用 Acquire 长期占住一条连接持有咨询锁，
+	// 中途还会再从池里取连接做临时查询。pgxpool 默认 MaxConns 只有
+	// max(4, CPU 核数)，并发大于它时所有槽位会卡在等连接上死锁，
+	// 新任务永远停在 pending。
+	poolCfg.MaxConns = int32(2*concurrency + 4)
+	poolCfg.MinConns = 2
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -136,7 +147,6 @@ func main() {
 	}
 	startWorkerHeartbeat(ctx, redisURL)
 
-	concurrency := getenvInt("WORKER_CONCURRENCY", 20)
 	if pollTimeoutSec := getenvInt("WORKER_POLL_TIMEOUT_SEC", 0); pollTimeoutSec > 0 {
 		defaultPollTimeout = time.Duration(pollTimeoutSec) * time.Second
 	}
