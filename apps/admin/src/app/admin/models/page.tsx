@@ -739,6 +739,24 @@ export default function ModelsPage() {
     };
   };
 
+  const getReasoning = (runtimeRuleText: string) => {
+    const rr = safeParseJson(runtimeRuleText, {});
+    const reasoning = (rr?.reasoning ?? {}) as Record<string, any>;
+    return {
+      rr,
+      reasoning,
+      mode: String(reasoning.mode ?? ""),
+      default_enabled: reasoning.default_enabled === true,
+      default_budget: Number(reasoning.default_budget ?? 0),
+      max_budget: Number(reasoning.max_budget ?? 0),
+    };
+  };
+
+  const setReasoning = (runtimeRuleText: string, patch: Record<string, unknown>) => {
+    const rr = safeParseJson(runtimeRuleText, {});
+    return JSON.stringify({ ...rr, reasoning: { ...((rr?.reasoning ?? {}) as Record<string, any>), ...patch } }, null, 2);
+  };
+
   const clearModelCaps = (runtimeRuleText: string) => {
     const rr = safeParseJson(runtimeRuleText, {});
     return JSON.stringify(
@@ -2414,6 +2432,24 @@ export default function ModelsPage() {
     const parsedRuntimeRule = runtimeRule as Record<string, any>;
     const parsedPriceRule = priceRule as Record<string, any>;
     const parsedInputSchema = inputSchema as Record<string, any>;
+    if (parsedRuntimeRule?.capabilities?.deep_think === true && parsedRuntimeRule?.reasoning?.mode) {
+      const reasoning = parsedRuntimeRule.reasoning as Record<string, any>;
+      const defaultBudget = Number(reasoning.default_budget ?? 0);
+      const maxBudget = Number(reasoning.max_budget ?? 0);
+      const isPositiveInt = (value: number) => Number.isInteger(value) && value > 0;
+      if (reasoning.default_budget !== undefined && !isPositiveInt(defaultBudget)) {
+        setErr("思考参数配置的默认预算（default_budget）必须是正整数");
+        return;
+      }
+      if (reasoning.max_budget !== undefined && !isPositiveInt(maxBudget)) {
+        setErr("思考参数配置的最大预算（max_budget）必须是正整数");
+        return;
+      }
+      if (isPositiveInt(defaultBudget) && isPositiveInt(maxBudget) && defaultBudget > maxBudget) {
+        setErr("思考参数配置的默认预算不能大于最大预算");
+        return;
+      }
+    }
     let effectiveVideoEndpoint = form.new_api_endpoint;
     const isSeedance2 =
       form.category === "video" &&
@@ -4642,6 +4678,64 @@ export default function ModelsPage() {
                     />
                     深度思考
                   </label>
+                  {getCaps(form.runtime_rule).deep_think && (
+                    <div className="w-full rounded-xl border border-amber-200 bg-amber-50/60 p-3">
+                      <div className="text-xs text-gray-600 mb-2">思考参数映射（保存到 runtime_rule.reasoning）</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="flex flex-col gap-1 text-xs text-gray-500">
+                          映射模式
+                          <select
+                            className="px-2 py-1.5 rounded-lg border bg-white text-xs text-gray-700"
+                            value={getReasoning(form.runtime_rule).mode}
+                            onChange={(e) =>
+                              setForm((prev) => ({ ...prev, runtime_rule: setReasoning(prev.runtime_rule, { mode: e.target.value }) }))
+                            }
+                          >
+                            <option value="nvidia_chat_template">NVIDIA chat_template_kwargs</option>
+                          </select>
+                        </label>
+                        <label className="flex items-end gap-2 text-xs text-gray-500 pb-1.5">
+                          <input
+                            type="checkbox"
+                            checked={getReasoning(form.runtime_rule).default_enabled}
+                            onChange={(e) =>
+                              setForm((prev) => ({ ...prev, runtime_rule: setReasoning(prev.runtime_rule, { default_enabled: e.target.checked }) }))
+                            }
+                          />
+                          默认开启思考
+                        </label>
+                        <label className="flex flex-col gap-1 text-xs text-gray-500">
+                          默认预算（default_budget）
+                          <input
+                            type="number"
+                            min={1}
+                            className="px-2 py-1.5 rounded-lg border bg-white text-xs text-gray-700"
+                            value={getReasoning(form.runtime_rule).default_budget || ""}
+                            placeholder="如 16384"
+                            onChange={(e) =>
+                              setForm((prev) => ({ ...prev, runtime_rule: setReasoning(prev.runtime_rule, { default_budget: Number(e.target.value) }) }))
+                            }
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-xs text-gray-500">
+                          最大预算（max_budget）
+                          <input
+                            type="number"
+                            min={1}
+                            className="px-2 py-1.5 rounded-lg border bg-white text-xs text-gray-700"
+                            value={getReasoning(form.runtime_rule).max_budget || ""}
+                            placeholder="如 16384"
+                            onChange={(e) =>
+                              setForm((prev) => ({ ...prev, runtime_rule: setReasoning(prev.runtime_rule, { max_budget: Number(e.target.value) }) }))
+                            }
+                          />
+                        </label>
+                      </div>
+                      <p className="mt-2 text-[11px] leading-5 text-gray-400">
+                        开启思考时服务端发送 chat_template_kwargs.enable_thinking=true 与 reasoning_budget；关闭时发送 enable_thinking=false，防止上游默认开启思考。
+                      </p>
+                    </div>
+                  )}
                   {form.category === "video" && ([
                     ["video_upscale", "支持视频超分 / 高清增强"],
                     ["video_redraw", "支持视频转视频 / 风格转绘"],

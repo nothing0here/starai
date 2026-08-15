@@ -36,6 +36,9 @@ import (
 var (
 	objectStore         storage.Store
 	modelRouteCipherKey string
+	// 异步任务默认轮询超时。过长会让故障任务长期占用并发槽位，
+	// 可通过 WORKER_POLL_TIMEOUT_SEC 或模型 runtime_rule 的 poll_timeout_sec 覆盖。
+	defaultPollTimeout = 15 * time.Minute
 )
 
 const (
@@ -133,8 +136,14 @@ func main() {
 	}
 	startWorkerHeartbeat(ctx, redisURL)
 
+	concurrency := getenvInt("WORKER_CONCURRENCY", 20)
+	if pollTimeoutSec := getenvInt("WORKER_POLL_TIMEOUT_SEC", 0); pollTimeoutSec > 0 {
+		defaultPollTimeout = time.Duration(pollTimeoutSec) * time.Second
+	}
+	log.Printf("StarAI Worker config: concurrency=%d default poll timeout=%s", concurrency, defaultPollTimeout)
+
 	srv := asynq.NewServer(redisOpt, asynq.Config{
-		Concurrency: 5,
+		Concurrency: concurrency,
 		Queues:      map[string]int{"image": 3, "workflow": 2, "default": 1},
 	})
 
@@ -260,9 +269,11 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 	var lastRouteErr error
 	attempt := 0
 	selectedOK := false
+	// 仅多线路时启用自动切换/熔断降级；单线路保持旧的直连行为。
+	poolEnabled := len(routes) > 1
 routeLoop:
 	for _, route := range routes {
-		if !acquireWorkerRouteProbe(ctx, pool, route) {
+		if poolEnabled && !acquireWorkerRouteProbe(ctx, pool, route) {
 			continue
 		}
 		for retry := 0; retry <= route.MaxRetries; retry++ {
@@ -294,7 +305,7 @@ routeLoop:
 				logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "rejected", candidate.StatusCode, latency)
 				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", upstreamErrorMessage(candidate.ResponseBody))
 			}
-			markWorkerRouteFailure(ctx, pool, route.ID)
+			markWorkerRouteFailure(ctx, pool, route.ID, poolEnabled)
 			logWorkerRouteAttempt(ctx, pool, p.TaskNo, p.ModelID, route.ID, attempt, "failed", candidate.StatusCode, latency)
 			log.Printf("Task %s route %d failed status=%d: %s", p.TaskNo, route.ID, candidate.StatusCode, truncateText(fmt.Sprint(lastRouteErr), 800))
 			if retry < route.MaxRetries && workerShouldRetrySameRoute(callErr, candidate.StatusCode) && waitWorkerRouteRetry(ctx, retry) {
@@ -555,11 +566,12 @@ type workerModelRoute struct {
 	MaxRetries          int
 	HealthStatus        string
 	ConsecutiveFailures int
+	CooldownUntil       *time.Time
 }
 
 func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int64, fallbackBaseURL, fallbackToken, legacyModel, legacyEndpoint string, legacyExtra, legacyRuntime map[string]interface{}) ([]workerModelRoute, error) {
-	rows, err := pool.Query(ctx, `SELECT id,protocol,upstream_model,endpoint,base_url,api_key,auth_type,api_key_header,headers,extra_params,runtime_rule,cost_rule,priority,weight,timeout_seconds,max_retries,health_status,consecutive_failures
-		FROM model_routes WHERE model_id=$1 AND is_enabled=true AND (cooldown_until IS NULL OR cooldown_until<=now()) ORDER BY priority,id`, modelID)
+	rows, err := pool.Query(ctx, `SELECT id,protocol,upstream_model,endpoint,base_url,api_key,auth_type,api_key_header,headers,extra_params,runtime_rule,cost_rule,priority,weight,timeout_seconds,max_retries,health_status,consecutive_failures,cooldown_until
+		FROM model_routes WHERE model_id=$1 AND is_enabled=true ORDER BY priority,id`, modelID)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +581,7 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 		var route workerModelRoute
 		var baseURL, apiKey, authType, apiKeyHeader string
 		var headersRaw, extraRaw, runtimeRaw, costRaw []byte
-		if err := rows.Scan(&route.ID, &route.Protocol, &route.UpstreamModel, &route.Endpoint, &baseURL, &apiKey, &authType, &apiKeyHeader, &headersRaw, &extraRaw, &runtimeRaw, &costRaw, &route.Priority, &route.Weight, &route.TimeoutSeconds, &route.MaxRetries, &route.HealthStatus, &route.ConsecutiveFailures); err != nil {
+		if err := rows.Scan(&route.ID, &route.Protocol, &route.UpstreamModel, &route.Endpoint, &baseURL, &apiKey, &authType, &apiKeyHeader, &headersRaw, &extraRaw, &runtimeRaw, &costRaw, &route.Priority, &route.Weight, &route.TimeoutSeconds, &route.MaxRetries, &route.HealthStatus, &route.ConsecutiveFailures, &route.CooldownUntil); err != nil {
 			return nil, err
 		}
 		var headers map[string]interface{}
@@ -596,14 +608,24 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(routes) == 0 {
-		var configured bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1)`, modelID).Scan(&configured); err != nil {
-			return nil, err
+	// 熔断降级仅在多条启用线路时生效；单线路保持旧的直连行为，
+	// 不受冷却窗口限制，并自愈残留的熔断状态。
+	if len(routes) == 1 {
+		healWorkerSingleRouteState(ctx, pool, &routes[0])
+	} else if len(routes) > 1 {
+		now := time.Now()
+		active := make([]workerModelRoute, 0, len(routes))
+		for _, route := range routes {
+			if route.CooldownUntil == nil || !route.CooldownUntil.After(now) {
+				active = append(active, route)
+			}
 		}
-		if configured {
+		if len(active) == 0 {
 			return nil, fmt.Errorf("all model routes are cooling down")
 		}
+		routes = active
+	}
+	if len(routes) == 0 {
 		protocol := strings.ToLower(strings.TrimSpace(stringAny(legacyExtra["protocol"])))
 		if connection, ok := legacyExtra["connection"].(map[string]interface{}); ok {
 			protocol = strings.ToLower(strings.TrimSpace(firstNonEmpty(stringAny(connection["protocol"]), protocol)))
@@ -713,11 +735,29 @@ func nullableRouteID(routeID int64) interface{} {
 	return routeID
 }
 
-func markWorkerRouteFailure(ctx context.Context, pool *pgxpool.Pool, routeID int64) {
+func markWorkerRouteFailure(ctx context.Context, pool *pgxpool.Pool, routeID int64, poolEnabled bool) {
 	if routeID <= 0 {
 		return
 	}
+	if !poolEnabled {
+		// 单线路只累计失败统计，不进入熔断/冷却，保持旧的直连重试行为。
+		_, _ = pool.Exec(ctx, `UPDATE model_routes SET consecutive_failures=consecutive_failures+1,failure_count=failure_count+1,last_failure_at=now(),updated_at=now() WHERE id=$1`, routeID)
+		return
+	}
 	_, _ = pool.Exec(ctx, `UPDATE model_routes SET consecutive_failures=consecutive_failures+1,failure_count=failure_count+1,last_failure_at=now(),health_status=CASE WHEN consecutive_failures+1>=5 THEN 'open' ELSE 'degraded' END,cooldown_until=CASE WHEN consecutive_failures+1>=5 THEN now()+interval '60 seconds' ELSE cooldown_until END,updated_at=now() WHERE id=$1`, routeID)
+}
+
+// healWorkerSingleRouteState 清除单线路模型残留的熔断/冷却状态，避免无降级可走时自伤。
+func healWorkerSingleRouteState(ctx context.Context, pool *pgxpool.Pool, route *workerModelRoute) {
+	if route.ID <= 0 {
+		return
+	}
+	if route.HealthStatus != "open" && route.HealthStatus != "half_open" && route.CooldownUntil == nil {
+		return
+	}
+	_, _ = pool.Exec(ctx, `UPDATE model_routes SET health_status='healthy',cooldown_until=NULL,updated_at=now() WHERE id=$1`, route.ID)
+	route.HealthStatus = "healthy"
+	route.CooldownUntil = nil
 }
 
 func logWorkerRouteAttempt(ctx context.Context, pool *pgxpool.Pool, taskNo string, modelID, routeID int64, attempt int, status string, statusCode, latencyMS int) {
@@ -2452,7 +2492,7 @@ func parsePollConfig(runtimeRule map[string]interface{}, createEndpoint string) 
 	cfg := pollConfig{
 		Path:     strings.TrimRight(createEndpoint, "/") + "/{id}",
 		Interval: 5 * time.Second,
-		Timeout:  60 * time.Minute,
+		Timeout:  defaultPollTimeout,
 	}
 	up, _ := runtimeRule["upstream"].(map[string]interface{})
 	if up == nil {
@@ -2851,6 +2891,16 @@ func lockedFreezeAmount(ctx context.Context, tx pgx.Tx, userID int64, refType, r
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getenvInt(key string, fallback int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("warning: invalid integer for %s: %q, using fallback %d", key, v, fallback)
 	}
 	return fallback
 }

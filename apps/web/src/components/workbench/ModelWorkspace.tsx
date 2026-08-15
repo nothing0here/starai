@@ -2195,7 +2195,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                         <>
                           {msg.reasoning_content && (
                             <details className="mb-3 rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
-                              <summary className="cursor-pointer font-semibold">{streaming && i === messages.length - 1 ? t("workspace.reasoningThinking") : t("workspace.reasoningProcess")}</summary>
+                              <summary className="cursor-pointer font-semibold">{streaming && i === messages.length - 1 ? t("workspace.reasoningThinking") : t("workspace.reasoningComplete")}</summary>
                               <div className="mt-2 whitespace-pre-wrap leading-relaxed">{msg.reasoning_content}</div>
                             </details>
                           )}

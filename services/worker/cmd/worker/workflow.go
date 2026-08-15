@@ -1701,11 +1701,13 @@ func executeWorkerLLMWithRoutes(ctx context.Context, pool *pgxpool.Pool, baseURL
 	}
 	attempt := 0
 	failures := make([]string, 0, len(routes))
+	// 仅多线路时启用自动切换/熔断降级；单线路保持旧的直连行为。
+	poolEnabled := len(routes) > 1
 	for _, route := range routes {
 		if attempt >= maxWorkerRouteAttempts {
 			break
 		}
-		if !acquireWorkerRouteProbe(ctx, pool, route) {
+		if poolEnabled && !acquireWorkerRouteProbe(ctx, pool, route) {
 			continue
 		}
 		bodyMap, endpoint := buildWorkerLLMRequest(route, model.RequestMode, model.Code, system, user, temperature)
@@ -1749,7 +1751,7 @@ func executeWorkerLLMWithRoutes(ctx context.Context, pool *pgxpool.Pool, baseURL
 			}
 			logWorkerRouteAttempt(ctx, pool, requestID, model.ID, route.ID, attempt, statusLabel, status, latencyMS)
 			if workerStatusCanFailover(status) {
-				markWorkerRouteFailure(ctx, pool, route.ID)
+				markWorkerRouteFailure(ctx, pool, route.ID, poolEnabled)
 			}
 			message := compactUpstreamError(responseBody)
 			if requestErr != nil {

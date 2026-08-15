@@ -291,10 +291,11 @@ func (s *ModelService) ModelRouteProfit(ctx context.Context, modelID int64, days
 
 // RuntimeRoutes returns enabled routes in failover order. Routes sharing a
 // priority are selected by weight, then retained as fallbacks for this request.
+// 熔断降级仅在多条启用线路时生效；单线路模型保持旧的直连行为，
+// 不受冷却窗口限制，并自愈残留的熔断状态。
 func (s *ModelService) RuntimeRoutes(ctx context.Context, model *ModelFull) ([]ModelRoute, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+modelRouteColumns+` FROM model_routes
 		WHERE model_id=$1 AND is_enabled=true
-		  AND (cooldown_until IS NULL OR cooldown_until <= now())
 		ORDER BY priority, id`, model.ID)
 	if err != nil {
 		return nil, err
@@ -311,14 +312,20 @@ func (s *ModelService) RuntimeRoutes(ctx context.Context, model *ModelFull) ([]M
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(routes) == 0 {
-		var configured bool
-		if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1)`, model.ID).Scan(&configured); err != nil {
-			return nil, err
+	if len(routes) == 1 {
+		s.healSingleRouteState(ctx, &routes[0])
+	} else if len(routes) > 1 {
+		now := time.Now()
+		active := make([]ModelRoute, 0, len(routes))
+		for _, route := range routes {
+			if route.CooldownUntil == nil || !route.CooldownUntil.After(now) {
+				active = append(active, route)
+			}
 		}
-		if configured {
+		if len(active) == 0 {
 			return nil, errors.New("all model routes are cooling down")
 		}
+		routes = active
 	}
 	for start := 0; start < len(routes); {
 		end := start + 1
@@ -591,6 +598,7 @@ func (s *ModelService) MarkRouteSuccess(ctx context.Context, routeID int64) {
 
 // AcquireRouteProbe prevents a recovered circuit from receiving a burst of
 // concurrent half-open probes. Healthy/degraded routes need no lease.
+// 单线路模型没有可切换目标，不走探测限流，直接放行并自愈。
 func (s *ModelService) AcquireRouteProbe(ctx context.Context, route *ModelRoute) bool {
 	if route == nil || route.ID <= 0 {
 		return true
@@ -598,21 +606,47 @@ func (s *ModelService) AcquireRouteProbe(ctx context.Context, route *ModelRoute)
 	if route.HealthStatus != "open" && route.HealthStatus != "half_open" {
 		return true
 	}
+	var hasAlternate bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1 AND is_enabled=true AND id<>$2)`, route.ModelID, route.ID).Scan(&hasAlternate); err == nil && !hasAlternate {
+		s.healSingleRouteState(ctx, route)
+		return true
+	}
 	tag, err := s.db.Exec(ctx, `UPDATE model_routes SET health_status='half_open',cooldown_until=now()+interval '30 seconds',updated_at=now()
 		WHERE id=$1 AND health_status IN ('open','half_open') AND (cooldown_until IS NULL OR cooldown_until<=now())`, route.ID)
 	return err == nil && tag.RowsAffected() == 1
+}
+
+// healSingleRouteState 清除单线路模型残留的熔断/冷却状态，避免无降级可走时自伤。
+func (s *ModelService) healSingleRouteState(ctx context.Context, route *ModelRoute) {
+	if route == nil || route.ID <= 0 {
+		return
+	}
+	if route.HealthStatus != "open" && route.HealthStatus != "half_open" && route.CooldownUntil == nil {
+		return
+	}
+	_, _ = s.db.Exec(ctx, `UPDATE model_routes SET health_status='healthy',cooldown_until=NULL,updated_at=now() WHERE id=$1`, route.ID)
+	route.HealthStatus = "healthy"
+	route.CooldownUntil = nil
 }
 
 func (s *ModelService) MarkRouteFailure(ctx context.Context, routeID int64) {
 	if routeID <= 0 {
 		return
 	}
-	_, _ = s.db.Exec(ctx, `UPDATE model_routes SET
-		consecutive_failures=consecutive_failures+1,
-		failure_count=failure_count+1,
-		health_status=CASE WHEN consecutive_failures+1 >= $2 THEN 'open' ELSE 'degraded' END,
-		cooldown_until=CASE WHEN consecutive_failures+1 >= $2 THEN now()+interval '60 seconds' ELSE cooldown_until END,
-		last_failure_at=now(),updated_at=now() WHERE id=$1`, routeID, routeFailureThreshold)
+	// 熔断降级仅在存在其他启用线路时生效；单线路只累计失败统计，
+	// 不进入 open 状态也不设置冷却，保持旧的直连重试行为。
+	_, _ = s.db.Exec(ctx, `UPDATE model_routes r SET
+		consecutive_failures=r.consecutive_failures+1,
+		failure_count=r.failure_count+1,
+		health_status=CASE
+			WHEN EXISTS(SELECT 1 FROM model_routes p WHERE p.model_id=r.model_id AND p.is_enabled=true AND p.id<>r.id)
+				THEN CASE WHEN r.consecutive_failures+1 >= $2 THEN 'open' ELSE 'degraded' END
+			ELSE r.health_status END,
+		cooldown_until=CASE
+			WHEN EXISTS(SELECT 1 FROM model_routes p WHERE p.model_id=r.model_id AND p.is_enabled=true AND p.id<>r.id)
+				AND r.consecutive_failures+1 >= $2 THEN now()+interval '60 seconds'
+			ELSE r.cooldown_until END,
+		last_failure_at=now(),updated_at=now() WHERE r.id=$1`, routeID, routeFailureThreshold)
 }
 
 func (s *ModelService) LogRouteAttempt(ctx context.Context, requestID string, modelID, routeID int64, attempt int, status string, statusCode int, errorCode string, latencyMS int, providerCost float64) {

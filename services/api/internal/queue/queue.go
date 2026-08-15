@@ -49,7 +49,8 @@ func EnqueueImageTask(client *asynq.Client, payload ImageTaskPayload) error {
 		return err
 	}
 	task := asynq.NewTask(TypeImageTask, data)
-	// 视频异步轮询最长约 60 分钟，需高于 asynq 默认 30 分钟任务超时。
+	// 视频异步轮询默认 15 分钟，但模型可通过 poll_timeout_sec 覆盖，
+	// 需高于 asynq 默认 30 分钟任务超时以兼容长轮询配置。
 	_, err = client.Enqueue(task, asynq.Queue(QueueImage), asynq.MaxRetry(3), asynq.Timeout(90*time.Minute))
 	return err
 }
