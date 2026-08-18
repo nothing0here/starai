@@ -249,7 +249,7 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 		nodeEstimate += node.Cost
 	}
 	runtimeEstimate := s.estimateAgentRuntimeCost(ctx, def.RuntimeConfig, inputs)
-	estimated := estimateAgentProjectCost(def.PriceRule, nodeEstimate, runtimeEstimate)
+	estimated := estimateAgentProjectCost(def.PriceRule, inputs, nodeEstimate, runtimeEstimate)
 	publicID := util.NewPublicID("wfp")
 	inputsJSON, _ := json.Marshal(inputs)
 	var projectID int64
@@ -280,9 +280,12 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 	return s.GetProject(ctx, userID, publicID)
 }
 
-func estimateAgentProjectCost(priceRule map[string]interface{}, nodeEstimate, runtimeEstimate float64) float64 {
+func estimateAgentProjectCost(priceRule, inputs map[string]interface{}, nodeEstimate, runtimeEstimate float64) float64 {
 	if stringValue(priceRule["billing_type"]) == "per_request" && floatValue(priceRule["unit_price"]) > 0 {
 		return floatValue(priceRule["unit_price"])
+	}
+	if stringValue(priceRule["billing_type"]) == "per_chapter" {
+		return chapterBasedCost(priceRule, novelChapterEstimate(inputs))
 	}
 	if runtimeEstimate > 0 {
 		return runtimeEstimate
@@ -1678,22 +1681,32 @@ func (s *AgentService) CancelProject(ctx context.Context, userID int64, publicID
 }
 
 func (s *AgentService) accruedWorkflowCost(ctx context.Context, projectID int64) (float64, float64, error) {
-	var raw []byte
+	var raw, outputsRaw []byte
 	var nodeCost, settledCost float64
 	if err := s.db.QueryRow(ctx, `
 		SELECT COALESCE(w.price_rule, '{}'::jsonb),
 		       COALESCE((SELECT SUM(n.cost) FROM workflow_node_runs n WHERE n.project_id=p.id), 0),
-		       p.actual_cost
+		       p.actual_cost,
+		       COALESCE(p.outputs, '{}'::jsonb)
 		FROM workflow_projects p
 		JOIN workflow_definitions w ON w.id=p.workflow_id
-		WHERE p.id=$1`, projectID).Scan(&raw, &nodeCost, &settledCost); err != nil {
+		WHERE p.id=$1`, projectID).Scan(&raw, &nodeCost, &settledCost, &outputsRaw); err != nil {
 		return 0, 0, err
 	}
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
 	cumulativeCost := nodeCost
-	if unitPrice := floatValue(rule["unit_price"]); stringValue(rule["billing_type"]) == "per_request" && nodeCost > 0 && unitPrice > 0 {
-		cumulativeCost = unitPrice
+	switch stringValue(rule["billing_type"]) {
+	case "per_request":
+		if unitPrice := floatValue(rule["unit_price"]); nodeCost > 0 && unitPrice > 0 {
+			cumulativeCost = unitPrice
+		}
+	case "per_chapter":
+		outputs := map[string]interface{}{}
+		_ = json.Unmarshal(outputsRaw, &outputs)
+		if chapterCost := chapterBasedCost(rule, floatValue(outputs["current_chapter"])); chapterCost > 0 {
+			cumulativeCost = chapterCost
+		}
 	}
 	if cumulativeCost < 0 {
 		cumulativeCost = 0
@@ -1887,13 +1900,45 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 
 func validateWorkflowPriceRule(rule map[string]interface{}) error {
 	billingType := strings.ToLower(strings.TrimSpace(stringValue(rule["billing_type"])))
-	if billingType != "per_request" && billingType != "model_actual" && billingType != "dynamic" {
+	switch billingType {
+	case "per_request", "model_actual", "dynamic", "per_chapter":
+	default:
 		return fmt.Errorf("不支持的工作流计费类型：%s", billingType)
 	}
-	if floatValue(rule["unit_price"]) < 0 {
-		return errors.New("工作流单价不能为负数")
+	for _, key := range []string{"unit_price", "planning_price", "free_trial_chapters"} {
+		if floatValue(rule[key]) < 0 {
+			return fmt.Errorf("工作流计费字段 %s 不能为负数", key)
+		}
+	}
+	if billingType == "per_chapter" && floatValue(rule["unit_price"]) <= 0 && floatValue(rule["planning_price"]) <= 0 {
+		return errors.New("按章计费至少需要配置章节单价或策划费")
 	}
 	return nil
+}
+
+// novelChapterEstimate 按目标篇幅估算章节数，用于创建时的冻结额度。
+func novelChapterEstimate(inputs map[string]interface{}) float64 {
+	switch stringValue(inputs["length_code"]) {
+	case "short":
+		return 10
+	case "long":
+		return 40
+	default:
+		return 20
+	}
+}
+
+// chapterBasedCost 计算按章计费的累计费用：策划费 + 章节单价 × 超免费章节数。
+func chapterBasedCost(rule map[string]interface{}, chapters float64) float64 {
+	billable := chapters - floatValue(rule["free_trial_chapters"])
+	if billable < 0 {
+		billable = 0
+	}
+	cost := floatValue(rule["planning_price"]) + floatValue(rule["unit_price"])*billable
+	if cost < 0 {
+		cost = 0
+	}
+	return cost
 }
 
 func normalizeVideoRedrawAgentInput(in AgentUpsertInput) AgentUpsertInput {

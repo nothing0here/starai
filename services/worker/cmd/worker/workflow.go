@@ -2079,6 +2079,9 @@ func sumAgentMediaTaskCost(tasks []map[string]interface{}) float64 {
 
 func workflowActualCost(ctx context.Context, pool *pgxpool.Pool, projectID int64, outputs map[string]interface{}) float64 {
 	base := workflowBaseCost(ctx, pool, projectID)
+	if base <= 0 {
+		base = workflowChapterCost(ctx, pool, projectID, intAny(outputs["current_chapter"]))
+	}
 	var nodeCost float64
 	_ = pool.QueryRow(ctx, `SELECT COALESCE(SUM(cost),0) FROM workflow_node_runs WHERE project_id=$1`, projectID).Scan(&nodeCost)
 	mediaCost := 0.0
@@ -2108,7 +2111,47 @@ func workflowAccruedCost(ctx context.Context, pool *pgxpool.Pool, projectID int6
 	if base := workflowBaseCost(ctx, pool, projectID); base > 0 {
 		return base
 	}
+	// 失败/取消结算时从数据库读取已完成章节数，按章计费优先于 token 成本。
+	if chapterCost := workflowChapterCost(ctx, pool, projectID, -1); chapterCost > 0 {
+		return chapterCost
+	}
 	return nodeCost
+}
+
+// workflowChapterCost 计算按章计费（per_chapter）的累计费用：
+// 策划费 + 章节单价 × 超出免费体验章的部分。
+// chapters < 0 时从数据库 outputs 中读取已完成章节数。
+func workflowChapterCost(ctx context.Context, pool *pgxpool.Pool, projectID int64, chapters int) float64 {
+	var raw []byte
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(w.price_rule, '{}'::jsonb)
+		FROM workflow_projects p
+		JOIN workflow_definitions w ON w.id=p.workflow_id
+		WHERE p.id=$1`, projectID).Scan(&raw); err != nil {
+		return 0
+	}
+	rule := map[string]interface{}{}
+	_ = json.Unmarshal(raw, &rule)
+	if stringAny(rule["billing_type"]) != "per_chapter" {
+		return 0
+	}
+	if chapters < 0 {
+		var outputsRaw []byte
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(outputs, '{}'::jsonb) FROM workflow_projects WHERE id=$1`, projectID).Scan(&outputsRaw); err == nil {
+			outputs := map[string]interface{}{}
+			_ = json.Unmarshal(outputsRaw, &outputs)
+			chapters = intAny(outputs["current_chapter"])
+		}
+	}
+	billable := float64(chapters) - floatAny(rule["free_trial_chapters"])
+	if billable < 0 {
+		billable = 0
+	}
+	cost := floatAny(rule["planning_price"]) + floatAny(rule["unit_price"])*billable
+	if cost < 0 {
+		cost = 0
+	}
+	return cost
 }
 
 func incrementalWorkflowCharge(ctx context.Context, pool *pgxpool.Pool, projectID int64, cumulativeCost float64) float64 {

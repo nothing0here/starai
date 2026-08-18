@@ -64,7 +64,7 @@ type Workflow = {
   category: string;
   nodes: WorkflowNode[];
   input_schema: Record<string, unknown>;
-  price_rule: { unit_price?: number; billing_type?: string };
+  price_rule: { unit_price?: number; billing_type?: string; planning_price?: number; free_trial_chapters?: number };
   display_config?: Record<string, any>;
   runtime_config?: RuntimeConfig;
   is_enabled: boolean;
@@ -135,6 +135,8 @@ type FormState = {
   candidate_count: number;
   creative_scenes: string[];
   unit_price: number;
+  planning_price: number;
+  free_trial_chapters: number;
   placeholder: string;
   help: string;
   canvas_templates: CanvasTemplateAdmin[];
@@ -618,6 +620,8 @@ function makeEmptyForm(): FormState {
     candidate_count: 3,
     creative_scenes: defaultScenes("image"),
     unit_price: 0.1,
+    planning_price: 0,
+    free_trial_chapters: 0,
     placeholder: preset.placeholder,
     help: preset.help,
     canvas_templates: DEFAULT_CANVAS_TEMPLATES.map((item) => ({ ...item })),
@@ -798,6 +802,8 @@ export default function AgentsAdminPage() {
       candidate_count: Number(runtime.candidate_count || 3),
       creative_scenes: normalizeScenes(runtime.creative_scenes || runtime.output_scenes, type),
       unit_price: Number(w.price_rule?.unit_price || 0),
+      planning_price: Number(w.price_rule?.planning_price || 0),
+      free_trial_chapters: Number(w.price_rule?.free_trial_chapters || 0),
       placeholder: String(input.placeholder || preset.placeholder),
       help: String(display.help || preset.help),
       canvas_templates: Array.isArray(display.canvas_templates)
@@ -930,7 +936,9 @@ export default function AgentsAdminPage() {
       allow_prompt_edit: form.allow_prompt_edit,
       nodes: bundle.nodes,
       input_schema: bundle.input_schema,
-      price_rule: bundle.price_rule,
+      price_rule: form.generation_type === "novel_workshop"
+        ? { billing_type: "per_chapter", unit_price: Number(form.unit_price) || 0, planning_price: Number(form.planning_price) || 0, free_trial_chapters: Math.max(0, Math.floor(Number(form.free_trial_chapters) || 0)) }
+        : bundle.price_rule,
       display_config: bundle.display_config,
       runtime_config: form.system_workspace
         ? { ...bundle.runtime_config, agent_mode: "infinite_canvas", system_workspace: true }
@@ -1125,7 +1133,16 @@ export default function AgentsAdminPage() {
                 )}
                 {!isVideoUtilityType(form.generation_type) && <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>}
                 {!isVideoUtilityType(form.generation_type) && <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>}
-                <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
+                {form.generation_type === "novel_workshop" ? (
+                  <>
+                    <Field label="章节单价（按章计费）"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
+                    <Field label="策划费（完成故事策划时收取）"><input type="number" min={0} step="0.01" className="admin-input" value={form.planning_price} onChange={(e) => setForm({ ...form, planning_price: Number(e.target.value) || 0 })} /></Field>
+                    <Field label="免费体验章数"><input type="number" min={0} step="1" className="admin-input" value={form.free_trial_chapters} onChange={(e) => setForm({ ...form, free_trial_chapters: Math.max(0, Math.floor(Number(e.target.value) || 0)) })} /></Field>
+                    <p className="self-end text-[11px] leading-5 text-gray-400">总费用 = 策划费 + 章节单价 ×（完成章数 − 免费体验章数）；创建时按目标篇幅预估冻结，完成/取消/失败均按实际完成章节结算。</p>
+                  </>
+                ) : (
+                  <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
+                )}
                 {isVideoUtilityType(form.generation_type) && <p className="self-end text-[11px] leading-5 text-gray-400">最终冻结金额 = 工作流收费 + 所选模型估算费用；完成后按实际模型任务费用结算。独立字幕轨移除不产生模型费用。</p>}
               </section>}
 

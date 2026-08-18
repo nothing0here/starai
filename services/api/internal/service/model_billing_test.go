@@ -72,16 +72,41 @@ func TestChatTokenCostIgnoresUnforwardedCountParam(t *testing.T) {
 }
 
 func TestEstimateAgentProjectCostUsesFlatWorkflowPrice(t *testing.T) {
-	got := estimateAgentProjectCost(map[string]interface{}{"billing_type": "per_request", "unit_price": float64(0.15)}, 0.15, 0.27)
+	got := estimateAgentProjectCost(map[string]interface{}{"billing_type": "per_request", "unit_price": float64(0.15)}, nil, 0.15, 0.27)
 	if got != 0.15 {
 		t.Fatalf("cost = %v, want flat workflow price 0.15", got)
 	}
 }
 
 func TestEstimateAgentProjectCostUsesRuntimeForModelActual(t *testing.T) {
-	got := estimateAgentProjectCost(map[string]interface{}{"billing_type": "model_actual", "unit_price": float64(0)}, 0.15, 0.27)
+	got := estimateAgentProjectCost(map[string]interface{}{"billing_type": "model_actual", "unit_price": float64(0)}, nil, 0.15, 0.27)
 	if got != 0.27 {
 		t.Fatalf("cost = %v, want runtime cost 0.27", got)
+	}
+}
+
+func TestEstimateAgentProjectCostForPerChapter(t *testing.T) {
+	rule := map[string]interface{}{
+		"billing_type": "per_chapter", "unit_price": float64(0.2),
+		"planning_price": float64(0.5), "free_trial_chapters": float64(3),
+	}
+	got := estimateAgentProjectCost(rule, map[string]interface{}{"length_code": "mid"}, 0, 0)
+	// 中篇估算 20 章：0.5 + 0.2 × (20-3) = 3.9
+	if math.Abs(got-3.9) > 0.000000001 {
+		t.Fatalf("cost = %v, want per-chapter estimate 3.9", got)
+	}
+}
+
+func TestChapterBasedCostHonorsFreeTrial(t *testing.T) {
+	rule := map[string]interface{}{
+		"billing_type": "per_chapter", "unit_price": float64(0.2),
+		"planning_price": float64(0.5), "free_trial_chapters": float64(3),
+	}
+	if got := chapterBasedCost(rule, 2); got != 0.5 {
+		t.Fatalf("2 chapters = %v, want planning-only 0.5", got)
+	}
+	if got := chapterBasedCost(rule, 5); math.Abs(got-0.9) > 0.000000001 {
+		t.Fatalf("5 chapters = %v, want 0.5 + 0.2×2 = 0.9", got)
 	}
 }
 
