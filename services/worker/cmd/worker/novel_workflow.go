@@ -277,9 +277,9 @@ func runNovelPlanning(
 		out = fallbackNovelPlanning(userPrompt, genre, wordCount, style)
 	}
 
-	pt, ct := chatUsageTokens(result.ResponseBody)
-	out["_planning_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
-	out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct)
+	pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+	out["_planning_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
+	out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct, crt, cwt)
 	out["_route_id"] = nullableRouteID(result.Route.ID)
 	out["raw_text"] = text
 
@@ -398,8 +398,8 @@ func runNovelChapterWriting(
 		return "", 0, "模型未返回章节内容"
 	}
 
-	pt, ct := chatUsageTokens(result.ResponseBody)
-	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
+	pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
 
 	return content, cost, ""
 }
@@ -490,8 +490,8 @@ func runNovelChapterPolishing(
 	})
 	ledgerUpdates := mapAnyOr(out["ledger_updates"], map[string]interface{}{})
 
-	pt, ct := chatUsageTokens(result.ResponseBody)
-	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
+	pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
 
 	return polishedContent, consistencyCheck, ledgerUpdates, cost, ""
 }
@@ -568,8 +568,8 @@ func runNovelChapterArchiving(
 		wordCount = len([]rune(polishedContent))
 	}
 
-	pt, ct := chatUsageTokens(result.ResponseBody)
-	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
+	pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+	cost := estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
 
 	return summary, updatedLedger, wordCount, cost, ""
 }

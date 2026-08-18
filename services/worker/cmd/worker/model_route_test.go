@@ -36,8 +36,42 @@ func (e assertionError) Error() string { return string(e) }
 
 func TestWorkerRouteProviderCost(t *testing.T) {
 	route := workerModelRoute{CostRule: map[string]interface{}{"billing_type": "per_second", "unit_cost": 0.04}}
-	if got := workerRouteProviderCost(route, map[string]interface{}{"duration": 10}, 0, 0); got != 0.4 {
+	if got := workerRouteProviderCost(route, map[string]interface{}{"duration": 10}, 0, 0, 0, 0); got != 0.4 {
 		t.Fatalf("provider cost = %v, want 0.4", got)
+	}
+}
+
+func TestWorkerRouteProviderCostPerTokenWithCache(t *testing.T) {
+	route := workerModelRoute{CostRule: map[string]interface{}{
+		"billing_type":             "per_token",
+		"input_cost_per_m":         float64(10),
+		"output_cost_per_m":        float64(40),
+		"cache_read_cost_per_m":    float64(1),
+		"cache_write_cost_per_m":   float64(12),
+	}}
+	// 输入 1000（缓存读 400 + 缓存写 100），输出 500
+	got := workerRouteProviderCost(route, map[string]interface{}{}, 1000, 500, 400, 100)
+	want := (float64(500)*10 + float64(400)*1 + float64(100)*12 + float64(500)*40) / 1_000_000
+	if diff := got - want; diff > 0.000000001 || diff < -0.000000001 {
+		t.Fatalf("provider cost = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestChatUsageTokenDetailsParsesCacheTokens(t *testing.T) {
+	openai := []byte(`{"usage":{"prompt_tokens":1000,"completion_tokens":500,"prompt_tokens_details":{"cached_tokens":400}}}`)
+	prompt, output, cacheRead, cacheWrite := chatUsageTokenDetails(openai)
+	if prompt != 1000 || output != 500 || cacheRead != 400 || cacheWrite != 0 {
+		t.Fatalf("openai usage = %d/%d/%d/%d", prompt, output, cacheRead, cacheWrite)
+	}
+	claude := []byte(`{"usage":{"input_tokens":800,"output_tokens":300,"cache_read_input_tokens":600,"cache_creation_input_tokens":150}}`)
+	prompt, output, cacheRead, cacheWrite = chatUsageTokenDetails(claude)
+	if prompt != 800 || output != 300 || cacheRead != 600 || cacheWrite != 150 {
+		t.Fatalf("claude usage = %d/%d/%d/%d", prompt, output, cacheRead, cacheWrite)
+	}
+	gemini := []byte(`{"usageMetadata":{"promptTokenCount":900,"candidatesTokenCount":200,"cachedContentTokenCount":700}}`)
+	prompt, output, cacheRead, cacheWrite = chatUsageTokenDetails(gemini)
+	if prompt != 900 || output != 200 || cacheRead != 700 || cacheWrite != 0 {
+		t.Fatalf("gemini usage = %d/%d/%d/%d", prompt, output, cacheRead, cacheWrite)
 	}
 }
 

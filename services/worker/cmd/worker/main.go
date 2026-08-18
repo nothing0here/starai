@@ -380,9 +380,9 @@ routeLoop:
 	pool.QueryRow(ctx, `SELECT id, estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&taskID, &estimated)
 	actualCost := estimated
 	if promptTokens > 0 || outputTokens > 0 {
-		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, p.Input, promptTokens, outputTokens)
+		actualCost = estimateModelCostByIDWorker(ctx, pool, p.ModelID, p.Input, promptTokens, outputTokens, 0, 0)
 	}
-	providerCost := workerRouteProviderCost(selected.Route, p.Input, promptTokens, outputTokens)
+	providerCost := workerRouteProviderCost(selected.Route, p.Input, promptTokens, outputTokens, 0, 0)
 	updateWorkerRouteAttemptProviderCost(ctx, pool, p.TaskNo, selected.Route.ID, providerCost)
 
 	var output, meta []byte
@@ -787,12 +787,31 @@ func updateWorkerRouteAttemptProviderCost(ctx context.Context, pool *pgxpool.Poo
 	)`, providerCost, requestID, routeID)
 }
 
-func workerRouteProviderCost(route workerModelRoute, input map[string]interface{}, promptTokens, outputTokens int) float64 {
+func workerRouteProviderCost(route workerModelRoute, input map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
 	typeName := strings.ToLower(strings.TrimSpace(fmt.Sprint(route.CostRule["billing_type"])))
 	value := func(key string) float64 { return floatAny(route.CostRule[key]) }
 	switch typeName {
 	case "per_token":
-		return float64(promptTokens)/1_000_000*value("input_cost_per_m") + float64(outputTokens)/1_000_000*value("output_cost_per_m")
+		inputCost := value("input_cost_per_m")
+		cacheReadCost := value("cache_read_cost_per_m")
+		if cacheReadCost <= 0 {
+			cacheReadCost = inputCost
+		}
+		cacheWriteCost := value("cache_write_cost_per_m")
+		if cacheWriteCost <= 0 {
+			cacheWriteCost = inputCost
+		}
+		if cacheReadTokens < 0 {
+			cacheReadTokens = 0
+		}
+		if cacheWriteTokens < 0 {
+			cacheWriteTokens = 0
+		}
+		if cacheReadTokens+cacheWriteTokens > promptTokens {
+			cacheReadTokens, cacheWriteTokens = 0, 0
+		}
+		uncached := promptTokens - cacheReadTokens - cacheWriteTokens
+		return (float64(uncached)*inputCost + float64(cacheReadTokens)*cacheReadCost + float64(cacheWriteTokens)*cacheWriteCost + float64(outputTokens)*value("output_cost_per_m")) / 1_000_000
 	case "per_image", "per_request":
 		count := intAny(input["n"])
 		if count <= 0 {

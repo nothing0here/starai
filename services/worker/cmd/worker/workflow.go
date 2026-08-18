@@ -900,9 +900,9 @@ dialogue 只能填写画面中角色实际说出的话；narration 只能填写�
 		}
 		out = normalizeComicDramaPlan(out, inputs, runtimeCfg)
 		persistComicDramaPlan(ctx, pool, workflowProjectID, userID, inputs, out)
-		pt, ct := chatUsageTokens(result.ResponseBody)
-		out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
-		out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct)
+		pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+		out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
+		out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct, crt, cwt)
 		out["_route_id"] = nullableRouteID(result.Route.ID)
 		out["_dialogue_model_code"] = modelCode
 		out["raw_text"] = text
@@ -1650,9 +1650,9 @@ func runAgentAnalysis(ctx context.Context, pool *pgxpool.Pool, baseURL, token, m
 		return nil, "模型未返回分析内容"
 	}
 	out := normalizeAgentAnalysisOutput(text, category)
-	pt, ct := chatUsageTokens(result.ResponseBody)
-	out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct)
-	out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct)
+	pt, ct, crt, cwt := chatUsageTokenDetails(result.ResponseBody)
+	out["_analysis_cost"] = estimateModelCostByCodeWorker(ctx, pool, modelCode, result.RequestBody, pt, ct, crt, cwt)
+	out["_provider_cost"] = workerRouteProviderCost(result.Route, result.RequestBody, pt, ct, crt, cwt)
 	out["_route_id"] = nullableRouteID(result.Route.ID)
 	return out, ""
 }
@@ -1744,8 +1744,8 @@ func executeWorkerLLMWithRoutes(ctx context.Context, pool *pgxpool.Pool, baseURL
 			if requestErr == nil && status >= 200 && status < 300 {
 				markWorkerRouteSuccess(ctx, pool, route.ID)
 				logWorkerRouteAttempt(ctx, pool, requestID, model.ID, route.ID, attempt, "SUCCESS", status, latencyMS)
-				promptTokens, outputTokens := chatUsageTokens(responseBody)
-				updateWorkerRouteAttemptProviderCost(ctx, pool, requestID, route.ID, workerRouteProviderCost(route, bodyMap, promptTokens, outputTokens))
+				promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens := chatUsageTokenDetails(responseBody)
+				updateWorkerRouteAttemptProviderCost(ctx, pool, requestID, route.ID, workerRouteProviderCost(route, bodyMap, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens))
 				return workerLLMResult{Route: route, RequestBody: bodyMap, ResponseBody: responseBody}, nil
 			}
 			statusLabel := "ERROR"
@@ -2267,20 +2267,39 @@ func workflowUsageBaseCost(ctx context.Context, pool *pgxpool.Pool, projectID in
 }
 
 func chatUsageTokens(body []byte) (int, int) {
-	var raw map[string]interface{}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return 0, 0
-	}
-	if usage, ok := raw["usage"].(map[string]interface{}); ok {
-		return intAny(firstNonNil(usage["prompt_tokens"], usage["input_tokens"])), intAny(firstNonNil(usage["completion_tokens"], usage["output_tokens"]))
-	}
-	if usage, ok := raw["usageMetadata"].(map[string]interface{}); ok {
-		return intAny(usage["promptTokenCount"]), intAny(firstNonNil(usage["candidatesTokenCount"], usage["responseTokenCount"]))
-	}
-	return 0, 0
+	prompt, output, _, _ := chatUsageTokenDetails(body)
+	return prompt, output
 }
 
-func estimateModelCostByCodeWorker(ctx context.Context, pool *pgxpool.Pool, code string, params map[string]interface{}, promptTokens, outputTokens int) float64 {
+// chatUsageTokenDetails 解析上游返回的 token 用量，包含缓存读/写 token。
+// 兼容 OpenAI（prompt_tokens_details.cached_tokens）、Anthropic（cache_read/cache_creation_input_tokens）与 Gemini（usageMetadata.cachedContentTokenCount）。
+func chatUsageTokenDetails(body []byte) (prompt, output, cacheRead, cacheWrite int) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return 0, 0, 0, 0
+	}
+	if usage, ok := raw["usage"].(map[string]interface{}); ok {
+		prompt = intAny(firstNonNil(usage["prompt_tokens"], usage["input_tokens"]))
+		output = intAny(firstNonNil(usage["completion_tokens"], usage["output_tokens"]))
+		cacheRead = intAny(firstNonNil(usage["cache_read_input_tokens"]))
+		cacheWrite = intAny(firstNonNil(usage["cache_creation_input_tokens"]))
+		if details, ok := usage["prompt_tokens_details"].(map[string]interface{}); ok {
+			if cached := intAny(details["cached_tokens"]); cached > cacheRead {
+				cacheRead = cached
+			}
+		}
+		return prompt, output, cacheRead, cacheWrite
+	}
+	if usage, ok := raw["usageMetadata"].(map[string]interface{}); ok {
+		prompt = intAny(usage["promptTokenCount"])
+		output = intAny(firstNonNil(usage["candidatesTokenCount"], usage["responseTokenCount"]))
+		cacheRead = intAny(usage["cachedContentTokenCount"])
+		return prompt, output, cacheRead, 0
+	}
+	return 0, 0, 0, 0
+}
+
+func estimateModelCostByCodeWorker(ctx context.Context, pool *pgxpool.Pool, code string, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
 	var raw []byte
 	var category string
 	if err := pool.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE code=$1`, code).Scan(&raw, &category); err != nil {
@@ -2289,10 +2308,10 @@ func estimateModelCostByCodeWorker(ctx context.Context, pool *pgxpool.Pool, code
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
 	params = workerBillingParams(params, category)
-	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens)
+	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
 }
 
-func estimateModelCostByIDWorker(ctx context.Context, pool *pgxpool.Pool, modelID int64, params map[string]interface{}, promptTokens, outputTokens int) float64 {
+func estimateModelCostByIDWorker(ctx context.Context, pool *pgxpool.Pool, modelID int64, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
 	var raw []byte
 	var category string
 	if err := pool.QueryRow(ctx, `SELECT price_rule, category FROM models WHERE id=$1`, modelID).Scan(&raw, &category); err != nil {
@@ -2301,7 +2320,7 @@ func estimateModelCostByIDWorker(ctx context.Context, pool *pgxpool.Pool, modelI
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
 	params = workerBillingParams(params, category)
-	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens)
+	return estimatePriceRuleCostWorker(rule, params, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
 }
 
 func workerBillingParams(params map[string]interface{}, category string) map[string]interface{} {
@@ -2323,7 +2342,7 @@ func workerBillingParams(params map[string]interface{}, category string) map[str
 	return out
 }
 
-func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]interface{}, promptTokens, outputTokens int) float64 {
+func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]interface{}, promptTokens, outputTokens, cacheReadTokens, cacheWriteTokens int) float64 {
 	switch stringAny(rule["billing_type"]) {
 	case "per_image":
 		n := floatAny(params["n"])
@@ -2336,7 +2355,32 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		return floatAny(rule["unit_price"]) * n
 	case "per_token":
 		promptTokens, outputTokens = workerEstimatedTokenCounts(rule, params, promptTokens, outputTokens)
-		cost := float64(promptTokens)*tokenPriceWorker(rule, "input_price") + float64(outputTokens)*tokenPriceWorker(rule, "output_price")
+		// 以管理后台设定的输入/输出/缓存单价为准：缓存 token 按缓存单价计，其余输入按输入单价计。
+		if cacheReadTokens < 0 {
+			cacheReadTokens = 0
+		}
+		if cacheWriteTokens < 0 {
+			cacheWriteTokens = 0
+		}
+		if cacheReadTokens+cacheWriteTokens > promptTokens {
+			overflow := cacheReadTokens + cacheWriteTokens - promptTokens
+			if cacheWriteTokens >= overflow {
+				cacheWriteTokens -= overflow
+			} else {
+				cacheReadTokens = promptTokens - cacheWriteTokens
+			}
+		}
+		uncachedInput := promptTokens - cacheReadTokens - cacheWriteTokens
+		inputPrice := tokenPriceWorker(rule, "input_price")
+		cacheReadPrice := tokenPriceWorker(rule, "cache_read_price")
+		if cacheReadPrice <= 0 {
+			cacheReadPrice = inputPrice
+		}
+		cacheWritePrice := tokenPriceWorker(rule, "cache_write_price")
+		if cacheWritePrice <= 0 {
+			cacheWritePrice = inputPrice
+		}
+		cost := float64(uncachedInput)*inputPrice + float64(cacheReadTokens)*cacheReadPrice + float64(cacheWriteTokens)*cacheWritePrice + float64(outputTokens)*tokenPriceWorker(rule, "output_price")
 		if surcharge := floatAny(rule["surcharge_per_m"]); surcharge > 0 {
 			cost += float64(promptTokens+outputTokens) / 1_000_000 * surcharge
 		}
@@ -2839,7 +2883,7 @@ func runAgentMediaTasks(ctx context.Context, pool *pgxpool.Pool, baseURL, token 
 		if len(referenceImages) > 0 {
 			taskInput["reference_images"] = referenceImages
 		}
-		taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0)
+		taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0, 0, 0)
 		inputJSON, _ := json.Marshal(taskInput)
 		_, err := pool.Exec(ctx, `
 			INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
@@ -2946,7 +2990,7 @@ func runAgentDetailPageTasks(ctx context.Context, pool *pgxpool.Pool, baseURL, t
 		if imageURL := firstImageURL(inputs); imageURL != "" {
 			taskInput["reference_images"] = []string{imageURL}
 		}
-		taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0)
+		taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0, 0, 0)
 		inputJSON, _ := json.Marshal(taskInput)
 		_, err := pool.Exec(ctx, "INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost) VALUES ($1,$2,$3,'image','pending',$4,$5)", taskNo, userID, modelID, inputJSON, taskEstimated)
 		if err != nil {
@@ -3195,7 +3239,7 @@ func runMediaNode(ctx context.Context, pool *pgxpool.Pool, baseURL, token string
 	}
 	taskInput := agentMediaTaskInput(inputs, prompt, publicID)
 	taskNo := newWorkflowTaskNo(0)
-	taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0)
+	taskEstimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0, 0, 0)
 	inputJSON, _ := json.Marshal(taskInput)
 	if _, err := pool.Exec(ctx, `
 		INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
