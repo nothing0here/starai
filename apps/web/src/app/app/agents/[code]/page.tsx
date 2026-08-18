@@ -5,6 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import { api, apiForLocale } from "@/lib/api";
 import { SchemaForm, schemaDefaults } from "@/components/workbench/SchemaForm";
 import { useI18n } from "@/i18n/I18nProvider";
+import { NovelWorkshopLanding } from "@/components/workbench/NovelWorkshopLanding";
+import { NovelChapterList } from "@/components/workbench/NovelChapterList";
 
 interface Workflow {
   code: string;
@@ -13,6 +15,7 @@ interface Workflow {
   icon?: string;
   input_schema: Record<string, unknown>;
   nodes: { id: string; name: string; type: string }[];
+  runtime_config?: { roles?: any[] };
 }
 
 interface NodeRun {
@@ -87,13 +90,14 @@ export default function AgentWorkspacePage() {
     }, 1500);
   };
 
-  const run = async () => {
+  const run = async (inputs: Record<string, unknown> = form) => {
     setSubmitting(true);
     setError("");
     try {
+      setForm(inputs);
       const p = await api<Project>(`/api/agents/${code}/projects`, {
         method: "POST",
-        body: JSON.stringify({ inputs: form }),
+        body: JSON.stringify({ inputs }),
       });
       setProject(p);
       startPolling(p.public_id);
@@ -112,6 +116,43 @@ export default function AgentWorkspacePage() {
 
   if (!workflow) {
     return <div className="flex-1 p-8 text-center text-gray-400">{t("common.loading")}</div>;
+  }
+
+  // 检查是否是AI小说工坊
+  const isNovelWorkshop = workflow.code === 'ai_novel_workshop';
+  const roles = workflow.runtime_config?.roles || [];
+
+  // 如果是小说工坊且没有项目，显示自定义Landing页面
+  if (isNovelWorkshop && !project) {
+    return (
+      <div className="h-screen flex flex-col">
+        <NovelWorkshopLanding
+          workflowCode={workflow.code}
+          workflowName={workflow.name}
+          workflowDescription={workflow.description || ""}
+          roles={roles}
+          onSubmit={run}
+        />
+      </div>
+    );
+  }
+
+  if (isNovelWorkshop && project) {
+    const outputs = project.outputs || {};
+    const chapters = Array.isArray(outputs.chapters) ? outputs.chapters as any[] : [];
+    return (
+      <div className="flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8">
+        <div className="mx-auto max-w-5xl">
+          <button onClick={() => setProject(null)} className="mb-5 text-sm text-gray-400 hover:text-white">← 继续创作</button>
+          <div className="mb-6 flex items-center justify-between gap-4">
+            <div><h1 className="text-2xl font-bold">{workflow.name}</h1><p className="mt-1 text-sm text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : "AI 编辑部正在协作创作"}</p></div>
+            <span className="rounded-full border border-indigo-400/30 px-3 py-1 text-xs text-indigo-300">{project.status}</span>
+          </div>
+          <NovelChapterList chapters={chapters} currentChapter={Number(outputs.current_chapter || chapters.length)} totalChapters={Number(outputs.total_chapters || 0)} />
+          {project.error_message && <p className="mt-4 text-sm text-red-400">{project.error_message}</p>}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -134,8 +175,8 @@ export default function AgentWorkspacePage() {
         <div className="soft-card p-5 mb-6 space-y-4">
           <SchemaForm schema={workflow.input_schema} values={form} onChange={setForm} layout="stacked" />
           {error && <p className="text-danger text-sm">{error}</p>}
-          <button
-            onClick={run}
+            <button
+            onClick={() => run()}
             disabled={submitting || (project?.status === "running" || project?.status === "pending")}
             className="px-6 py-2.5 rounded-xl bg-primary text-dark font-semibold text-sm disabled:opacity-50"
           >

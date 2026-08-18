@@ -105,6 +105,9 @@ func processWorkflowTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token
 	if stringAny(runtimeCfg["agent_mode"]) == "subtitle_remove" {
 		return processSubtitleRemovalWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
 	}
+	if stringAny(runtimeCfg["agent_mode"]) == "novel_workshop" {
+		return processNovelWorkshopWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
+	}
 	if stringAny(runtimeCfg["agent_mode"]) == "simple_pipeline" {
 		return processSimpleAgentWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}

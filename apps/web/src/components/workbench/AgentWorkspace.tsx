@@ -24,6 +24,8 @@ import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } f
 import { useI18n } from "@/i18n/I18nProvider";
 import { VideoUpscaleWorkspace } from "./VideoUpscaleWorkspace";
 import { AgentLanding, type AgentDisplayStep } from "./AgentLanding";
+import { NovelWorkshopLanding } from "./NovelWorkshopLanding";
+import { NovelChapterList } from "./NovelChapterList";
 
 type DisplayStep = AgentDisplayStep;
 type DisplayConfig = {
@@ -48,6 +50,7 @@ type Workflow = {
     agent_mode?: string;
     generation_type?: string;
     preset_code?: string;
+    analysis_model_code?: string;
     require_image?: boolean;
     default_count?: number;
     generation_model_code?: string;
@@ -90,6 +93,7 @@ type AnalysisCandidate = { id: string; title?: string; reason?: string; prompt: 
 type Project = {
   public_id: string;
   status: string;
+  inputs?: Record<string, any>;
   outputs?: Record<string, any>;
   node_runs?: NodeRun[];
   media_tasks?: MediaTask[];
@@ -316,6 +320,7 @@ export function AgentWorkspace({ code }: { code: string }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyItems, setHistoryItems] = useState<ProjectListItem[]>([]);
+  const [novelModelCode, setNovelModelCode] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -372,6 +377,7 @@ export function AgentWorkspace({ code }: { code: string }) {
 
   const display = workflow?.display_config || {};
   const isComicDrama = workflow?.runtime_config?.agent_mode === "comic_drama" || workflow?.runtime_config?.preset_code === "ai_comic_drama";
+  const isNovelWorkshop = workflow?.runtime_config?.agent_mode === "novel_workshop" || workflow?.runtime_config?.preset_code === "novel_workshop" || workflow?.code === "ai_novel_workshop";
   const videoUtilityMode = workflow?.runtime_config?.agent_mode || workflow?.runtime_config?.preset_code;
   const isVideoUtility = ["video_upscale", "video_redraw", "subtitle_remove"].includes(videoUtilityMode || "");
   const workflowName = workflow ? td(`agent.${workflow.code}.name`, workflow.name) : "";
@@ -758,6 +764,73 @@ export function AgentWorkspace({ code }: { code: string }) {
     }
   };
 
+  const runNovel = async (inputs: Record<string, any>) => {
+    if (!workflow || submitting) return;
+    if (typeof inputs.model_code === "string" && inputs.model_code) setNovelModelCode(inputs.model_code);
+    setSubmitting(true);
+    setError("");
+    try {
+      const p = await api<Project>(`/api/agents/${code}/projects`, {
+        method: "POST",
+        body: JSON.stringify({ inputs: { ...inputs, _mode: inputs._mode === "step" ? "step" : "auto" } }),
+      });
+      setProject(p);
+      if (typeof p.inputs?.model_code === "string") setNovelModelCode(p.inputs.model_code);
+      startPolling(p.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "启动失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const reviseNovel = async (request: { chapterNumber?: number; instruction: string }) => {
+    const chapterLabel = request.chapterNumber ? `第${request.chapterNumber}章` : "整本小说大纲";
+    const currentChapters = Array.isArray(project?.outputs?.chapters) ? project.outputs.chapters as any[] : [];
+    const currentChapter = currentChapters.find((item) => Number(item.chapter_number) === request.chapterNumber);
+    const outline = project?.outputs?.planning?.outline;
+    await runNovel({
+      prompt: `请基于下面的现有小说资料生成一个修改后的新版本。需要修改的部分：${chapterLabel}。修改要求：${request.instruction}\n\n现有大纲：${JSON.stringify(outline || {}).slice(0, 12000)}${currentChapter ? `\n\n原章节正文：${String(currentChapter.polished_content || currentChapter.raw_content || "").slice(0, 12000)}` : ""}`,
+      genre: "玄幻",
+      word_count_target: "短篇·3万字内",
+      style: "轻松幽默",
+      language: "zh-CN",
+      ...(novelModelCode ? { model_code: novelModelCode } : {}),
+    });
+  };
+
+  const confirmNovelOutline = async () => {
+    if (!project) return;
+    setError("");
+    try {
+      await api(`/api/agent-projects/${project.public_id}/steps/confirm/confirm`, {
+        method: "POST",
+        body: JSON.stringify({ payload: { outline: project.outputs?.planning?.outline || {} } }),
+      });
+      const updated = await api<Project>(`/api/agent-projects/${project.public_id}`);
+      setProject(updated);
+      startPolling(project.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "大纲确认失败");
+    }
+  };
+
+  const confirmNovelBatch = async () => {
+    if (!project) return;
+    setError("");
+    try {
+      await api(`/api/agent-projects/${project.public_id}/steps/confirm/confirm`, {
+        method: "POST",
+        body: JSON.stringify({ payload: {} }),
+      });
+      const updated = await api<Project>(`/api/agent-projects/${project.public_id}`);
+      setProject(updated);
+      startPolling(project.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "继续创作失败");
+    }
+  };
+
   const confirmStep = async () => {
     if (!project) return;
     await api(`/api/agent-projects/${project.public_id}/steps/confirm/confirm`, {
@@ -813,9 +886,16 @@ export function AgentWorkspace({ code }: { code: string }) {
   };
 
   const loadHistory = async (id: string) => {
-    const p = await api<Project>(`/api/agent-projects/${id}`);
-    setProject(p);
-    setHistoryOpen(false);
+    try {
+      setError("");
+      const p = await api<Project>(`/api/agent-projects/${id}`);
+      setProject(p);
+      if (typeof p.inputs?.model_code === "string") setNovelModelCode(p.inputs.model_code);
+      setHistoryOpen(false);
+      if (p.status === "pending" || p.status === "running" || p.status === "waiting_confirm") startPolling(p.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "历史任务加载失败");
+    }
   };
 
   const uploadComicImage = async (file?: File | null, target: "project" | "style" = "project") => {
@@ -1025,6 +1105,42 @@ export function AgentWorkspace({ code }: { code: string }) {
   };
 
   if (!workflow) return <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">{ts("加载中...")}</div>;
+
+  if (isNovelWorkshop) {
+    const roles = (workflow.runtime_config as any)?.roles || [];
+    if (!project) {
+      return <NovelWorkshopLanding workflowCode={workflow.code} workflowName={workflowName} workflowDescription={workflowDescription} roles={roles} defaultModelCode={workflow.runtime_config?.generation_model_code || workflow.runtime_config?.analysis_model_code} error={error} onSubmit={runNovel} onLoadHistory={loadHistory} />;
+    }
+    const outputs = project.outputs || {};
+    const chapters = Array.isArray(outputs.chapters) ? outputs.chapters as any[] : [];
+    if (project.status === "waiting_confirm") {
+      const stage = String(outputs.current_stage || "");
+      if (stage === "batch_confirm") {
+        const done = chapters.length;
+        const total = Number(outputs.total_chapters || 0);
+        return <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8"><div className="mx-auto w-full max-w-5xl"><div className="mb-6"><h1 className="text-2xl font-bold">已完成 {done}{total > 0 ? ` / ${total}` : ""} 章，等待确认</h1><p className="mt-2 text-sm text-gray-400">逐步确认模式下，每完成一批章节都会在这里等你。确认后会继续创作后面的章节。</p></div><NovelChapterList chapters={chapters} currentChapter={done} totalChapters={total} onRequestRevision={reviseNovel} /><div className="mt-5 flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelBatch()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认并继续创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-white/15 px-5 py-2.5 text-sm text-gray-300 hover:bg-white/5">转智能托管，不再逐步确认</button></div>{error && <p className="mt-3 text-sm text-red-400">{error}</p>}</div></div>;
+      }
+      if (outputs.planning) {
+        const planning = outputs.planning as any;
+        const outline = planning.outline || {};
+        const volumes = Array.isArray(outline.volumes) ? outline.volumes : [];
+        return <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8"><div className="mx-auto w-full max-w-5xl"><div className="mb-6"><h1 className="text-2xl font-bold">故事策划完成，等待确认</h1><p className="mt-2 text-sm text-gray-400">确认大纲后，AI 编辑部会按章节逐步创作正文。</p></div><div className="mb-5 rounded-2xl border border-indigo-400/20 bg-white/[0.04] p-5"><h2 className="text-lg font-semibold">{planning.title || "未命名小说"}</h2><p className="mt-2 text-sm leading-6 text-gray-400">{planning.core_concept || planning.world_setting || "已完成世界观和故事规划"}</p><div className="mt-4 space-y-2">{volumes.flatMap((volume: any) => Array.isArray(volume.chapters) ? volume.chapters : []).map((chapter: any) => <div key={chapter.chapter_number} className="rounded-xl bg-white/[0.04] px-3 py-2"><span className="mr-2 text-xs text-indigo-300">第 {chapter.chapter_number} 章</span><span className="text-sm text-gray-200">{chapter.title}</span><p className="mt-1 text-xs text-gray-500">{chapter.summary}</p></div>)}</div></div><div className="flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelOutline()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认大纲并开始创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-white/15 px-5 py-2.5 text-sm text-gray-300 hover:bg-white/5">转智能托管，后续不再确认</button></div>{error && <p className="mt-3 text-sm text-red-400">{error}</p>}</div></div>;
+      }
+    }
+    return (
+      <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8">
+        <div className="mx-auto w-full max-w-5xl">
+          <button type="button" onClick={resetTask} className="mb-5 text-sm text-gray-400 hover:text-white">← 继续创作</button>
+          <div className="mb-6 flex items-center justify-between gap-4">
+            <div><h1 className="text-2xl font-bold">{workflowName}</h1><p className="mt-1 text-sm text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : "AI 编辑部正在协作创作"}</p></div>
+            <span className="rounded-full border border-indigo-400/30 px-3 py-1 text-xs text-indigo-300">{project.status}</span>
+          </div>
+          <NovelChapterList chapters={chapters} currentChapter={Number(outputs.current_chapter || chapters.length)} totalChapters={Number(outputs.total_chapters || 0)} onRequestRevision={reviseNovel} />
+          {project.error_message && <p className="mt-4 text-sm text-red-400">{project.error_message}</p>}
+        </div>
+      </div>
+    );
+  }
 
   if (isVideoUtility) {
     return <VideoUpscaleWorkspace workflow={workflow} />;

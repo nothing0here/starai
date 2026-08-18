@@ -6,18 +6,19 @@ import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2,
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
-type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama";
+type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
   system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
-  generation_type?: GenerationType;
+  generation_type?: GenerationType | "chat";
   preset_code?: string;
   require_image?: boolean;
   default_count?: number;
   candidate_count?: number;
+  batch_size?: number;
   creative_scenes?: string[];
   output_scenes?: string[];
   input_capabilities?: Record<string, boolean>;
@@ -238,6 +239,18 @@ const TYPE_PRESETS = {
     featureTags: ["剧本规划", "角色一致", "关键帧", "视频合成"],
     defaults: { require_image: false, allow_text_only: true, support_reference_image: true, support_multiple_references: true, support_first_last_frame: false },
   },
+  novel_workshop: {
+    label: "AI小说工坊",
+    icon: "📖",
+    theme: "indigo",
+    description: "一句话创意，让AI帮你写完一整本书。多位AI编辑协同作战，大纲逐章确认、设定全程追踪、写完自动润色审校。",
+    placeholder: "例如：写一本关于未来世界的科幻小说，主角是AI研究员...",
+    help: "输入故事创意，选择题材、字数和文风。系统自动规划故事结构、生成章节、润色文笔并完成审校。逐步确认模式会在大纲确认后暂停，智能托管会自动完成全部章节创作。",
+    imageLabel: "资产",
+    heroTags: ["文学创作", "AI编辑部", "多角色协同"],
+    featureTags: ["设定永不崩", "文风统一", "全程对话可控", "整本打包下载"],
+    defaults: { require_image: false, allow_text_only: true, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
+  },
 } as const;
 
 const isVideoUtilityType = (type: GenerationType) => ["video_upscale", "video_redraw", "subtitle_remove"].includes(type);
@@ -278,6 +291,14 @@ const defaultNodes = (analysis = "", generation = "", type: GenerationType = "im
       { id: "compose", type: "video", name: "视频合成", model_code: "", prompt_template: "", cost: 0 },
     ];
   }
+  if (type === "novel_workshop") {
+    return [
+      { id: "planning", type: "llm", name: "故事策划", model_code: analysis || generation, prompt_template: "", cost: 0.1 },
+      { id: "writing", type: "llm", name: "章节创作", model_code: generation, prompt_template: "", cost: 0.05 },
+      { id: "polishing", type: "llm", name: "润色审校", model_code: generation, prompt_template: "", cost: 0.03 },
+      { id: "archiving", type: "llm", name: "档案更新", model_code: generation, prompt_template: "", cost: 0.02 },
+    ];
+  }
   return [
     { id: "analysis", type: "llm", name: "需求分析", model_code: analysis, prompt_template: "", cost: 0 },
     { id: "generate", type, name: "生成结果", model_code: generation, prompt_template: "", cost: 0 },
@@ -313,6 +334,15 @@ const defaultSchema = (count = 1, type: GenerationType = "image", form?: FormSta
     subtitle_region: { type: "string", title: "字幕区域", enum: ["bottom_15", "bottom_25", "bottom_35", "full"], default: form?.default_subtitle_region || "bottom_25" },
     protect_watermark: { type: "boolean", title: "保护水印", default: form?.protect_watermark !== false },
   },
+}) : type === "novel_workshop" ? ({
+  type: "object",
+  properties: {
+    prompt: { type: "string", title: "故事创意", placeholder: "例如：写一本关于未来世界的科幻小说，主角是AI研究员...", "x-widget": "textarea" },
+    genre: { type: "string", title: "题材类型", enum: ["玄幻", "都市", "言情", "悬疑", "科幻", "历史", "武侠", "游戏", "现实"], default: "玄幻", "x-widget": "option_menu" },
+    word_count_target: { type: "string", title: "目标篇幅", enum: ["短篇·3万字内", "中篇·约15万字", "长篇·50万字以上"], default: "中篇·约15万字", "x-widget": "option_menu" },
+    style: { type: "string", title: "文风", enum: ["轻松幽默", "严肃正经", "诗意唯美", "节奏紧凑"], default: "轻松幽默", "x-widget": "option_menu" },
+    language: { type: "string", title: "生成语言", default: "zh-CN" },
+  },
 }) : ({
   type: "object",
   properties: {
@@ -347,6 +377,13 @@ function displayConfig(form: FormState) {
         { icon: "🖼️", title: "关键帧生成", subtitle: "按分镜生成角色与画风一致的关键帧", tags: ["角色一致", "失败重试"] },
         { icon: "🎬", title: "分段视频生成", subtitle: "关键帧驱动各分镜视频片段", tags: ["时长适配", "进度跟踪"] },
         { icon: "🎞️", title: "视频合成", subtitle: "合并全部分镜并生成最终漫剧成片", tags: ["顺序合成", "作品入库"] },
+      ]
+    : form.generation_type === "novel_workshop"
+    ? [
+        { icon: "📝", title: "故事策划", subtitle: "总编确定选题、人物设定、卷章大纲", tags: ["创意分析", "角色设定", "大纲规划"] },
+        { icon: "📖", title: "逐章开写", subtitle: "章节写手按大纲和设定档案逐章写作", tags: ["分章节", "情节展开", "边写边审"] },
+        { icon: "✍️", title: "润色审校", subtitle: "文学润色师优化文笔，审校员把关设定一致性", tags: ["风格统一", "语言打磨", "台账校验"] },
+        { icon: "✅", title: "成书交付", subtitle: "档案员更新台账，整本导出Word/TXT文档", tags: ["质量把关", "格式整理", "打包下载"] },
       ]
     : [
         { icon: "🔎", title: "需求智能分析", subtitle: "AI 根据输入和参考图理解目标效果", tags: ["需求识别", "素材分析"] },
@@ -451,6 +488,30 @@ function runtimeConfig(form: FormState): RuntimeConfig {
         allow_text_only: form.allow_text_only,
         support_reference_image: form.support_reference_image,
         support_multiple_references: form.support_multiple_references,
+        support_first_last_frame: false,
+      },
+      flow_options: {
+        enable_step_confirm: form.enable_step_confirm,
+        enable_autopilot: form.enable_autopilot,
+        allow_prompt_edit: form.allow_prompt_edit,
+      },
+    };
+  }
+  if (form.generation_type === "novel_workshop") {
+    return {
+      agent_mode: "novel_workshop",
+      analysis_model_code: form.analysis_model_code,
+      generation_model_code: form.generation_model_code,
+      generation_type: "chat",
+      preset_code: "novel_workshop",
+      default_count: 1,
+      candidate_count: 1,
+      creative_scenes: ["novel_creation"],
+      batch_size: 10,
+      input_capabilities: {
+        allow_text_only: true,
+        support_reference_image: false,
+        support_multiple_references: false,
         support_first_last_frame: false,
       },
       flow_options: {
@@ -582,6 +643,7 @@ function typeFromRuntime(runtime: RuntimeConfig, category: string): GenerationTy
   if (runtime.agent_mode === "video_redraw" || runtime.preset_code === "video_redraw") return "video_redraw";
   if (runtime.agent_mode === "subtitle_remove" || runtime.preset_code === "subtitle_remove") return "subtitle_remove";
   if (runtime.agent_mode === "comic_drama" || runtime.preset_code === "ai_comic_drama") return "comic_drama";
+  if (runtime.agent_mode === "novel_workshop" || runtime.preset_code === "novel_workshop") return "novel_workshop";
   if (runtime.generation_type === "video" || category === "video" || runtime.preset_code === "product_showcase_video" || runtime.preset_code === "image_to_video") return "video";
   return "image";
 }
@@ -747,7 +809,7 @@ export default function AgentsAdminPage() {
             ...(item?.document && typeof item.document === "object" ? { document: item.document } : {}),
           }))
         : DEFAULT_CANVAS_TEMPLATES.map((item) => ({ ...item })),
-      preset_override: runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas"
+      preset_override: runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas" || runtime.agent_mode === "novel_workshop"
         ? {
             display_config: w.display_config || {},
             runtime_config: runtime,
@@ -850,7 +912,7 @@ export default function AgentsAdminPage() {
       category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
+      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
       generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
@@ -927,7 +989,7 @@ export default function AgentsAdminPage() {
               {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />选择智能体类型</div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama"] as GenerationType[]).map((type) => {
+                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama", "novel_workshop"] as GenerationType[]).map((type) => {
                     const preset = TYPE_PRESETS[type];
                     const active = form.generation_type === type;
                     return (
@@ -994,7 +1056,7 @@ export default function AgentsAdminPage() {
               {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
                 {!isVideoUtilityType(form.generation_type) && <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>}
-                {form.generation_type !== "comic_drama" && (
+                {form.generation_type !== "comic_drama" && form.generation_type !== "novel_workshop" && (
                   <Field label={form.generation_type === "video_upscale" ? "视频超分模型" : form.generation_type === "video_redraw" ? "视频转绘模型" : form.generation_type === "subtitle_remove" ? "硬字幕 AI 修复模型（可选）" : form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}>
                     <select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}>
                       <option value="">{form.generation_type === "subtitle_remove" ? "不配置（仅支持独立字幕轨）" : "请选择生成模型"}</option>{generationModels.map((m) => {
@@ -1051,6 +1113,15 @@ export default function AgentsAdminPage() {
                       <p className="mt-1.5 text-[11px] text-gray-400">主模型异常、超时或返回无效内容时，将按这里的顺序自动尝试备用模型。</p>
                     </Field>
                   </>
+                )}
+                {form.generation_type === "novel_workshop" && (
+                  <Field label="生成大模型（用于章节创作）">
+                    <select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}>
+                      <option value="">请选择chat模型</option>
+                      {chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}
+                    </select>
+                    <p className="mt-1.5 text-[11px] text-gray-400">用于章节创作、润色审校等所有文本生成环节。建议选择长上下文的chat模型。</p>
+                  </Field>
                 )}
                 {!isVideoUtilityType(form.generation_type) && <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>}
                 {!isVideoUtilityType(form.generation_type) && <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>}

@@ -549,3 +549,5 @@ body {
     max-height: none;
   }
 }
+ .hero-tag { border: 1px solid rgb(229 231 235); border-radius: 999px; background: rgb(255 255 255 / .7); padding: .3rem .7rem; color: rgb(107 114 128); font-size: .7rem; }
+ .dark .hero-tag { border-color: rgb(255 255 255 / .1); background: rgb(255 255 255 / .05); color: rgb(203 213 225); }
