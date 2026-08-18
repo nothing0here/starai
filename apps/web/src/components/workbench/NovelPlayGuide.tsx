@@ -120,7 +120,7 @@ export function NovelPlayGuide({ open, onClose }: NovelPlayGuideProps) {
                   <span className="text-xs text-indigo-400 font-medium">YOU</span>
                 </div>
                 <div className="flex-1 p-3 bg-gray-800/50 rounded-lg border border-gray-700">
-                  <p className="text-gray-300">"第3章节奏太慢，冲突再激烈一点"</p>
+                  <p className="text-gray-300">“第3章节奏太慢，冲突再激烈一点”</p>
                 </div>
               </div>
               <div className="flex gap-3">
