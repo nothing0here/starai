@@ -2100,7 +2100,14 @@ func workflowActualCost(ctx context.Context, pool *pgxpool.Pool, projectID int64
 	if mediaCost <= 0 {
 		mediaCost = floatAny(outputs["cost"])
 	}
-	return selectWorkflowActualCost(base, nodeCost, mediaCost)
+	usage := selectWorkflowActualCost(0, nodeCost, mediaCost)
+	if usage > 0 {
+		if base := workflowUsageBaseCost(ctx, pool, projectID); base > 0 {
+			// 工作流费 + 大模型用量费；用量取 min(上游真实成本, 模型设定售价)
+			usage = base + workflowModelUsageCost(ctx, pool, projectID, nodeCost)
+		}
+	}
+	return selectWorkflowActualCost(base, usage, 0)
 }
 
 func workflowAccruedCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
@@ -2115,7 +2122,51 @@ func workflowAccruedCost(ctx context.Context, pool *pgxpool.Pool, projectID int6
 	if chapterCost := workflowChapterCost(ctx, pool, projectID, -1); chapterCost > 0 {
 		return chapterCost
 	}
+	// model_actual：已产生用量时收取 工作流费 + min(上游真实成本, 模型设定售价)。
+	if base := workflowUsageBaseCost(ctx, pool, projectID); base > 0 {
+		return base + workflowModelUsageCost(ctx, pool, projectID, nodeCost)
+	}
 	return nodeCost
+}
+
+// workflowModelUsageCost 大模型用量费 = min(上游真实成本, 按模型设定单价计算的售价)。
+// 上游真实成本来自线路记录的 provider_cost（按 request_id 前缀归集本项目）；
+// 未配置线路成本时退化为模型售价，保证不免费。
+func workflowModelUsageCost(ctx context.Context, pool *pgxpool.Pool, projectID int64, nodeCost float64) float64 {
+	provider := workflowUpstreamProviderCost(ctx, pool, projectID)
+	if provider <= 0 {
+		return nodeCost
+	}
+	if nodeCost > 0 && provider > nodeCost {
+		return nodeCost
+	}
+	return provider
+}
+
+// workflowUpstreamProviderCost 汇总本项目 LLM 调用的上游真实成本。
+// 每个 request_id 取最后一次成功调用的成本，避免重试重复累计；
+// request_id 模式：novel_planning_<pid> 与 novel_{write|polish|archive}_<pid>_ch<n>。
+func workflowUpstreamProviderCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
+	var total float64
+	err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(latest_cost), 0) FROM (
+			SELECT DISTINCT ON (request_id) provider_cost AS latest_cost
+			FROM model_route_attempts
+			WHERE status='SUCCESS' AND provider_cost IS NOT NULL
+			  AND (request_id = $1
+			       OR request_id LIKE $2
+			       OR request_id LIKE $3
+			       OR request_id LIKE $4)
+			ORDER BY request_id, id DESC
+		) t`,
+		fmt.Sprintf("novel_planning_%d", projectID),
+		fmt.Sprintf("novel_write_%d_ch%%", projectID),
+		fmt.Sprintf("novel_polish_%d_ch%%", projectID),
+		fmt.Sprintf("novel_archive_%d_ch%%", projectID)).Scan(&total)
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 // workflowChapterCost 计算按章计费（per_chapter）的累计费用：
@@ -2183,18 +2234,33 @@ func selectWorkflowActualCost(flatPrice, nodeCost, mediaCost float64) float64 {
 	return 0
 }
 
-func workflowBaseCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
+func workflowPriceRule(ctx context.Context, pool *pgxpool.Pool, projectID int64) map[string]interface{} {
 	var raw []byte
 	if err := pool.QueryRow(ctx, `
 		SELECT COALESCE(w.price_rule, '{}'::jsonb)
 		FROM workflow_projects p
 		JOIN workflow_definitions w ON w.id=p.workflow_id
 		WHERE p.id=$1`, projectID).Scan(&raw); err != nil {
-		return 0
+		return map[string]interface{}{}
 	}
 	rule := map[string]interface{}{}
 	_ = json.Unmarshal(raw, &rule)
+	return rule
+}
+
+func workflowBaseCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
+	rule := workflowPriceRule(ctx, pool, projectID)
 	if stringAny(rule["billing_type"]) != "per_request" {
+		return 0
+	}
+	return floatAny(rule["unit_price"])
+}
+
+// workflowUsageBaseCost 返回 model_actual 计费的工作流基础费（工作流费）。
+// 总费用 = 工作流费 + 大模型实际用量费用；历史 model_actual 工作流单价为 0，不受影响。
+func workflowUsageBaseCost(ctx context.Context, pool *pgxpool.Pool, projectID int64) float64 {
+	rule := workflowPriceRule(ctx, pool, projectID)
+	if stringAny(rule["billing_type"]) != "model_actual" {
 		return 0
 	}
 	return floatAny(rule["unit_price"])

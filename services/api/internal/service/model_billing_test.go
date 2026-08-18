@@ -85,6 +85,14 @@ func TestEstimateAgentProjectCostUsesRuntimeForModelActual(t *testing.T) {
 	}
 }
 
+func TestEstimateAgentProjectCostAddsWorkflowFeeForModelActual(t *testing.T) {
+	got := estimateAgentProjectCost(map[string]interface{}{"billing_type": "model_actual", "unit_price": float64(0.1)}, nil, 0.15, 0.27)
+	// 冻结 = 工作流费 0.1 + 用量估算 0.27
+	if math.Abs(got-0.37) > 0.000000001 {
+		t.Fatalf("cost = %v, want workflow fee + usage 0.37", got)
+	}
+}
+
 func TestEstimateAgentProjectCostForPerChapter(t *testing.T) {
 	rule := map[string]interface{}{
 		"billing_type": "per_chapter", "unit_price": float64(0.2),

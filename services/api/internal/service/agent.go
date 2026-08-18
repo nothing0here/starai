@@ -287,13 +287,15 @@ func estimateAgentProjectCost(priceRule, inputs map[string]interface{}, nodeEsti
 	if stringValue(priceRule["billing_type"]) == "per_chapter" {
 		return chapterBasedCost(priceRule, novelChapterEstimate(inputs))
 	}
-	if runtimeEstimate > 0 {
-		return runtimeEstimate
+	usage := runtimeEstimate
+	if usage <= 0 {
+		usage = nodeEstimate
 	}
-	if nodeEstimate > 0 {
-		return nodeEstimate
+	if usage <= 0 {
+		return 0
 	}
-	return 0
+	// model_actual/dynamic：冻结 工作流费 + 模型用量估算。
+	return floatValue(priceRule["unit_price"]) + usage
 }
 
 func mergeVideoUpscaleRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
@@ -1707,6 +1709,16 @@ func (s *AgentService) accruedWorkflowCost(ctx context.Context, projectID int64)
 		if chapterCost := chapterBasedCost(rule, floatValue(outputs["current_chapter"])); chapterCost > 0 {
 			cumulativeCost = chapterCost
 		}
+	default:
+		// model_actual/dynamic：已产生用量时收取 工作流费 + 大模型用量费；
+		// 用量取 min(上游真实成本, 按模型设定单价计算的售价)，与完成结算口径一致。
+		if nodeCost > 0 {
+			usage := nodeCost
+			if provider := s.workflowUpstreamProviderCost(ctx, projectID); provider > 0 && provider < usage {
+				usage = provider
+			}
+			cumulativeCost = usage + floatValue(rule["unit_price"])
+		}
 	}
 	if cumulativeCost < 0 {
 		cumulativeCost = 0
@@ -1939,6 +1951,31 @@ func chapterBasedCost(rule map[string]interface{}, chapters float64) float64 {
 		cost = 0
 	}
 	return cost
+}
+
+// workflowUpstreamProviderCost 汇总小说工坊项目 LLM 调用的上游真实成本，
+// 与 worker 端结算口径保持一致（每个 request_id 取最后一次成功调用）。
+func (s *AgentService) workflowUpstreamProviderCost(ctx context.Context, projectID int64) float64 {
+	var total float64
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(latest_cost), 0) FROM (
+			SELECT DISTINCT ON (request_id) provider_cost AS latest_cost
+			FROM model_route_attempts
+			WHERE status='SUCCESS' AND provider_cost IS NOT NULL
+			  AND (request_id = $1
+			       OR request_id LIKE $2
+			       OR request_id LIKE $3
+			       OR request_id LIKE $4)
+			ORDER BY request_id, id DESC
+		) t`,
+		fmt.Sprintf("novel_planning_%d", projectID),
+		fmt.Sprintf("novel_write_%d_ch%%", projectID),
+		fmt.Sprintf("novel_polish_%d_ch%%", projectID),
+		fmt.Sprintf("novel_archive_%d_ch%%", projectID)).Scan(&total)
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 func normalizeVideoRedrawAgentInput(in AgentUpsertInput) AgentUpsertInput {
