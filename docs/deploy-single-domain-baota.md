@@ -36,6 +36,7 @@ https://yourdomain.com/admin-assets/*  管理后台静态资源
 
 ```text
 /                         转发到 web
+/assets/*                 转发到 web 内置静态资源（头像、风格图等）
 /_next/static/*           转发到 web 静态资源
 /admin*                   转发到 admin
 /admin-assets/_next/*     转发到 admin 静态资源
@@ -46,6 +47,8 @@ https://yourdomain.com/admin-assets/*  管理后台静态资源
 ```
 
 不要把后台静态资源也放到 `/_next/*`，否则会和前台 Next.js 静态资源冲突。
+
+`/assets/*` 是前台和后台代码引用的内置图片（如写真馆角色头像、漫画风格图），由 web 容器的 Next.js 直接提供。必须用 `^~ /assets/` 前缀规则转发：宝塔面板默认配置里常有 `location ~ .*\.(png|jpg|jpeg|gif)$` 这类静态文件正则规则，正则规则优先于普通的 `location /`，会把 `.png` 请求截留在网站根目录查找而返回 404；`^~` 前缀匹配优先级高于正则，可以确保 `/assets/*` 一定转发到 web。
 
 ## 2. 服务器准备
 
@@ -378,6 +381,21 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         expires 30d;
         add_header Cache-Control "public, max-age=2592000, immutable";
+    }
+
+    # Built-in app images (photo studio avatars, comic style icons, etc.)
+    # served by the web Next.js container. ^~ prefix must win over any
+    # Baota default regex rule like `location ~ .*\.(png|jpg|jpeg|gif)$`,
+    # otherwise those requests 404 against the site root directory.
+    location ^~ /assets/ {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800";
     }
 
     location ^~ /admin {
