@@ -14,7 +14,7 @@ for (const up of ups) {
   if (!downs.has(down)) errors.push(`missing rollback migration: ${down}`);
 }
 
-const legacyDuplicateNumbers = new Set(["018", "020"]);
+const legacyDuplicateNumbers = new Set(["018", "020", "081"]);
 const byNumber = new Map();
 for (const up of ups) {
   const number = up.match(/^(\d+)_/)?.[1];

@@ -1,0 +1,2 @@
+﻿ [{"type": "image", "output": {"images": [{"url": "http://localhost:9000/starai-works/works/image/task_1787223328353810100_wf01/image_1_1787223423004335100.mp4"}], "image_url": "http://localhost:9000/starai-works/works/image/task_1787223328353810100_wf01/image_1_1787223423004335100.mp4", "upstream_task_id": "task_xhi2MyVNBM9NWroNnukHxNHIcoGwOxcb"}, "status": "succeeded", "task_no": "task_1787223328353810100_wf01", "progress": 100, "actual_cost": 0.08, "estimated_cost": 0.08}]
+

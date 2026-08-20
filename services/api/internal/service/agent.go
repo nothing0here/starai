@@ -244,6 +244,12 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 			return nil, err
 		}
 	}
+	if stringValue(def.RuntimeConfig["agent_mode"]) == "photo_studio" {
+		inputs = mergePhotoStudioRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validatePhotoStudioRequest(ctx, def.RuntimeConfig, inputs); err != nil {
+			return nil, err
+		}
+	}
 	nodeEstimate := 0.0
 	for _, node := range def.Nodes {
 		nodeEstimate += node.Cost
@@ -455,6 +461,63 @@ func normalizeAgentVideoSource(inputs map[string]interface{}) error {
 	inputs["video_url"] = sourceVideo
 	inputs["source_video_url"] = sourceVideo
 	inputs["reference_videos"] = []string{sourceVideo}
+	return nil
+}
+
+func mergePhotoStudioRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
+	if inputs == nil {
+		inputs = map[string]interface{}{}
+	}
+	if stringValue(inputs["photo_type"]) == "" {
+		inputs["photo_type"] = "写真"
+	}
+	if stringValue(inputs["photo_type"]) != "证件照" && stringValue(inputs["style"]) == "" {
+		inputs["style"] = "影棚质感"
+	}
+	if stringValue(inputs["id_background"]) == "" {
+		inputs["id_background"] = "白色"
+	}
+	if intFromAgentAny(inputs["count"]) <= 0 {
+		inputs["count"] = positiveAgentInt(intFromAgentAny(runtimeCfg["default_count"]), 1)
+	}
+	if stringValue(inputs["aspect_ratio"]) == "" {
+		inputs["aspect_ratio"] = "3:4"
+	}
+	if stringValue(inputs["_mode"]) == "" {
+		inputs["_mode"] = "auto"
+	}
+	return inputs
+}
+
+func (s *AgentService) validatePhotoStudioRequest(ctx context.Context, runtimeCfg, inputs map[string]interface{}) error {
+	if stringValue(inputs["image_url"]) == "" && len(agentStringSlice(inputs["reference_images"], nil)) == 0 {
+		return errors.New("请先上传一张本人照片")
+	}
+	photoTypes := map[string]bool{"写真": true, "职业照": true, "证件照": true}
+	if !photoTypes[stringValue(inputs["photo_type"])] {
+		return errors.New("写真类型无效")
+	}
+	if stringValue(inputs["photo_type"]) == "证件照" {
+		backgrounds := map[string]bool{"白色": true, "蓝色": true, "红色": true}
+		if !backgrounds[stringValue(inputs["id_background"])] {
+			return errors.New("证件照底色无效")
+		}
+	}
+	count := intFromAgentAny(inputs["count"])
+	if count < 1 || count > 8 {
+		return errors.New("生成张数必须在 1 到 8 之间")
+	}
+	code := firstAgentString(stringValue(inputs["model_code"]), stringValue(runtimeCfg["generation_model_code"]))
+	if code == "" {
+		return errors.New("写真馆工作流尚未配置图片模型，请联系管理员")
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM models WHERE code=$1 AND category='image' AND is_enabled=true)`, code).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("图片模型不存在、类型不匹配或已停用：%s", code)
+	}
 	return nil
 }
 
@@ -1336,6 +1399,17 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		}
 		return total
 	}
+	if stringValue(runtimeCfg["agent_mode"]) == "photo_studio" {
+		if code := stringValue(runtimeCfg["analysis_model_code"]); code != "" {
+			total += s.estimateModelCostByCode(ctx, code, inputs, 500, 600)
+		}
+		if code := firstAgentString(stringValue(inputs["model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+			params := copyAgentMap(inputs)
+			params["n"] = positiveAgentInt(intFromAgentAny(inputs["count"]), positiveAgentInt(intFromAgentAny(runtimeCfg["default_count"]), 1))
+			total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
+		}
+		return total
+	}
 	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
 		maxRetry := intFromAgentAny(firstAgentNonNil(inputs["max_retry"], runtimeCfg["max_retry"]))
 		if maxRetry < 0 {
@@ -1683,9 +1757,18 @@ func (s *AgentService) CancelProject(ctx context.Context, userID int64, publicID
 }
 
 func (s *AgentService) accruedWorkflowCost(ctx context.Context, projectID int64) (float64, float64, error) {
+	return accruedWorkflowCostDB(ctx, s.db, projectID)
+}
+
+// queryRower 允许累计成本计算在 AgentService 与 OpsService 间复用。
+type queryRower interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+}
+
+func accruedWorkflowCostDB(ctx context.Context, db queryRower, projectID int64) (float64, float64, error) {
 	var raw, outputsRaw []byte
 	var nodeCost, settledCost float64
-	if err := s.db.QueryRow(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT COALESCE(w.price_rule, '{}'::jsonb),
 		       COALESCE((SELECT SUM(n.cost) FROM workflow_node_runs n WHERE n.project_id=p.id), 0),
 		       p.actual_cost,
@@ -1714,7 +1797,7 @@ func (s *AgentService) accruedWorkflowCost(ctx context.Context, projectID int64)
 		// 用量取 min(上游真实成本, 按模型设定单价计算的售价)，与完成结算口径一致。
 		if nodeCost > 0 {
 			usage := nodeCost
-			if provider := s.workflowUpstreamProviderCost(ctx, projectID); provider > 0 && provider < usage {
+			if provider := workflowUpstreamProviderCostDB(ctx, db, projectID); provider > 0 && provider < usage {
 				usage = provider
 			}
 			cumulativeCost = usage + floatValue(rule["unit_price"])
@@ -1956,8 +2039,12 @@ func chapterBasedCost(rule map[string]interface{}, chapters float64) float64 {
 // workflowUpstreamProviderCost 汇总小说工坊项目 LLM 调用的上游真实成本，
 // 与 worker 端结算口径保持一致（每个 request_id 取最后一次成功调用）。
 func (s *AgentService) workflowUpstreamProviderCost(ctx context.Context, projectID int64) float64 {
+	return workflowUpstreamProviderCostDB(ctx, s.db, projectID)
+}
+
+func workflowUpstreamProviderCostDB(ctx context.Context, db queryRower, projectID int64) float64 {
 	var total float64
-	err := s.db.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		SELECT COALESCE(SUM(latest_cost), 0) FROM (
 			SELECT DISTINCT ON (request_id) provider_cost AS latest_cost
 			FROM model_route_attempts

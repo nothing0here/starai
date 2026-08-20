@@ -108,6 +108,9 @@ func processWorkflowTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token
 	if stringAny(runtimeCfg["agent_mode"]) == "novel_workshop" {
 		return processNovelWorkshopWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}
+	if stringAny(runtimeCfg["agent_mode"]) == "photo_studio" {
+		return processPhotoStudioWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
+	}
 	if stringAny(runtimeCfg["agent_mode"]) == "simple_pipeline" {
 		return processSimpleAgentWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}
@@ -2219,6 +2222,58 @@ func incrementalChargeAmount(cumulativeCost, settledCost float64) float64 {
 		return 0
 	}
 	return incremental
+}
+
+// chargeStepBilling 逐步确认模式下的分段扣费：进入等待确认前，
+// 按已完成步骤的累计成本增量扣费（完成一步扣一次），冻结额度相应缩减，
+// 剩余额度继续担保后续步骤；结算进度记录在 actual_cost 供后续增量结算使用。
+// 与最终完成结算（chargeBillingWithFinalize）互不重复：后者只收累计成本减去 actual_cost 的差额。
+func chargeStepBilling(ctx context.Context, pool *pgxpool.Pool, userID, projectID int64, publicID string, cumulativeCost float64) error {
+	var settled float64
+	if err := pool.QueryRow(ctx, `SELECT COALESCE(actual_cost,0) FROM workflow_projects WHERE id=$1`, projectID).Scan(&settled); err != nil {
+		return err
+	}
+	charge := incrementalChargeAmount(cumulativeCost, settled)
+	if charge <= 0 {
+		return nil
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var balance, frozen float64
+	if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1 FOR UPDATE`, userID).Scan(&balance, &frozen); err != nil {
+		return err
+	}
+	locked, err := lockedFreezeAmount(ctx, tx, userID, "workflow", publicID)
+	if err != nil {
+		return err
+	}
+	if locked <= 0 {
+		return nil
+	}
+	if charge > locked {
+		charge = locked
+	}
+	newBalance := balance - charge
+	newFrozen := frozen - charge
+	if newFrozen < 0 {
+		newFrozen = 0
+	}
+	if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, newBalance, newFrozen, userID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET amount=GREATEST(amount-$1,0) WHERE user_id=$2 AND ref_type='workflow' AND ref_id=$3 AND status='frozen'`, charge, userID, publicID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark) VALUES ($1,'workflow_usage','out',$2,$3,'workflow',$4,'工作流分段扣费')`, userID, charge, newBalance, publicID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE workflow_projects SET actual_cost=actual_cost+$1, updated_at=now() WHERE id=$2`, charge, projectID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func selectWorkflowActualCost(flatPrice, nodeCost, mediaCost float64) float64 {

@@ -6,7 +6,9 @@ import { api, apiForLocale } from "@/lib/api";
 import { SchemaForm, schemaDefaults } from "@/components/workbench/SchemaForm";
 import { useI18n } from "@/i18n/I18nProvider";
 import { NovelWorkshopLanding } from "@/components/workbench/NovelWorkshopLanding";
+import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "@/components/workbench/PhotoStudioLanding";
 import { NovelChapterList } from "@/components/workbench/NovelChapterList";
+import { Loader2 } from "lucide-react";
 
 interface Workflow {
   code: string;
@@ -31,6 +33,7 @@ interface NodeRun {
 interface Project {
   public_id: string;
   status: string;
+  inputs?: Record<string, any>;
   outputs: Record<string, unknown>;
   actual_cost: number;
   error_message?: string;
@@ -40,6 +43,30 @@ interface Project {
 const STATUS_KEY: Record<string, string> = {
   pending: "status.pending", running: "status.running", succeeded: "status.succeeded", failed: "status.failed",
 };
+
+// 写真馆照片单元：按任务状态展示生成中/失败/成片，图片加载失败时降级为失败态，避免破图图标
+function PhotoStudioCell({ item, index }: { item: any; index: number }) {
+  const [broken, setBroken] = useState(false);
+  const out = item.output || {};
+  const url = String(out.image_url || (Array.isArray(out.images) && out.images[0]?.url) || "");
+  if (item.status === "succeeded" && url && !broken) {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" className="overflow-hidden rounded-2xl border border-fuchsia-100 bg-white shadow-sm dark:border-white/10 dark:bg-white/5">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={url} alt={`写真 ${index + 1}`} onError={() => setBroken(true)} className="aspect-[3/4] w-full object-cover" />
+      </a>
+    );
+  }
+  if (item.status === "failed" || broken) {
+    return <div className="flex aspect-[3/4] items-center justify-center rounded-2xl border border-red-100 bg-red-50/60 text-xs text-red-400 dark:border-red-400/20 dark:bg-red-500/10 dark:text-red-300">生成失败</div>;
+  }
+  return (
+    <div className="flex aspect-[3/4] flex-col items-center justify-center gap-2 rounded-2xl bg-fuchsia-100/60 dark:bg-white/5">
+      <Loader2 size={20} className="animate-spin text-fuchsia-400" />
+      <span className="text-xs text-fuchsia-500 dark:text-fuchsia-300">生成中…</span>
+    </div>
+  );
+}
 
 export default function AgentWorkspacePage() {
   const params = useParams();
@@ -51,6 +78,7 @@ export default function AgentWorkspacePage() {
   const [project, setProject] = useState<Project | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [photoInputKey, setPhotoInputKey] = useState(0);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -114,13 +142,127 @@ export default function AgentWorkspacePage() {
     startPolling(project.public_id);
   };
 
+  const loadHistory = async (id: string) => {
+    try {
+      setError("");
+      const p = await api<Project>(`/api/agent-projects/${id}`);
+      setProject(p);
+      if (p.status === "pending" || p.status === "running" || p.status === "waiting_confirm") startPolling(p.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "历史记录加载失败");
+    }
+  };
+
+  const confirmPhotoPlan = async (prompt: string) => {
+    if (!project) return;
+    setError("");
+    try {
+      await api(`/api/agent-projects/${project.public_id}/steps/confirm/confirm`, {
+        method: "POST",
+        body: JSON.stringify({ payload: { prompt } }),
+      });
+      const p = await api<Project>(`/api/agent-projects/${project.public_id}`);
+      setProject(p);
+      startPolling(p.public_id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("agentRun.startFailed"));
+    }
+  };
+
   if (!workflow) {
     return <div className="flex-1 p-8 text-center text-gray-400">{t("common.loading")}</div>;
   }
 
   // 检查是否是AI小说工坊
   const isNovelWorkshop = workflow.code === 'ai_novel_workshop';
+  const isPhotoStudio = workflow.code === 'ai_photo_studio';
   const roles = workflow.runtime_config?.roles || [];
+
+  // 如果是写真馆，采用展示区 + 底部常驻输入栏结构（提交后不跳转）
+  if (isPhotoStudio) {
+    const photoBar = <PhotoStudioInputBar key={photoInputKey} defaultModelCode={(workflow.runtime_config as any)?.generation_model_code} error={error} onSubmit={run} />;
+    if (!project) {
+      return (
+        <div className="relative flex h-screen flex-col overflow-hidden bg-[#fdf0f9] text-gray-900 dark:bg-[#0a0510] dark:text-white">
+          <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.06)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.06)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(232,121,249,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(232,121,249,.08)_1px,transparent_1px)]" />
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto">
+            <PhotoStudioLanding
+              workflowCode={workflow.code}
+              workflowName={workflow.name}
+              workflowDescription={workflow.description || ""}
+              roles={roles}
+              onNewTask={() => { setProject(null); setPhotoInputKey((k) => k + 1); }}
+            />
+          </div>
+          {photoBar}
+        </div>
+      );
+    }
+    const outputs = project.outputs || {};
+    const styling = (outputs.styling || {}) as Record<string, any>;
+    const mediaItems = Array.isArray(outputs.media_tasks) ? outputs.media_tasks as any[] : [];
+    const photoInFlight = project.status === "pending" || project.status === "running";
+    const extraPhotoCells = photoInFlight ? Math.max(0, Number(project.inputs?.count || 1) - mediaItems.length) : 0;
+    return (
+      <div className="relative flex h-screen flex-col overflow-hidden bg-[#fdf0f9] text-gray-900 dark:bg-[#0a0510] dark:text-white">
+        {/* 网格背景 overlay：与落地页保持一致，避免提交后背景突变 */}
+        <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.06)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.06)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(232,121,249,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(232,121,249,.08)_1px,transparent_1px)]" />
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto p-4 sm:p-8">
+          {/* 项目页保留顶栏：新任务/历史始终可见可点 */}
+          <div className="mb-4">
+            <PhotoStudioTopBar workflowCode={workflow.code} onNewTask={() => { setProject(null); setPhotoInputKey((k) => k + 1); }} onLoadHistory={loadHistory} />
+          </div>
+          {project.status === "waiting_confirm" && mediaItems.length === 0 ? (
+            (() => {
+              const plan = String(styling.generation_prompt || styling.summary || styling.base_prompt || "");
+              return (
+                <div className="mx-auto w-full max-w-4xl">
+                  <h1 className="text-2xl font-bold text-gray-900 dark:text-white">造型设计完成，等待确认</h1>
+                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">确认拍摄方案后，摄影师将按方案开拍。</p>
+                  <div className="mt-5 rounded-2xl border border-fuchsia-100 bg-white/80 p-5 dark:border-fuchsia-400/20 dark:bg-white/5">
+                    <div className="mb-2 text-sm font-semibold text-fuchsia-600 dark:text-fuchsia-300">💄 拍摄方案</div>
+                    <p className="whitespace-pre-wrap text-sm leading-6 text-gray-700 dark:text-gray-200">{plan}</p>
+                  </div>
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button onClick={() => void confirmPhotoPlan(plan)} className="rounded-xl bg-fuchsia-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-fuchsia-400">确认方案并开拍</button>
+                    <button onClick={() => setProject(null)} className="rounded-xl border border-gray-200 px-5 py-2.5 text-sm text-gray-600 dark:border-white/15 dark:text-gray-300">返回重新配置</button>
+                  </div>
+                </div>
+              );
+            })()
+          ) : (
+            <div className="mx-auto w-full max-w-5xl">
+              <button onClick={() => setProject(null)} className="mb-5 text-sm text-fuchsia-500 hover:text-fuchsia-600 dark:text-fuchsia-300">← 再拍一套</button>
+              <div className="mb-6 flex items-center justify-between gap-4">
+                <div><h1 className="text-2xl font-bold text-gray-900 dark:text-white">{workflow.name}</h1><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{project.status === "succeeded" ? "写真拍摄完成" : project.status === "failed" ? "拍摄失败" : "AI 摄影团队正在拍摄"}</p></div>
+                <span className="rounded-full border border-fuchsia-200 px-3 py-1 text-xs text-fuchsia-600 dark:border-fuchsia-400/30 dark:text-fuchsia-300">{STATUS_KEY[project.status] ? t(STATUS_KEY[project.status]) : project.status}</span>
+              </div>
+              {styling.summary ? <div className="mb-4 rounded-2xl border border-fuchsia-100 bg-white/80 px-4 py-3 text-sm text-gray-600 dark:border-fuchsia-400/20 dark:bg-white/5 dark:text-gray-300"><span className="mr-2 font-semibold text-fuchsia-600 dark:text-fuchsia-300">💄 拍摄方案</span>{String(styling.summary)}</div> : null}
+              {(mediaItems.length > 0 || extraPhotoCells > 0) && (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  {mediaItems.map((item, index) => <PhotoStudioCell key={String(item.task_no || index)} item={item} index={index} />)}
+                  {Array.from({ length: extraPhotoCells }).map((_, index) => (
+                    <div key={`extra-${index}`} className="flex aspect-[3/4] flex-col items-center justify-center gap-2 rounded-2xl bg-fuchsia-100/60 dark:bg-white/5">
+                      <Loader2 size={20} className="animate-spin text-fuchsia-400" />
+                      <span className="text-xs text-fuchsia-500 dark:text-fuchsia-300">生成中…</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {project.status === "succeeded" && <div className="mt-4 text-xs text-gray-400">{t("agentRun.cost", { amount: project.actual_cost.toFixed(2) })}</div>}
+              {project.status === "failed" && (
+                <div className="mt-4">
+                  <p className="mb-2 text-sm text-red-500">{project.error_message}</p>
+                  <button onClick={retry} className="rounded-xl bg-fuchsia-500 px-4 py-2 text-sm font-semibold text-white">{t("common.retry")}</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        {photoBar}
+      </div>
+    );
+  }
 
   // 如果是小说工坊且没有项目，显示自定义Landing页面
   if (isNovelWorkshop && !project) {

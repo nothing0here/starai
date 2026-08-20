@@ -6,10 +6,10 @@ import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2,
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
-type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop";
+type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "photo_studio" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
   system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
@@ -23,6 +23,7 @@ type RuntimeConfig = {
   output_scenes?: string[];
   input_capabilities?: Record<string, boolean>;
   flow_options?: Record<string, boolean>;
+  roles?: { id: string; name: string; avatar: string; description: string; node?: string }[];
   dialogue_model_codes?: string[];
   image_model_code?: string;
   video_model_code?: string;
@@ -251,12 +252,24 @@ const TYPE_PRESETS = {
     featureTags: ["设定永不崩", "文风统一", "全程对话可控", "整本打包下载"],
     defaults: { require_image: false, allow_text_only: true, support_reference_image: false, support_multiple_references: false, support_first_last_frame: false },
   },
+  photo_studio: {
+    label: "AI写真馆",
+    icon: "📸",
+    theme: "fuchsia",
+    description: "上传一张照片，选择写真类型与风格倾向，AI 摄影团队几分钟产出一整套杂志级写真。",
+    placeholder: "可选：补充服装、场景、动作或氛围要求，例如穿白色连衣裙、回眸微笑",
+    help: "上传一张清晰的本人正面照片，选择写真类型（写真/职业照/证件照）和风格倾向，挑选出图模型与张数。造型师会先给出拍摄方案，逐步确认模式下可修改方案后再开拍，智能托管则自动完成拍摄与精修。",
+    imageLabel: "本人照片",
+    heroTags: ["AI写真", "风格百变", "人像保真"],
+    featureTags: ["38种主流风格", "写真/职业照/证件照", "影棚级光影", "几分钟出片"],
+    defaults: { require_image: true, allow_text_only: false, support_reference_image: true, support_multiple_references: false, support_first_last_frame: false },
+  },
 } as const;
 
 const isVideoUtilityType = (type: GenerationType) => ["video_upscale", "video_redraw", "subtitle_remove"].includes(type);
 const defaultScenes = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
 const sceneDefs = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
-const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "video" ? "ecommerce_video" : "ecommerce_image");
+const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "novel_workshop" ? "novel_workshop" : type === "photo_studio" ? "photo_studio" : type === "video" ? "ecommerce_video" : "ecommerce_image");
 const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
   { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
@@ -297,6 +310,12 @@ const defaultNodes = (analysis = "", generation = "", type: GenerationType = "im
       { id: "writing", type: "llm", name: "章节创作", model_code: generation, prompt_template: "", cost: 0.05 },
       { id: "polishing", type: "llm", name: "润色审校", model_code: generation, prompt_template: "", cost: 0.03 },
       { id: "archiving", type: "llm", name: "档案更新", model_code: generation, prompt_template: "", cost: 0.02 },
+    ];
+  }
+  if (type === "photo_studio") {
+    return [
+      { id: "styling", type: "llm", name: "写真造型设计", model_code: analysis || generation, prompt_template: "", cost: 0.02 },
+      { id: "generate", type: "image", name: "写真拍摄生成", model_code: generation, prompt_template: "", cost: 0 },
     ];
   }
   return [
@@ -343,6 +362,18 @@ const defaultSchema = (count = 1, type: GenerationType = "image", form?: FormSta
     style: { type: "string", title: "文风", enum: ["轻松幽默", "严肃正经", "诗意唯美", "节奏紧凑"], default: "轻松幽默", "x-widget": "option_menu" },
     language: { type: "string", title: "生成语言", default: "zh-CN" },
   },
+}) : type === "photo_studio" ? ({
+  type: "object",
+  required: ["image_url", "photo_type"],
+  properties: {
+    image_url: { type: "string", title: "本人照片" },
+    photo_type: { type: "string", title: "写真类型", enum: ["写真", "职业照", "证件照"], default: "写真", "x-widget": "option_menu" },
+    style: { type: "string", title: "风格倾向", enum: ["影棚质感", "杂志大片", "黑白艺术", "韩系简约", "日系清新", "港风胶片", "法式复古", "美式复古", "国风古装", "旗袍风情", "新中式", "森系文艺", "咖啡馆日常", "都市夜景", "海边度假", "校园青春", "轻奢名媛", "甜美少女", "酷飒街头", "运动活力", "赛博霓虹", "暗调情绪", "户外自然", "婚纱浪漫", "雪景冬日", "商务精英", "纯白极简", "毕业季", "古典油画", "二次元动漫", "敦煌飞天", "民族风", "金秋落叶", "樱花春景", "Y2K千禧", "多巴胺糖果", "欧式宫廷", "沙漠戈壁"], default: "影棚质感", "x-widget": "option_menu" },
+    id_background: { type: "string", title: "证件照底色", enum: ["白色", "蓝色", "红色"], default: "白色", "x-widget": "option_menu" },
+    count: { type: "integer", title: "生成张数", enum: [1, 2, 4, 6, 8], default: count || 1, "x-widget": "option_menu" },
+    prompt: { type: "string", title: "额外要求", placeholder: "可选：补充服装、场景、动作或氛围要求", "x-widget": "textarea" },
+    aspect_ratio: { type: "string", title: "画面比例", default: "3:4" },
+  },
 }) : ({
   type: "object",
   properties: {
@@ -384,6 +415,13 @@ function displayConfig(form: FormState) {
         { icon: "📖", title: "逐章开写", subtitle: "章节写手按大纲和设定档案逐章写作", tags: ["分章节", "情节展开", "边写边审"] },
         { icon: "✍️", title: "润色审校", subtitle: "文学润色师优化文笔，审校员把关设定一致性", tags: ["风格统一", "语言打磨", "台账校验"] },
         { icon: "✅", title: "成书交付", subtitle: "档案员更新台账，整本导出Word/TXT文档", tags: ["质量把关", "格式整理", "打包下载"] },
+      ]
+    : form.generation_type === "photo_studio"
+    ? [
+        { icon: "🪞", title: "上传照片", subtitle: "上传一张清晰的本人正面照片", tags: ["人像识别", "特征提取"] },
+        { icon: "💄", title: "造型设计", subtitle: "造型师按写真类型与风格倾向定制拍摄方案", tags: ["妆造方案", "场景布光"] },
+        { icon: "📸", title: "写真拍摄", subtitle: "摄影师按方案批量出片，人像特征全程保留", tags: ["多张连拍", "风格一致"] },
+        { icon: "✨", title: "精修交付", subtitle: "修图师打磨质感，整套写真一键下载", tags: ["自然精修", "打包下载"] },
       ]
     : [
         { icon: "🔎", title: "需求智能分析", subtitle: "AI 根据输入和参考图理解目标效果", tags: ["需求识别", "素材分析"] },
@@ -521,6 +559,36 @@ function runtimeConfig(form: FormState): RuntimeConfig {
       },
     };
   }
+  if (form.generation_type === "photo_studio") {
+    return {
+      agent_mode: "photo_studio",
+      analysis_model_code: form.analysis_model_code,
+      generation_model_code: form.generation_model_code,
+      generation_type: "image",
+      preset_code: "photo_studio",
+      require_image: true,
+      default_count: form.default_count || 1,
+      candidate_count: 1,
+      creative_scenes: ["main_image"],
+      roles: [
+        { id: "photo_director", name: "摄影总监", avatar: "/assets/photo-studio/photo-director.png", description: "统筹整场拍摄，把控写真类型、风格与出片质量", node: "styling" },
+        { id: "stylist", name: "造型师", avatar: "/assets/photo-studio/stylist.png", description: "根据照片与风格倾向设计妆造、服装与拍摄方案", node: "styling" },
+        { id: "photographer", name: "摄影师", avatar: "/assets/photo-studio/photographer.png", description: "按拍摄方案出片，影棚级布光与构图", node: "generate" },
+        { id: "retoucher", name: "修图师", avatar: "/assets/photo-studio/retoucher.png", description: "保留人像特征的精修质感，皮肤与光影自然通透", node: "generate" },
+      ],
+      input_capabilities: {
+        allow_text_only: false,
+        support_reference_image: true,
+        support_multiple_references: false,
+        support_first_last_frame: false,
+      },
+      flow_options: {
+        enable_step_confirm: form.enable_step_confirm,
+        enable_autopilot: form.enable_autopilot,
+        allow_prompt_edit: form.allow_prompt_edit,
+      },
+    };
+  }
   return {
     agent_mode: "simple_pipeline",
     analysis_model_code: form.analysis_model_code,
@@ -644,6 +712,7 @@ function typeFromRuntime(runtime: RuntimeConfig, category: string): GenerationTy
   if (runtime.agent_mode === "subtitle_remove" || runtime.preset_code === "subtitle_remove") return "subtitle_remove";
   if (runtime.agent_mode === "comic_drama" || runtime.preset_code === "ai_comic_drama") return "comic_drama";
   if (runtime.agent_mode === "novel_workshop" || runtime.preset_code === "novel_workshop") return "novel_workshop";
+  if (runtime.agent_mode === "photo_studio" || runtime.preset_code === "photo_studio") return "photo_studio";
   if (runtime.generation_type === "video" || category === "video" || runtime.preset_code === "product_showcase_video" || runtime.preset_code === "image_to_video") return "video";
   return "image";
 }
@@ -909,13 +978,13 @@ export default function AgentsAdminPage() {
       name: form.name.trim(),
       description: form.description.trim(),
       icon: form.icon,
-      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
+      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" ? "workflow" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
+      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
-      generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type,
+      generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" ? "image" : form.generation_type,
       preset_code: presetCode(form.generation_type),
       require_image: form.require_image,
       default_count: Number(form.default_count) || 1,
@@ -930,7 +999,7 @@ export default function AgentsAdminPage() {
       allow_prompt_edit: form.allow_prompt_edit,
       nodes: bundle.nodes,
       input_schema: bundle.input_schema,
-      price_rule: form.generation_type === "novel_workshop"
+      price_rule: form.generation_type === "novel_workshop" || form.generation_type === "photo_studio"
         ? { billing_type: "model_actual", unit_price: Number(form.unit_price) || 0 }
         : bundle.price_rule,
       display_config: bundle.display_config,
@@ -940,6 +1009,8 @@ export default function AgentsAdminPage() {
         ? bundle.runtime_config
         : form.generation_type === "novel_workshop"
         ? { ...bundle.runtime_config, analysis_model_code: form.analysis_model_code, generation_model_code: form.generation_model_code }
+        : form.generation_type === "photo_studio"
+        ? { ...bundle.runtime_config, analysis_model_code: form.analysis_model_code, generation_model_code: form.generation_model_code, default_count: Number(form.default_count) || 1 }
         : { ...bundle.runtime_config, creative_scenes: normalizeScenes((bundle.runtime_config as any)?.creative_scenes || form.creative_scenes, form.generation_type), output_scenes: undefined },
     };
     try {
@@ -993,7 +1064,7 @@ export default function AgentsAdminPage() {
               {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />选择智能体类型</div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama", "novel_workshop"] as GenerationType[]).map((type) => {
+                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama", "novel_workshop", "photo_studio"] as GenerationType[]).map((type) => {
                     const preset = TYPE_PRESETS[type];
                     const active = form.generation_type === type;
                     return (

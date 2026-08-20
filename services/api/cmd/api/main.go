@@ -224,8 +224,8 @@ func startBillingReconciler(ctx context.Context, opsSvc *service.OpsService, bil
 		result, err := opsSvc.ReconcileFrozenBalances(ctx)
 		if err != nil {
 			log.Printf("billing reconciliation failed: %v", err)
-		} else if result.ReleasedChatFreezes+result.FailedTasks+result.FailedWorkflows+result.FailedOrphanedTasks+result.FailedOrphanedWorkflows > 0 {
-			log.Printf("billing reconciliation released chats=%d failed tasks=%d failed workflows=%d failed orphaned tasks=%d failed orphaned workflows=%d", result.ReleasedChatFreezes, result.FailedTasks, result.FailedWorkflows, result.FailedOrphanedTasks, result.FailedOrphanedWorkflows)
+		} else if result.ReleasedChatFreezes+result.FailedTasks+result.FailedWorkflows+result.FailedStuckWorkflows+result.FailedOrphanedTasks+result.FailedOrphanedWorkflows+result.SettledTerminalFreezes > 0 {
+			log.Printf("billing reconciliation released chats=%d failed tasks=%d failed workflows=%d failed stuck workflows=%d failed orphaned tasks=%d failed orphaned workflows=%d settled terminal freezes=%d", result.ReleasedChatFreezes, result.FailedTasks, result.FailedWorkflows, result.FailedStuckWorkflows, result.FailedOrphanedTasks, result.FailedOrphanedWorkflows, result.SettledTerminalFreezes)
 		}
 		if rewarded, rewardErr := billingSvc.ReconcileReferralRewards(ctx, 100); rewardErr != nil {
 			log.Printf("referral reward reconciliation failed: %v", rewardErr)

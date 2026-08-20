@@ -2464,20 +2464,38 @@ func isHardDownload404(statusCode int, body []byte) bool {
 
 func mediaExtForContentType(contentType, kind string) string {
 	ct := strings.ToLower(contentType)
+	// 按媒体类型分别推断扩展名：此前统一兜底 .mp4 导致图片对象带 .mp4 后缀、audio/mpeg 误判为视频
+	if kind == "image" {
+		switch {
+		case strings.Contains(ct, "png"):
+			return ".png"
+		case strings.Contains(ct, "webp"):
+			return ".webp"
+		case strings.Contains(ct, "gif"):
+			return ".gif"
+		case strings.Contains(ct, "jpeg"), strings.Contains(ct, "jpg"):
+			return ".jpg"
+		}
+		return ".png"
+	}
+	if kind == "audio" {
+		switch {
+		case strings.Contains(ct, "wav"):
+			return ".wav"
+		case strings.Contains(ct, "ogg"):
+			return ".ogg"
+		case strings.Contains(ct, "m4a"), strings.Contains(ct, "aac"):
+			return ".m4a"
+		case strings.Contains(ct, "flac"):
+			return ".flac"
+		}
+		return ".mp3"
+	}
 	switch {
 	case strings.Contains(ct, "webm"):
 		return ".webm"
 	case strings.Contains(ct, "quicktime"), strings.Contains(ct, "mov"):
 		return ".mov"
-	case strings.Contains(ct, "mpeg"), strings.Contains(ct, "mp4"):
-		return ".mp4"
-	case strings.Contains(ct, "wav"):
-		return ".wav"
-	case strings.Contains(ct, "mp3"):
-		return ".mp3"
-	}
-	if kind == "audio" {
-		return ".mp3"
 	}
 	return ".mp4"
 }

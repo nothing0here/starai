@@ -48,8 +48,12 @@ func processNovelWorkshopWorkflow(
 		outputs["autopilot"] = autopilot
 		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 
-		// 如果不是自动托管模式，暂停等待用户确认
+		// 如果不是自动托管模式，暂停等待用户确认；
+		// 逐步确认模式按步骤分段扣费：策划完成先扣策划这一步的费用。
 		if !autopilot {
+			if err := chargeStepBilling(ctx, pool, p.UserID, p.ProjectID, publicID, workflowActualCost(ctx, pool, p.ProjectID, outputs)); err != nil {
+				log.Printf("Novel project %s planning step billing failed: %v", publicID, err)
+			}
 			pool.Exec(ctx, `UPDATE workflow_projects SET status='waiting_confirm', updated_at=now() WHERE id=$1`, p.ProjectID)
 			return nil
 		}
@@ -213,10 +217,14 @@ func processNovelWorkshopWorkflow(
 		outputs["setting_ledger"] = settingLedger
 		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 
-		// 每完成batch_size章或完成一卷，暂停确认（如果不是自动托管）
+		// 每完成batch_size章或完成一卷，暂停确认（如果不是自动托管）；
+		// 分段扣费：已完成的这批章节先结算，剩余冻结继续担保后续章节。
 		if !autopilot && (currentChapter%batchSize == 0 || isVolumeEnd(currentChapter, volumes)) {
 			outputs["current_stage"] = "batch_confirm"
 			saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
+			if err := chargeStepBilling(ctx, pool, p.UserID, p.ProjectID, publicID, workflowActualCost(ctx, pool, p.ProjectID, outputs)); err != nil {
+				log.Printf("Novel project %s batch step billing failed: %v", publicID, err)
+			}
 			pool.Exec(ctx, `UPDATE workflow_projects SET status='waiting_confirm', updated_at=now() WHERE id=$1`, p.ProjectID)
 			return nil
 		}

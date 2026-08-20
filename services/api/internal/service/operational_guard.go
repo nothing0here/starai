@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/starai/api/internal/billing"
 )
 
 type FrozenBalanceItem struct {
@@ -57,8 +59,10 @@ type ReconcileResult struct {
 	ReleasedChatFreezes     int `json:"released_chat_freezes"`
 	FailedTasks             int `json:"failed_tasks"`
 	FailedWorkflows         int `json:"failed_workflows"`
+	FailedStuckWorkflows    int `json:"failed_stuck_workflows"`
 	FailedOrphanedTasks     int `json:"failed_orphaned_tasks"`
 	FailedOrphanedWorkflows int `json:"failed_orphaned_workflows"`
+	SettledTerminalFreezes  int `json:"settled_terminal_freezes"`
 }
 
 func (s *OpsService) OperationalOverview(ctx context.Context, workerHeartbeat *time.Time) (*OperationalOverview, error) {
@@ -234,6 +238,11 @@ func (s *OpsService) ReconcileFrozenBalances(ctx context.Context) (*ReconcileRes
 	} else {
 		result.FailedWorkflows = n
 	}
+	if n, err := s.failStuckWorkflows(ctx); err != nil {
+		return nil, err
+	} else {
+		result.FailedStuckWorkflows = n
+	}
 	if n, err := s.failOrphanedStaleTasks(ctx); err != nil {
 		return nil, err
 	} else {
@@ -243,6 +252,11 @@ func (s *OpsService) ReconcileFrozenBalances(ctx context.Context) (*ReconcileRes
 		return nil, err
 	} else {
 		result.FailedOrphanedWorkflows = n
+	}
+	if n, err := s.settleTerminalStateFreezes(ctx); err != nil {
+		return nil, err
+	} else {
+		result.SettledTerminalFreezes = n
 	}
 	return &result, nil
 }
@@ -394,6 +408,198 @@ func (s *OpsService) failStaleWorkflows(ctx context.Context) (int, error) {
 		if err != nil {
 			tx.Rollback(ctx)
 			return n, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+// failStuckWorkflows 清理卡死的工作流冻结：
+// 1) waiting_confirm 超过 24 小时未确认/取消——用户离开后冻结会永久滞留（如 ID 54 案例）；
+// 2) pending/running 超过 6 小时无心跳——worker 重启/崩溃后不会再推进。
+// 处理口径与用户主动取消一致：已完成步骤按累计成本结算（完成一步扣一步），
+// 剩余冻结解冻退还，项目置为 canceled 并保留已生成内容（不归为失败）。
+func (s *OpsService) failStuckWorkflows(ctx context.Context) (int, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT f.id, f.user_id, p.id
+		FROM balance_freezes f
+		JOIN workflow_projects p ON p.public_id=f.ref_id
+		WHERE f.status='frozen' AND f.ref_type='workflow'
+		  AND (
+		    (p.status='waiting_confirm' AND p.updated_at < now() - interval '24 hours')
+		    OR (p.status IN ('pending','running') AND p.updated_at < now() - interval '6 hours')
+		  )
+		ORDER BY p.updated_at ASC LIMIT 200`)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var freezeID, userID, projectID int64
+		if err := rows.Scan(&freezeID, &userID, &projectID); err != nil {
+			return n, err
+		}
+		if err := s.settleStuckWorkflowFreeze(ctx, freezeID, userID, projectID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, rows.Err()
+}
+
+func (s *OpsService) settleStuckWorkflowFreeze(ctx context.Context, freezeID int64, userID int64, projectID int64) error {
+	_ = freezeID // 冻结行由 billing 按引用整体结算，无需逐行操作
+	var publicID string
+	if err := s.db.QueryRow(ctx, `SELECT public_id FROM workflow_projects WHERE id=$1`, projectID).Scan(&publicID); err != nil {
+		return err
+	}
+	cumulativeCost, chargeCost, err := accruedWorkflowCostDB(ctx, s.db, projectID)
+	if err != nil {
+		return err
+	}
+	finalize := func(tx pgx.Tx) error {
+		var lockAvailable bool
+		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, projectID).Scan(&lockAvailable); err != nil {
+			return err
+		}
+		if !lockAvailable {
+			return nil
+		}
+		var projectStatus string
+		if err := tx.QueryRow(ctx, `SELECT status FROM workflow_projects WHERE id=$1 FOR UPDATE`, projectID).Scan(&projectStatus); err != nil {
+			return err
+		}
+		switch projectStatus {
+		case "waiting_confirm", "pending", "running":
+		default:
+			return nil
+		}
+		reason := "超时自动取消：长时间未确认，已生成内容已保留"
+		if projectStatus != "waiting_confirm" {
+			reason = "超时自动取消：任务长时间无进展，已生成内容已保留"
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE workflow_projects
+			SET status='canceled', actual_cost=$2, error_message=$3, finished_at=now(), updated_at=now()
+			WHERE id=$1 AND status IN ('pending','running','waiting_confirm')`, projectID, cumulativeCost, reason)
+		return err
+	}
+	if chargeCost > 0 {
+		err = s.billing.ChargeWithFinalize(ctx, userID, cumulativeCost, chargeCost, "workflow", publicID, "workflow_usage", "超时取消前已完成步骤", finalize)
+	} else {
+		err = s.billing.UnfreezeWithFinalize(ctx, userID, cumulativeCost, "workflow", publicID, finalize)
+	}
+	if errors.Is(err, billing.ErrFreezeNotFound) {
+		// 冻结已被其它路径（如用户同时取消）结算，跳过即可
+		return nil
+	}
+	return err
+}
+
+// settleTerminalStateFreezes 清理引用对象已终结但冻结仍滞留的记录（结算失败兜底）：
+// 项目已成功且产生成本则补扣费，否则全额解冻，避免用户资金被永久占用。
+func (s *OpsService) settleTerminalStateFreezes(ctx context.Context) (int, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT f.id, f.user_id, f.ref_type, f.ref_id
+		FROM balance_freezes f
+		LEFT JOIN tasks t ON f.ref_type='task' AND t.task_no=f.ref_id
+		LEFT JOIN workflow_projects p ON f.ref_type='workflow' AND p.public_id=f.ref_id
+		WHERE f.status='frozen' AND f.ref_type IN ('task','workflow')
+		  AND (t.id IS NOT NULL OR p.id IS NOT NULL)
+		  AND (t.status IN ('succeeded','failed','canceled') OR p.status IN ('succeeded','failed','canceled'))
+		ORDER BY f.created_at ASC LIMIT 200`)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var freezeID, userID int64
+		var refType, refID string
+		if err := rows.Scan(&freezeID, &userID, &refType, &refID); err != nil {
+			return n, err
+		}
+		var amount, actualCost float64
+		var refStatus, txType string
+		txType = "workflow_usage"
+		if refType == "task" {
+			var taskType string
+			if err = s.db.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0), COALESCE(type,'image') FROM tasks WHERE task_no=$1`, refID).Scan(&refStatus, &actualCost, &taskType); err != nil {
+				continue
+			}
+			switch taskType {
+			case "video":
+				txType = "video_usage"
+			case "audio":
+				txType = "audio_usage"
+			default:
+				txType = "image_usage"
+			}
+		} else {
+			if err = s.db.QueryRow(ctx, `SELECT status, COALESCE(actual_cost,0) FROM workflow_projects WHERE public_id=$1`, refID).Scan(&refStatus, &actualCost); err != nil {
+				continue
+			}
+		}
+		tx, err := s.db.Begin(ctx)
+		if err != nil {
+			return n, err
+		}
+		var status string
+		if err = tx.QueryRow(ctx, `SELECT status, amount FROM balance_freezes WHERE id=$1 FOR UPDATE`, freezeID).Scan(&status, &amount); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
+		if status != "frozen" {
+			tx.Rollback(ctx)
+			continue
+		}
+		if _, err = tx.Exec(ctx, `SELECT 1 FROM wallets WHERE user_id=$1 FOR UPDATE`, userID); err != nil {
+			tx.Rollback(ctx)
+			return n, err
+		}
+		if refStatus == "succeeded" && actualCost > 0 {
+			var balance, frozen float64
+			if err = tx.QueryRow(ctx, `SELECT compute_balance, frozen_compute FROM wallets WHERE user_id=$1`, userID).Scan(&balance, &frozen); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
+			newFrozen := frozen - amount
+			if newFrozen < 0 {
+				newFrozen = 0
+			}
+			if _, err = tx.Exec(ctx, `UPDATE wallets SET compute_balance=$1, frozen_compute=$2, updated_at=now() WHERE user_id=$3`, balance-actualCost, newFrozen, userID); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='charged', released_at=now() WHERE id=$1 AND status='frozen'`, freezeID); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
+			if _, err = tx.Exec(ctx, `
+				INSERT INTO wallet_transactions (user_id, type, direction, amount, balance_after, ref_type, ref_id, remark)
+				VALUES ($1,$6,'out',$2,$3,$4,$5,'冻结滞留补结算')`, userID, actualCost, balance-actualCost, refType, refID, txType); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
+		} else {
+			if _, err = tx.Exec(ctx, `UPDATE wallets SET frozen_compute=GREATEST(frozen_compute-$1,0), updated_at=now() WHERE user_id=$2`, amount, userID); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
+			if _, err = tx.Exec(ctx, `UPDATE balance_freezes SET status='released', released_at=now() WHERE id=$1 AND status='frozen'`, freezeID); err != nil {
+				tx.Rollback(ctx)
+				return n, err
+			}
 		}
 		if err = tx.Commit(ctx); err != nil {
 			return n, err
