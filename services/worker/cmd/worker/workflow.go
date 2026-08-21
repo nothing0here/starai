@@ -111,6 +111,9 @@ func processWorkflowTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token
 	if stringAny(runtimeCfg["agent_mode"]) == "photo_studio" {
 		return processPhotoStudioWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
 	}
+	if stringAny(runtimeCfg["agent_mode"]) == "virtual_try_on" {
+		return processVirtualTryOnWorkflow(ctx, pool, baseURL, token, p, publicID, estimated, inputs, runtimeCfg)
+	}
 	if stringAny(runtimeCfg["agent_mode"]) == "simple_pipeline" {
 		return processSimpleAgentWorkflow(ctx, pool, baseURL, token, p, publicID, workflowID, category, estimated, inputs, runtimeCfg)
 	}

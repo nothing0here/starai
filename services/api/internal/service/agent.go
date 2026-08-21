@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/starai/api/internal/billing"
 	"github.com/starai/api/internal/queue"
+	"github.com/starai/api/internal/storage"
 	"github.com/starai/api/internal/util"
 )
 
@@ -20,10 +21,11 @@ type AgentService struct {
 	db      *pgxpool.Pool
 	billing *billing.Service
 	queue   *asynq.Client
+	storage storage.Store
 }
 
-func NewAgentService(db *pgxpool.Pool, billing *billing.Service, q *asynq.Client) *AgentService {
-	return &AgentService{db: db, billing: billing, queue: q}
+func NewAgentService(db *pgxpool.Pool, billing *billing.Service, q *asynq.Client, store storage.Store) *AgentService {
+	return &AgentService{db: db, billing: billing, queue: q, storage: store}
 }
 
 type WorkflowNode struct {
@@ -247,6 +249,12 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 	if stringValue(def.RuntimeConfig["agent_mode"]) == "photo_studio" {
 		inputs = mergePhotoStudioRuntimeDefaults(def.RuntimeConfig, inputs)
 		if err := s.validatePhotoStudioRequest(ctx, def.RuntimeConfig, inputs); err != nil {
+			return nil, err
+		}
+	}
+	if stringValue(def.RuntimeConfig["agent_mode"]) == "virtual_try_on" {
+		inputs = mergeVirtualTryOnRuntimeDefaults(def.RuntimeConfig, inputs)
+		if err := s.validateVirtualTryOnRequest(ctx, userID, def.RuntimeConfig, inputs); err != nil {
 			return nil, err
 		}
 	}
@@ -519,6 +527,112 @@ func (s *AgentService) validatePhotoStudioRequest(ctx context.Context, runtimeCf
 		return fmt.Errorf("图片模型不存在、类型不匹配或已停用：%s", code)
 	}
 	return nil
+}
+
+func mergeVirtualTryOnRuntimeDefaults(runtimeCfg, inputs map[string]interface{}) map[string]interface{} {
+	if inputs == nil {
+		inputs = map[string]interface{}{}
+	}
+	if stringValue(inputs["garment_category"]) == "" {
+		inputs["garment_category"] = "auto"
+	}
+	if stringValue(inputs["garment_photo_type"]) == "" {
+		inputs["garment_photo_type"] = "auto"
+	}
+	if intFromAgentAny(inputs["count"]) <= 0 {
+		inputs["count"] = positiveAgentInt(intFromAgentAny(runtimeCfg["default_count"]), 1)
+	}
+	if stringValue(inputs["aspect_ratio"]) == "" {
+		inputs["aspect_ratio"] = "3:4"
+	}
+	if stringValue(inputs["image_size"]) == "" {
+		inputs["image_size"] = "1K"
+	}
+	inputs["_mode"] = "auto"
+	return inputs
+}
+
+func (s *AgentService) validateVirtualTryOnRequest(ctx context.Context, userID int64, runtimeCfg, inputs map[string]interface{}) error {
+	if strings.TrimSpace(stringValue(inputs["person_image_url"])) == "" {
+		return errors.New("请先上传人物照片")
+	}
+	if strings.TrimSpace(stringValue(inputs["garment_image_url"])) == "" {
+		return errors.New("请先上传服装图片")
+	}
+	if confirmed, _ := inputs["consent_confirmed"].(bool); !confirmed {
+		return errors.New("请确认人物照片为本人或已获得使用授权")
+	}
+	for _, item := range []struct {
+		idKey  string
+		urlKey string
+		label  string
+	}{
+		{idKey: "person_asset_id", urlKey: "person_image_url", label: "人物照片"},
+		{idKey: "garment_asset_id", urlKey: "garment_image_url", label: "服装图片"},
+	} {
+		assetID := strings.TrimSpace(stringValue(inputs[item.idKey]))
+		if assetID == "" {
+			return fmt.Errorf("%s缺少有效的素材标识，请重新上传", item.label)
+		}
+		var kind, objectKey string
+		if err := s.db.QueryRow(ctx, `SELECT kind, object_key FROM assets WHERE public_id=$1 AND user_id=$2`, assetID, userID).Scan(&kind, &objectKey); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("%s不存在或无权访问", item.label)
+			}
+			return err
+		}
+		if kind != "image" || strings.TrimSpace(objectKey) == "" {
+			return fmt.Errorf("%s必须是有效图片", item.label)
+		}
+		if s.storage == nil {
+			return errors.New("素材存储服务暂不可用，请稍后重试")
+		}
+		inputs[item.urlKey] = s.storage.PublicURL(objectKey)
+	}
+	categories := map[string]bool{"auto": true, "tops": true, "bottoms": true, "one-pieces": true}
+	if !categories[stringValue(inputs["garment_category"])] {
+		return errors.New("服装类型无效")
+	}
+	photoTypes := map[string]bool{"auto": true, "flat-lay": true, "model": true}
+	if !photoTypes[stringValue(inputs["garment_photo_type"])] {
+		return errors.New("商品图类型无效")
+	}
+	count := intFromAgentAny(inputs["count"])
+	if count < 1 || count > 4 {
+		return errors.New("试穿生成张数必须在 1 到 4 之间")
+	}
+	code := firstAgentString(stringValue(inputs["model_code"]), stringValue(runtimeCfg["generation_model_code"]))
+	if code == "" {
+		return errors.New("AI试衣间尚未配置多参考图图片模型，请联系管理员")
+	}
+	var storedCode, upstreamModel string
+	var runtimeRaw []byte
+	if err := s.db.QueryRow(ctx, `SELECT code, new_api_model, runtime_rule FROM models WHERE code=$1 AND category='image' AND is_enabled=true`, code).Scan(&storedCode, &upstreamModel, &runtimeRaw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("图片模型不存在、类型不匹配或已停用：%s", code)
+		}
+		return err
+	}
+	modelRuntime := map[string]interface{}{}
+	_ = json.Unmarshal(runtimeRaw, &modelRuntime)
+	if !virtualTryOnModelCompatible(storedCode, upstreamModel, modelRuntime, stringValue(runtimeCfg["generation_model_code"])) {
+		return fmt.Errorf("当前模型不支持AI试衣间所需的双参考图输入：%s", code)
+	}
+	inputs["model_code"] = code
+	return nil
+}
+
+func virtualTryOnModelCompatible(code, upstreamModel string, runtimeRule map[string]interface{}, configuredDefault string) bool {
+	if code != "" && code == configuredDefault {
+		return true
+	}
+	raw, _ := json.Marshal(runtimeRule)
+	searchable := strings.ToLower(code + " " + upstreamModel + " " + string(raw))
+	if strings.Contains(searchable, "nano_banana") || strings.Contains(searchable, "nano banana") || strings.Contains(searchable, "gpt-image-2") || strings.Contains(searchable, "gemini") {
+		return true
+	}
+	imageRule, _ := runtimeRule["image"].(map[string]interface{})
+	return intFromAgentAny(firstAgentNonNil(imageRule["max_reference_images"], runtimeRule["max_reference_images"])) >= 2
 }
 
 func (s *AgentService) validateEnabledVideoModel(ctx context.Context, code, label string) error {
@@ -1405,6 +1519,15 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		}
 		if code := firstAgentString(stringValue(inputs["model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
 			params := copyAgentMap(inputs)
+			params["n"] = positiveAgentInt(intFromAgentAny(inputs["count"]), positiveAgentInt(intFromAgentAny(runtimeCfg["default_count"]), 1))
+			total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
+		}
+		return total
+	}
+	if stringValue(runtimeCfg["agent_mode"]) == "virtual_try_on" {
+		if code := firstAgentString(stringValue(inputs["model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+			params := copyAgentMap(inputs)
+			params["reference_images"] = []string{stringValue(inputs["person_image_url"]), stringValue(inputs["garment_image_url"])}
 			params["n"] = positiveAgentInt(intFromAgentAny(inputs["count"]), positiveAgentInt(intFromAgentAny(runtimeCfg["default_count"]), 1))
 			total += s.estimateModelCostByCode(ctx, code, params, 0, 0)
 		}

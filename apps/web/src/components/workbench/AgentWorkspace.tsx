@@ -26,6 +26,7 @@ import { VideoUpscaleWorkspace } from "./VideoUpscaleWorkspace";
 import { AgentLanding, type AgentDisplayStep } from "./AgentLanding";
 import { NovelWorkshopLanding } from "./NovelWorkshopLanding";
 import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "./PhotoStudioLanding";
+import { VirtualTryOnInputBar, VirtualTryOnLanding, VirtualTryOnResult } from "./VirtualTryOnLanding";
 import { NovelChapterList } from "./NovelChapterList";
 
 type DisplayStep = AgentDisplayStep;
@@ -409,6 +410,7 @@ export function AgentWorkspace({ code }: { code: string }) {
   const isComicDrama = workflow?.runtime_config?.agent_mode === "comic_drama" || workflow?.runtime_config?.preset_code === "ai_comic_drama";
   const isNovelWorkshop = workflow?.runtime_config?.agent_mode === "novel_workshop" || workflow?.runtime_config?.preset_code === "novel_workshop" || workflow?.code === "ai_novel_workshop";
   const isPhotoStudio = workflow?.runtime_config?.agent_mode === "photo_studio" || workflow?.runtime_config?.preset_code === "photo_studio" || workflow?.code === "ai_photo_studio";
+  const isVirtualTryOn = workflow?.runtime_config?.agent_mode === "virtual_try_on" || workflow?.runtime_config?.preset_code === "virtual_try_on" || workflow?.code === "ai_virtual_tryon";
   const videoUtilityMode = workflow?.runtime_config?.agent_mode || workflow?.runtime_config?.preset_code;
   const isVideoUtility = ["video_upscale", "video_redraw", "subtitle_remove"].includes(videoUtilityMode || "");
   const workflowName = workflow ? td(`agent.${workflow.code}.name`, workflow.name) : "";
@@ -1178,6 +1180,21 @@ export function AgentWorkspace({ code }: { code: string }) {
 
   if (!workflow) return <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">{ts("加载中...")}</div>;
 
+  if (isVirtualTryOn) {
+    const tryOnInputBar = <VirtualTryOnInputBar key={`${photoInputKey}:${project?.public_id || "new"}`} defaultModelCode={workflow.runtime_config?.generation_model_code} initialInputs={project?.inputs} error={error} featureTags={display.feature_tags} onSubmit={runPhoto} />;
+    return (
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#fff1f3] text-gray-900 dark:bg-[#12070a] dark:text-white">
+        <div className="pointer-events-none absolute inset-0 opacity-70 [background-image:linear-gradient(rgba(190,24,93,.05)_1px,transparent_1px),linear-gradient(90deg,rgba(190,24,93,.05)_1px,transparent_1px)] [background-size:40px_40px]" />
+        {project ? (
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col"><VirtualTryOnResult workflowCode={workflow.code} workflowName={workflowName} project={{ ...project, media_tasks: allMediaTasks }} onNewTask={() => { resetTask(); setPhotoInputKey((key) => key + 1); }} onLoadHistory={loadHistory} /></div>
+        ) : (
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto"><VirtualTryOnLanding workflowCode={workflow.code} workflowName={workflowName} workflowDescription={workflowDescription} roles={(workflow.runtime_config as any)?.roles || []} heroTags={display.hero_tags} steps={translatedSteps} onLoadHistory={loadHistory} onNewTask={() => setPhotoInputKey((key) => key + 1)} /></div>
+        )}
+        {tryOnInputBar}
+      </div>
+    );
+  }
+
   if (isPhotoStudio) {
     const roles = (workflow.runtime_config as any)?.roles || [];
     const photoInputBar = <PhotoStudioInputBar key={photoInputKey} defaultModelCode={workflow.runtime_config?.generation_model_code} error={error} featureTags={display.feature_tags} onSubmit={runPhoto} />;
@@ -1272,27 +1289,36 @@ export function AgentWorkspace({ code }: { code: string }) {
     }
     const outputs = project.outputs || {};
     const chapters = Array.isArray(outputs.chapters) ? outputs.chapters as any[] : [];
+    const novelShell = (content: ReactNode) => (
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#eaf7fb] text-gray-900 dark:bg-[#05080f] dark:text-white">
+        <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col">
+          <div className="shrink-0 px-3 py-1.5 sm:px-5 sm:py-2 lg:px-8"><PhotoStudioTopBar workflowCode={workflow.code} historyFallbackTitle="小说任务" onNewTask={resetTask} onLoadHistory={loadHistory} /></div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-3 sm:px-8 sm:pt-5">
+            <div className="mx-auto w-full max-w-5xl">{content}</div>
+          </div>
+        </div>
+      </div>
+    );
     if (project.status === "waiting_confirm") {
       const stage = String(outputs.current_stage || "");
       if (stage === "batch_confirm") {
         const done = chapters.length;
         const total = Number(outputs.total_chapters || 0);
-        return <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8"><div className="mx-auto w-full max-w-5xl"><div className="mb-6"><h1 className="text-2xl font-bold">已完成 {done}{total > 0 ? ` / ${total}` : ""} 章，等待确认</h1><p className="mt-2 text-sm text-gray-400">逐步确认模式下，每完成一批章节都会在这里等你。确认后会继续创作后面的章节。</p></div><NovelChapterList chapters={chapters} currentChapter={done} totalChapters={total} onRequestRevision={reviseNovel} /><div className="mt-5 flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelBatch()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认并继续创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-white/15 px-5 py-2.5 text-sm text-gray-300 hover:bg-white/5">转智能托管，不再逐步确认</button></div>{error && <p className="mt-3 text-sm text-red-400">{error}</p>}</div></div>;
+        return novelShell(<><div className="mb-6"><h1 className="text-2xl font-bold">已完成 {done}{total > 0 ? ` / ${total}` : ""} 章，等待确认</h1><p className="mt-2 text-sm text-gray-500 dark:text-gray-400">逐步确认模式下，每完成一批章节都会在这里等你。确认后会继续创作后面的章节。</p></div><NovelChapterList chapters={chapters} currentChapter={done} totalChapters={total} onRequestRevision={reviseNovel} /><div className="mt-5 flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelBatch()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认并继续创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-gray-200 px-5 py-2.5 text-sm text-gray-600 hover:bg-white dark:border-white/15 dark:text-gray-300 dark:hover:bg-white/5">转智能托管，不再逐步确认</button></div>{error && <p className="mt-3 text-sm text-red-500 dark:text-red-400">{error}</p>}</>);
       }
       if (outputs.planning) {
         const planning = outputs.planning as any;
         const outline = planning.outline || {};
         const volumes = Array.isArray(outline.volumes) ? outline.volumes : [];
-        return <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8"><div className="mx-auto w-full max-w-5xl"><div className="mb-6"><h1 className="text-2xl font-bold">故事策划完成，等待确认</h1><p className="mt-2 text-sm text-gray-400">确认大纲后，AI 编辑部会按章节逐步创作正文。</p></div><div className="mb-5 rounded-2xl border border-indigo-400/20 bg-white/[0.04] p-5"><h2 className="text-lg font-semibold">{planning.title || "未命名小说"}</h2><p className="mt-2 text-sm leading-6 text-gray-400">{planning.core_concept || planning.world_setting || "已完成世界观和故事规划"}</p><div className="mt-4 space-y-2">{volumes.flatMap((volume: any) => Array.isArray(volume.chapters) ? volume.chapters : []).map((chapter: any) => <div key={chapter.chapter_number} className="rounded-xl bg-white/[0.04] px-3 py-2"><span className="mr-2 text-xs text-indigo-300">第 {chapter.chapter_number} 章</span><span className="text-sm text-gray-200">{chapter.title}</span><p className="mt-1 text-xs text-gray-500">{chapter.summary}</p></div>)}</div></div><div className="flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelOutline()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认大纲并开始创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-white/15 px-5 py-2.5 text-sm text-gray-300 hover:bg-white/5">转智能托管，后续不再确认</button></div>{error && <p className="mt-3 text-sm text-red-400">{error}</p>}</div></div>;
+        return novelShell(<><div className="mb-6"><h1 className="text-2xl font-bold">故事策划完成，等待确认</h1><p className="mt-2 text-sm text-gray-500 dark:text-gray-400">确认大纲后，AI 编辑部会按章节逐步创作正文。</p></div><div className="mb-5 rounded-2xl border border-indigo-200 bg-white/70 p-5 dark:border-indigo-400/20 dark:bg-white/[0.04]"><h2 className="text-lg font-semibold">{planning.title || "未命名小说"}</h2><p className="mt-2 text-sm leading-6 text-gray-500 dark:text-gray-400">{planning.core_concept || planning.world_setting || "已完成世界观和故事规划"}</p><div className="mt-4 space-y-2">{volumes.flatMap((volume: any) => Array.isArray(volume.chapters) ? volume.chapters : []).map((chapter: any) => <div key={chapter.chapter_number} className="rounded-xl bg-indigo-50 px-3 py-2 dark:bg-white/[0.04]"><span className="mr-2 text-xs text-indigo-600 dark:text-indigo-300">第 {chapter.chapter_number} 章</span><span className="text-sm text-gray-700 dark:text-gray-200">{chapter.title}</span><p className="mt-1 text-xs text-gray-500">{chapter.summary}</p></div>)}</div></div><div className="flex flex-wrap items-center gap-3"><button type="button" onClick={() => void confirmNovelOutline()} className="rounded-xl bg-indigo-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-400">确认大纲并开始创作</button><button type="button" onClick={() => void enableAutopilot()} className="rounded-xl border border-gray-200 px-5 py-2.5 text-sm text-gray-600 hover:bg-white dark:border-white/15 dark:text-gray-300 dark:hover:bg-white/5">转智能托管，后续不再确认</button></div>{error && <p className="mt-3 text-sm text-red-500 dark:text-red-400">{error}</p>}</>);
       }
     }
-    return (
-      <div className="flex min-h-0 flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8">
-        <div className="mx-auto w-full max-w-5xl">
-          <button type="button" onClick={resetTask} className="mb-5 text-sm text-gray-400 hover:text-white">← 继续创作</button>
+    return novelShell(
+      <>
           <div className="mb-6 flex items-center justify-between gap-4">
-            <div><h1 className="text-2xl font-bold">{workflowName}</h1><p className="mt-1 text-sm text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : project.status === "canceled" ? "已取消，已生成内容已保留" : project.status === "failed" ? "创作中断，已生成内容已保留" : "AI 编辑部正在协作创作"}</p></div>
-            <span className="rounded-full border border-indigo-400/30 px-3 py-1 text-xs text-indigo-300">{project.status === "succeeded" ? "已完成" : project.status === "canceled" ? "已取消" : project.status === "failed" ? "已中断" : project.status === "waiting_confirm" ? "待确认" : project.status}</span>
+            <div><h1 className="text-2xl font-bold">{workflowName}</h1><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : project.status === "canceled" ? "已取消，已生成内容已保留" : project.status === "failed" ? "创作中断，已生成内容已保留" : "AI 编辑部正在协作创作"}</p></div>
+            <span className="rounded-full border border-indigo-300 px-3 py-1 text-xs text-indigo-600 dark:border-indigo-400/30 dark:text-indigo-300">{project.status === "succeeded" ? "已完成" : project.status === "canceled" ? "已取消" : project.status === "failed" ? "已中断" : project.status === "waiting_confirm" ? "待确认" : project.status}</span>
           </div>
           {/* 未开始章节创作（或项目被取消/中断）时，展示已完成的故事策划大纲，避免“啥也看不到” */}
           {chapters.length === 0 && outputs.planning ? (() => {
@@ -1300,17 +1326,16 @@ export function AgentWorkspace({ code }: { code: string }) {
             const outline = planning.outline || {};
             const volumes = Array.isArray(outline.volumes) ? outline.volumes : [];
             return (
-              <div className="mb-5 rounded-2xl border border-indigo-400/20 bg-white/[0.04] p-5">
+              <div className="mb-5 rounded-2xl border border-indigo-200 bg-white/70 p-5 dark:border-indigo-400/20 dark:bg-white/[0.04]">
                 <h2 className="text-lg font-semibold">{planning.title || "未命名小说"}</h2>
-                <p className="mt-2 text-sm leading-6 text-gray-400">{planning.core_concept || planning.world_setting || "已完成世界观和故事规划"}</p>
-                <div className="mt-4 space-y-2">{volumes.flatMap((volume: any) => Array.isArray(volume.chapters) ? volume.chapters : []).map((chapter: any) => <div key={chapter.chapter_number} className="rounded-xl bg-white/[0.04] px-3 py-2"><span className="mr-2 text-xs text-indigo-300">第 {chapter.chapter_number} 章</span><span className="text-sm text-gray-200">{chapter.title}</span><p className="mt-1 text-xs text-gray-500">{chapter.summary}</p></div>)}</div>
+                <p className="mt-2 text-sm leading-6 text-gray-500 dark:text-gray-400">{planning.core_concept || planning.world_setting || "已完成世界观和故事规划"}</p>
+                <div className="mt-4 space-y-2">{volumes.flatMap((volume: any) => Array.isArray(volume.chapters) ? volume.chapters : []).map((chapter: any) => <div key={chapter.chapter_number} className="rounded-xl bg-indigo-50 px-3 py-2 dark:bg-white/[0.04]"><span className="mr-2 text-xs text-indigo-600 dark:text-indigo-300">第 {chapter.chapter_number} 章</span><span className="text-sm text-gray-700 dark:text-gray-200">{chapter.title}</span><p className="mt-1 text-xs text-gray-500">{chapter.summary}</p></div>)}</div>
               </div>
             );
           })() : null}
           <NovelChapterList chapters={chapters} currentChapter={Number(outputs.current_chapter || chapters.length)} totalChapters={Number(outputs.total_chapters || 0)} onRequestRevision={reviseNovel} />
-          {project.error_message && <p className="mt-4 text-sm text-red-400">{project.error_message}</p>}
-        </div>
-      </div>
+          {project.error_message && <p className="mt-4 text-sm text-red-500 dark:text-red-400">{project.error_message}</p>}
+      </>
     );
   }
 

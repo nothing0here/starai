@@ -7,6 +7,7 @@ import { SchemaForm, schemaDefaults } from "@/components/workbench/SchemaForm";
 import { useI18n } from "@/i18n/I18nProvider";
 import { NovelWorkshopLanding } from "@/components/workbench/NovelWorkshopLanding";
 import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "@/components/workbench/PhotoStudioLanding";
+import { VirtualTryOnInputBar, VirtualTryOnLanding, VirtualTryOnResult } from "@/components/workbench/VirtualTryOnLanding";
 import { NovelChapterList } from "@/components/workbench/NovelChapterList";
 import { Loader2 } from "lucide-react";
 
@@ -176,7 +177,24 @@ export default function AgentWorkspacePage() {
   // 检查是否是AI小说工坊
   const isNovelWorkshop = workflow.code === 'ai_novel_workshop';
   const isPhotoStudio = workflow.code === 'ai_photo_studio';
+  const runtime = workflow.runtime_config as any;
+  const isVirtualTryOn = runtime?.agent_mode === "virtual_try_on" || runtime?.preset_code === "virtual_try_on" || workflow.code === "ai_virtual_tryon";
   const roles = workflow.runtime_config?.roles || [];
+
+  if (isVirtualTryOn) {
+    const tryOnBar = <VirtualTryOnInputBar key={`${photoInputKey}:${project?.public_id || "new"}`} defaultModelCode={runtime?.generation_model_code} initialInputs={project?.inputs} error={error} onSubmit={run} />;
+    return (
+      <div className="relative flex min-h-[100dvh] flex-col overflow-hidden bg-[#fff1f3] text-gray-900 dark:bg-[#12070a] dark:text-white">
+        <div className="pointer-events-none absolute inset-0 opacity-70 [background-image:linear-gradient(rgba(190,24,93,.05)_1px,transparent_1px),linear-gradient(90deg,rgba(190,24,93,.05)_1px,transparent_1px)] [background-size:40px_40px]" />
+        {project ? (
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col"><VirtualTryOnResult workflowCode={workflow.code} workflowName={workflow.name} project={project as any} onNewTask={() => { setProject(null); setPhotoInputKey((key) => key + 1); }} onLoadHistory={loadHistory} /></div>
+        ) : (
+          <div className="relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto"><VirtualTryOnLanding workflowCode={workflow.code} workflowName={workflow.name} workflowDescription={workflow.description || ""} roles={roles} onNewTask={() => setPhotoInputKey((key) => key + 1)} onLoadHistory={loadHistory} /></div>
+        )}
+        {tryOnBar}
+      </div>
+    );
+  }
 
   // 如果是写真馆，采用展示区 + 底部常驻输入栏结构（提交后不跳转）
   if (isPhotoStudio) {
@@ -274,6 +292,7 @@ export default function AgentWorkspacePage() {
           workflowDescription={workflow.description || ""}
           roles={roles}
           onSubmit={run}
+          onLoadHistory={loadHistory}
         />
       </div>
     );
@@ -283,15 +302,20 @@ export default function AgentWorkspacePage() {
     const outputs = project.outputs || {};
     const chapters = Array.isArray(outputs.chapters) ? outputs.chapters as any[] : [];
     return (
-      <div className="flex-1 overflow-y-auto bg-gray-950 p-4 text-white sm:p-8">
-        <div className="mx-auto max-w-5xl">
-          <button onClick={() => setProject(null)} className="mb-5 text-sm text-gray-400 hover:text-white">← 继续创作</button>
+      <div className="relative flex min-h-[100dvh] flex-col overflow-hidden bg-[#eaf7fb] text-gray-900 dark:bg-[#05080f] dark:text-white">
+        <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col">
+          <div className="shrink-0 px-3 py-1.5 sm:px-5 sm:py-2 lg:px-8"><PhotoStudioTopBar workflowCode={workflow.code} historyFallbackTitle="小说任务" onNewTask={() => setProject(null)} onLoadHistory={loadHistory} /></div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-3 sm:px-8 sm:pt-5">
+            <div className="mx-auto max-w-5xl">
           <div className="mb-6 flex items-center justify-between gap-4">
-            <div><h1 className="text-2xl font-bold">{workflow.name}</h1><p className="mt-1 text-sm text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : "AI 编辑部正在协作创作"}</p></div>
-            <span className="rounded-full border border-indigo-400/30 px-3 py-1 text-xs text-indigo-300">{project.status}</span>
+            <div><h1 className="text-2xl font-bold">{workflow.name}</h1><p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{project.status === "waiting_confirm" ? "等待你的确认" : project.status === "succeeded" ? "全书创作完成" : "AI 编辑部正在协作创作"}</p></div>
+            <span className="rounded-full border border-indigo-300 px-3 py-1 text-xs text-indigo-600 dark:border-indigo-400/30 dark:text-indigo-300">{project.status}</span>
           </div>
           <NovelChapterList chapters={chapters} currentChapter={Number(outputs.current_chapter || chapters.length)} totalChapters={Number(outputs.total_chapters || 0)} />
-          {project.error_message && <p className="mt-4 text-sm text-red-400">{project.error_message}</p>}
+          {project.error_message && <p className="mt-4 text-sm text-red-500 dark:text-red-400">{project.error_message}</p>}
+            </div>
+          </div>
         </div>
       </div>
     );

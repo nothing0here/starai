@@ -60,12 +60,6 @@ func main() {
 	adminSvc := service.NewAdminService(pool, billingSvc, cfg.AdminJWT)
 	paymentSvc := service.NewPaymentService(pool, billingSvc)
 	gallerySvc := service.NewGalleryService(pool)
-	agentSvc := service.NewAgentService(pool, billingSvc, qClient)
-	if count, syncErr := contentI18nSvc.SyncCatalog(ctx, modelSvc, agentSvc); syncErr != nil {
-		log.Printf("warning: dynamic content translation catalog sync failed: %v", syncErr)
-	} else {
-		log.Printf("dynamic content translation catalog synced: %d entities", count)
-	}
 	homeSvc := service.NewHomeService(pool)
 	presetSvc := service.NewPresetService(pool)
 	assetSvc := service.NewAssetService(pool)
@@ -120,6 +114,12 @@ func main() {
 		}
 	}
 	startExpiredWorksCleaner(ctx, worksSvc, storageClient)
+	agentSvc := service.NewAgentService(pool, billingSvc, qClient, storageClient)
+	if count, syncErr := contentI18nSvc.SyncCatalog(ctx, modelSvc, agentSvc); syncErr != nil {
+		log.Printf("warning: dynamic content translation catalog sync failed: %v", syncErr)
+	} else {
+		log.Printf("dynamic content translation catalog synced: %d entities", count)
+	}
 
 	h := handler.New(cfg, authSvc, walletSvc, modelSvc, chatSvc, taskSvc, worksSvc, adminSvc, billingSvc, paymentSvc, opsSvc, gallerySvc, agentSvc, cacheClient, storageClient, homeSvc, presetSvc, assetSvc, roleTplSvc, oauthSvc, captchaSvc, emailOTPSvc, contentI18nSvc, canvasSvc)
 

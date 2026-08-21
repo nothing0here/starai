@@ -134,7 +134,7 @@ export function NovelWorkshopLanding({ workflowCode, workflowName, workflowDescr
   );
 }
 
-const TEAM = [["chief_editor", "总编", "统筹整本书的创作，调度团队、把控节奏与质量"], ["story_planner", "故事策划", "搭建故事圣经"], ["chapter_writer", "章节写手", "逐章创作正文"], ["proofreader", "审校员", "检查设定矛盾"], ["archivist", "档案员", "维护设定台账"], ["rhythm_editor", "节奏编排师", "安排故事节奏"], ["polish_writer", "文学润色师", "统一全书文风"]] as const;
+const TEAM = [["chief_editor", "总编", ""], ["story_planner", "故事策划", "搭建故事圣经"], ["chapter_writer", "章节写手", "逐章创作正文"], ["proofreader", "审校员", "检查设定矛盾"], ["archivist", "档案员", "维护设定台账"], ["rhythm_editor", "节奏编排师", "安排故事节奏"], ["polish_writer", "文学润色师", "统一全书文风"]] as const;
 const avatarOf = (id: string) => `https://api.dicebear.com/9.x/adventurer/svg?seed=starai-${id}`;
 
 function OnlineDot() {

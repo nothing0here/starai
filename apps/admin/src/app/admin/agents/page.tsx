@@ -6,10 +6,10 @@ import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2,
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
-type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio";
+type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "photo_studio" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
   system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
@@ -264,12 +264,30 @@ const TYPE_PRESETS = {
     featureTags: ["38种主流风格", "写真/职业照/证件照", "影棚级光影", "几分钟出片"],
     defaults: { require_image: true, allow_text_only: false, support_reference_image: true, support_multiple_references: false, support_first_last_frame: false },
   },
+  virtual_try_on: {
+    label: "AI试衣间",
+    icon: "👗",
+    theme: "rose",
+    description: "上传人物照片和服装商品图，使用多参考图模型生成自然的视觉试穿效果。",
+    placeholder: "可选：补充穿着要求，例如外套敞开，保留原来的裤装",
+    help: "分别上传人物照片和服装商品图，选择服装类型、模型、清晰度与张数。系统会固定人物图和服装图的参考顺序，保留人物身份并替换目标服装。",
+    imageLabel: "人物与服装",
+    heroTags: ["双图试穿", "人物保真", "服装还原"],
+    featureTags: ["Nano Banana", "GPT Image 2", "Gemini", "结果可下载"],
+    defaults: { require_image: true, allow_text_only: false, support_reference_image: true, support_multiple_references: true, support_first_last_frame: false },
+  },
 } as const;
 
 const isVideoUtilityType = (type: GenerationType) => ["video_upscale", "video_redraw", "subtitle_remove"].includes(type);
+const isTryOnImageModel = (model: AdminModel) => {
+  const imageRule = model.runtime_rule?.image || {};
+  if (Number(imageRule.max_reference_images || model.runtime_rule?.max_reference_images || 0) >= 2) return true;
+  const searchable = `${model.code} ${model.display_name} ${JSON.stringify(model.runtime_rule || {})}`.toLowerCase();
+  return searchable.includes("nano_banana") || searchable.includes("nano banana") || searchable.includes("gpt-image-2") || searchable.includes("gemini");
+};
 const defaultScenes = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
 const sceneDefs = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
-const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "novel_workshop" ? "novel_workshop" : type === "photo_studio" ? "photo_studio" : type === "video" ? "ecommerce_video" : "ecommerce_image");
+const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "novel_workshop" ? "novel_workshop" : type === "photo_studio" ? "photo_studio" : type === "virtual_try_on" ? "virtual_try_on" : type === "video" ? "ecommerce_video" : "ecommerce_image");
 const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
   { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
@@ -317,6 +335,9 @@ const defaultNodes = (analysis = "", generation = "", type: GenerationType = "im
       { id: "styling", type: "llm", name: "写真造型设计", model_code: analysis || generation, prompt_template: "", cost: 0.02 },
       { id: "generate", type: "image", name: "写真拍摄生成", model_code: generation, prompt_template: "", cost: 0 },
     ];
+  }
+  if (type === "virtual_try_on") {
+    return [{ id: "try_on", type: "image", name: "AI试穿生成", model_code: generation, prompt_template: "", cost: 0 }];
   }
   return [
     { id: "analysis", type: "llm", name: "需求分析", model_code: analysis, prompt_template: "", cost: 0 },
@@ -374,6 +395,22 @@ const defaultSchema = (count = 1, type: GenerationType = "image", form?: FormSta
     prompt: { type: "string", title: "额外要求", placeholder: "可选：补充服装、场景、动作或氛围要求", "x-widget": "textarea" },
     aspect_ratio: { type: "string", title: "画面比例", default: "3:4" },
   },
+}) : type === "virtual_try_on" ? ({
+  type: "object",
+  required: ["person_image_url", "person_asset_id", "garment_image_url", "garment_asset_id", "consent_confirmed"],
+  properties: {
+    person_image_url: { type: "string", title: "人物照片" },
+    person_asset_id: { type: "string", title: "人物素材ID" },
+    garment_image_url: { type: "string", title: "服装图片" },
+    garment_asset_id: { type: "string", title: "服装素材ID" },
+    garment_category: { type: "string", title: "服装类型", enum: ["auto", "tops", "bottoms", "one-pieces"], default: "auto" },
+    garment_photo_type: { type: "string", title: "商品图类型", enum: ["auto", "flat-lay", "model"], default: "auto" },
+    count: { type: "integer", title: "生成张数", enum: [1, 2, 4], default: count || 1 },
+    image_size: { type: "string", title: "清晰度", enum: ["1K", "2K"], default: "1K" },
+    aspect_ratio: { type: "string", title: "画面比例", default: "3:4" },
+    prompt: { type: "string", title: "穿着要求" },
+    consent_confirmed: { type: "boolean", title: "人物照片授权确认" },
+  },
 }) : ({
   type: "object",
   properties: {
@@ -422,6 +459,13 @@ function displayConfig(form: FormState) {
         { icon: "💄", title: "造型设计", subtitle: "造型师按写真类型与风格倾向定制拍摄方案", tags: ["妆造方案", "场景布光"] },
         { icon: "📸", title: "写真拍摄", subtitle: "摄影师按方案批量出片，人像特征全程保留", tags: ["多张连拍", "风格一致"] },
         { icon: "✨", title: "精修交付", subtitle: "修图师打磨质感，整套写真一键下载", tags: ["自然精修", "打包下载"] },
+      ]
+    : form.generation_type === "virtual_try_on"
+    ? [
+        { icon: "🧍", title: "上传人物照", subtitle: "上传清晰的单人半身或全身照片", tags: ["授权确认", "人物保真"] },
+        { icon: "👗", title: "上传服装图", subtitle: "使用清晰的单件平铺图或商品图", tags: ["服装识别", "细节提取"] },
+        { icon: "✨", title: "AI智能试穿", subtitle: "多参考图模型替换目标服装区域", tags: ["双图生成", "区域控制"] },
+        { icon: "📥", title: "结果交付", subtitle: "在线查看并下载试穿结果", tags: ["历史记录", "结果下载"] },
       ]
     : [
         { icon: "🔎", title: "需求智能分析", subtitle: "AI 根据输入和参考图理解目标效果", tags: ["需求识别", "素材分析"] },
@@ -589,6 +633,26 @@ function runtimeConfig(form: FormState): RuntimeConfig {
       },
     };
   }
+  if (form.generation_type === "virtual_try_on") {
+    return {
+      agent_mode: "virtual_try_on",
+      generation_model_code: form.generation_model_code,
+      generation_type: "image",
+      preset_code: "virtual_try_on",
+      require_image: true,
+      default_count: form.default_count || 1,
+      candidate_count: 1,
+      creative_scenes: ["main_image"],
+      roles: [
+        { id: "stylist", name: "穿搭顾问", avatar: "/assets/photo-studio/stylist.png", description: "理解服装类型和穿着要求", node: "try_on" },
+        { id: "garment", name: "服装分析师", avatar: "/assets/photo-studio/photo-director.png", description: "识别版型、颜色、纹理与细节", node: "try_on" },
+        { id: "tryon", name: "试衣摄影师", avatar: "/assets/photo-studio/photographer.png", description: "调用多参考图模型完成试穿", node: "try_on" },
+        { id: "quality", name: "质检师", avatar: "/assets/photo-studio/retoucher.png", description: "检查人物和服装一致性", node: "try_on" },
+      ],
+      input_capabilities: { allow_text_only: false, support_reference_image: true, support_multiple_references: true, support_first_last_frame: false },
+      flow_options: { enable_step_confirm: false, enable_autopilot: true, allow_prompt_edit: true },
+    };
+  }
   return {
     agent_mode: "simple_pipeline",
     analysis_model_code: form.analysis_model_code,
@@ -713,6 +777,7 @@ function typeFromRuntime(runtime: RuntimeConfig, category: string): GenerationTy
   if (runtime.agent_mode === "comic_drama" || runtime.preset_code === "ai_comic_drama") return "comic_drama";
   if (runtime.agent_mode === "novel_workshop" || runtime.preset_code === "novel_workshop") return "novel_workshop";
   if (runtime.agent_mode === "photo_studio" || runtime.preset_code === "photo_studio") return "photo_studio";
+  if (runtime.agent_mode === "virtual_try_on" || runtime.preset_code === "virtual_try_on") return "virtual_try_on";
   if (runtime.generation_type === "video" || category === "video" || runtime.preset_code === "product_showcase_video" || runtime.preset_code === "image_to_video") return "video";
   return "image";
 }
@@ -751,7 +816,11 @@ export default function AgentsAdminPage() {
     }),
     [models]
   );
-  const generationModels = form.generation_type === "video" || isVideoUtilityType(form.generation_type) ? videoModels : imageModels;
+  const generationModels = form.generation_type === "video" || isVideoUtilityType(form.generation_type)
+    ? videoModels
+    : form.generation_type === "virtual_try_on"
+      ? imageModels.filter((model) => isTryOnImageModel(model) || model.code === form.generation_model_code)
+      : imageModels;
   const activePreset = TYPE_PRESETS[form.generation_type];
   const paginatedItems = useMemo(() => items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [items, page]);
 
@@ -953,8 +1022,12 @@ export default function AgentsAdminPage() {
       setErr("硬字幕 AI 修复模式必须选择去字幕/视频修复模型");
       return;
     }
-    if (!form.system_workspace && form.generation_type !== "comic_drama" && !isVideoUtilityType(form.generation_type) && (!form.analysis_model_code || !form.generation_model_code)) {
+    if (!form.system_workspace && form.generation_type !== "comic_drama" && form.generation_type !== "virtual_try_on" && !isVideoUtilityType(form.generation_type) && (!form.analysis_model_code || !form.generation_model_code)) {
       setErr("请选择分析模型和生成模型");
+      return;
+    }
+    if (!form.system_workspace && form.generation_type === "virtual_try_on" && !form.generation_model_code) {
+      setErr("请选择支持双参考图的图片模型");
       return;
     }
     const originalBundle = mergedPresetBundle(form);
@@ -978,13 +1051,13 @@ export default function AgentsAdminPage() {
       name: form.name.trim(),
       description: form.description.trim(),
       icon: form.icon,
-      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" ? "workflow" : form.generation_type,
+      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "workflow" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
+      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : form.generation_type === "virtual_try_on" ? "virtual_try_on" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
-      generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" ? "image" : form.generation_type,
+      generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "image" : form.generation_type,
       preset_code: presetCode(form.generation_type),
       require_image: form.require_image,
       default_count: Number(form.default_count) || 1,
@@ -999,7 +1072,7 @@ export default function AgentsAdminPage() {
       allow_prompt_edit: form.allow_prompt_edit,
       nodes: bundle.nodes,
       input_schema: bundle.input_schema,
-      price_rule: form.generation_type === "novel_workshop" || form.generation_type === "photo_studio"
+      price_rule: form.generation_type === "novel_workshop" || form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on"
         ? { billing_type: "model_actual", unit_price: Number(form.unit_price) || 0 }
         : bundle.price_rule,
       display_config: bundle.display_config,
@@ -1011,6 +1084,8 @@ export default function AgentsAdminPage() {
         ? { ...bundle.runtime_config, analysis_model_code: form.analysis_model_code, generation_model_code: form.generation_model_code }
         : form.generation_type === "photo_studio"
         ? { ...bundle.runtime_config, analysis_model_code: form.analysis_model_code, generation_model_code: form.generation_model_code, default_count: Number(form.default_count) || 1 }
+        : form.generation_type === "virtual_try_on"
+        ? { ...bundle.runtime_config, generation_model_code: form.generation_model_code, default_count: Number(form.default_count) || 1 }
         : { ...bundle.runtime_config, creative_scenes: normalizeScenes((bundle.runtime_config as any)?.creative_scenes || form.creative_scenes, form.generation_type), output_scenes: undefined },
     };
     try {
@@ -1064,7 +1139,7 @@ export default function AgentsAdminPage() {
               {!form.system_workspace && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900"><Sparkles size={16} />选择智能体类型</div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama", "novel_workshop", "photo_studio"] as GenerationType[]).map((type) => {
+                  {(["image", "video", "video_upscale", "video_redraw", "subtitle_remove", "comic_drama", "novel_workshop", "photo_studio", "virtual_try_on"] as GenerationType[]).map((type) => {
                     const preset = TYPE_PRESETS[type];
                     const active = form.generation_type === type;
                     return (
@@ -1130,7 +1205,7 @@ export default function AgentsAdminPage() {
 
               {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
-                {!isVideoUtilityType(form.generation_type) && <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>}
+                {!isVideoUtilityType(form.generation_type) && form.generation_type !== "virtual_try_on" && <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>}
                 {form.generation_type !== "comic_drama" && form.generation_type !== "novel_workshop" && (
                   <Field label={form.generation_type === "video_upscale" ? "视频超分模型" : form.generation_type === "video_redraw" ? "视频转绘模型" : form.generation_type === "subtitle_remove" ? "硬字幕 AI 修复模型（可选）" : form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}>
                     <select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}>

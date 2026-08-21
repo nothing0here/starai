@@ -437,6 +437,7 @@ export function ChatTopTools({
   onReferenceImagesChange,
   maxReferenceImages = 4,
   assetLibraryLabel,
+  referenceAssetsOnly = false,
 }: {
   value: BottomBarState;
   onChange: (next: BottomBarState) => void;
@@ -447,6 +448,7 @@ export function ChatTopTools({
   onReferenceImagesChange?: (next: ReferenceImagePick[]) => void;
   maxReferenceImages?: number;
   assetLibraryLabel?: string;
+  referenceAssetsOnly?: boolean;
 }) {
   const { t, td } = useI18n();
   const kindText = useCallback((k?: string) => {
@@ -1155,7 +1157,7 @@ export function ChatTopTools({
                     >
                       {t("asset.myAssets")}
                     </button>
-                    <button
+                    {!referenceAssetsOnly && <button
                       type="button"
                       className={clsx(
                         "h-8 flex-1 rounded-lg text-sm font-medium transition",
@@ -1164,11 +1166,11 @@ export function ChatTopTools({
                       onClick={() => setAssetTab("gallery")}
                     >
                       {t("gallery.title")}
-                    </button>
+                    </button>}
                   </div>
-                  <p className="hidden max-w-[46%] text-[11px] leading-4 text-gray-400 lg:block">
+                  {!referenceAssetsOnly && <p className="hidden max-w-[46%] text-[11px] leading-4 text-gray-400 lg:block">
                     {t("asset.freeGalleryOnly")}
-                  </p>
+                  </p>}
                   </div>
 
                   <div className="mt-2 flex shrink-0 items-center gap-2">
