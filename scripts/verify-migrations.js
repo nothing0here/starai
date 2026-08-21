@@ -41,7 +41,7 @@ const manifest = new Map(
   })
 );
 for (const up of ups) {
-  const actual = crypto.createHash("sha256").update(fs.readFileSync(path.join(dir, up))).digest("hex");
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(path.join(dir, up), "utf8").replace(/\r\n/g, "\n")).digest("hex");
   if (!manifest.has(up)) errors.push(`missing checksum entry: ${up}`);
   else if (manifest.get(up) !== actual) errors.push(`migration checksum changed: ${up}`);
 }
