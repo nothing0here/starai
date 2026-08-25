@@ -4842,6 +4842,16 @@ export default function ModelsPage() {
               modelId={form.id}
               upstreamModel={form.new_api_model}
               endpoint={form.new_api_endpoint}
+              modelBillingType={String((safeParseJson(form.price_rule, {}) as Record<string, unknown>).billing_type || "per_token")}
+              onPrimaryBillingTypeChange={(billingType) => {
+                setForm((current) => ({
+                  ...current,
+                  price_rule: JSON.stringify({
+                    ...(safeParseJson(current.price_rule, {}) as Record<string, unknown>),
+                    billing_type: billingType,
+                  }, null, 2),
+                }));
+              }}
               onPrimaryConnectionChange={(connection) => {
                 setForm((current) => ({
                   ...current,

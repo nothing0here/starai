@@ -175,7 +175,7 @@ export function LoginModal({ open, onClose }: Props) {
     setReferralCode(fromURL.replace(/\D/g, "").slice(0, 6));
     setTab("email");
     api<{ google: boolean; github: boolean }>("/api/auth/oauth/providers")
-      .then(setProviders)
+      .then((value) => setProviders(value || {}))
       .catch(() => setProviders({}));
   }, [open, resetForm]);
 

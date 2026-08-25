@@ -59,6 +59,19 @@ func TestLegacyRouteCostInfersPerTokenBilling(t *testing.T) {
 	}
 }
 
+func TestDefaultRouteCostRuleFollowsModelBillingType(t *testing.T) {
+	for _, billingType := range []string{"per_request", "per_image", "per_second"} {
+		rule := defaultRouteCostRule(map[string]interface{}{"billing_type": billingType})
+		if rule["billing_type"] != billingType || rule["unit_cost"] != float64(0) {
+			t.Fatalf("billing type %q produced %#v", billingType, rule)
+		}
+	}
+	rule := defaultRouteCostRule(map[string]interface{}{"billing_type": "dynamic"})
+	if rule["billing_type"] != "per_token" {
+		t.Fatalf("unsupported billing type should fall back safely: %#v", rule)
+	}
+}
+
 func TestRouteFailureClassification(t *testing.T) {
 	badRequest := &runtime.PlatformError{Code: "MODEL_PROVIDER_ERROR", StatusCode: 400}
 	if isRouteFailoverError(badRequest) {

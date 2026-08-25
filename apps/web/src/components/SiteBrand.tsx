@@ -59,8 +59,8 @@ async function fetchBranding() {
   if (!brandingPromise) {
     brandingPromise = api<BrandData>("/api/system-configs/public")
       .then((data) => {
-        brandingCache = data;
-        return data;
+        brandingCache = data || DEFAULT_BRANDING;
+        return brandingCache;
       })
       .catch(() => DEFAULT_BRANDING);
   }

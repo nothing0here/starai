@@ -446,9 +446,19 @@ func (s *ModelService) EnsureDefaultModelRoute(ctx context.Context, modelID int6
 		RouteName: routeName + " · 主线路", Provider: stringValue(connection["provider"]), Protocol: stringValue(connection["protocol"]),
 		UpstreamModel: modelInput.NewAPIModel, Endpoint: modelInput.NewAPIEndpoint, BaseURL: baseURL,
 		APIKey: stringValue(connection["api_key"]), AuthType: stringValue(connection["auth_type"]), APIKeyHeader: stringValue(connection["api_key_header"]),
-		Headers: headers, ExtraParams: map[string]interface{}{}, RuntimeRule: map[string]interface{}{}, CostRule: map[string]interface{}{}, Priority: 100, Weight: 100, TimeoutSeconds: 120, IsEnabled: modelInput.IsEnabled,
+		Headers: headers, ExtraParams: map[string]interface{}{}, RuntimeRule: map[string]interface{}{}, CostRule: defaultRouteCostRule(modelInput.PriceRule), Priority: 100, Weight: 100, TimeoutSeconds: 120, IsEnabled: modelInput.IsEnabled,
 	})
 	return err
+}
+
+func defaultRouteCostRule(priceRule map[string]interface{}) map[string]interface{} {
+	billingType := strings.ToLower(strings.TrimSpace(stringValue(priceRule["billing_type"])))
+	switch billingType {
+	case "per_request", "per_image", "per_second":
+		return map[string]interface{}{"billing_type": billingType, "unit_cost": float64(0)}
+	default:
+		return map[string]interface{}{"billing_type": "per_token", "input_cost_per_m": float64(0), "output_cost_per_m": float64(0)}
+	}
 }
 
 // SyncPrimaryModelRoute keeps the legacy/basic model connection fields aligned

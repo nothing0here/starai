@@ -912,6 +912,11 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
 	normalizePayloadMedia(ctx, payload, endpoint)
+	if isVideo {
+		if err := validateOmniReferencePayload(payload); err != nil {
+			return result, err
+		}
+	}
 	var err error
 	if isImage && isVideoImageAPI(endpoint, upstreamModel) {
 		result.ResultData, result.UpstreamTaskID, err = runBananaImageBatch(ctx, pool, route.Connection, endpoint, payload, route.RuntimeRule, p.TaskNo, result.GenerationCount)
@@ -1641,22 +1646,61 @@ func normalizeReferenceImage(ctx context.Context, src string) string {
 	}
 	// 参考图规范化同样需要超时，不可达的 URL 不能让任务挂死。
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
-	if err != nil {
-		return src
+	var data []byte
+	contentType := ""
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode < 400 {
+			contentType = resp.Header.Get("Content-Type")
+			data, err = io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+			if len(data) > 0 && !strings.HasPrefix(contentType, "image/") {
+				contentType = http.DetectContentType(data)
+			}
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return src
-	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "image/png"
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil || len(data) == 0 || len(data) > 10<<20 || !strings.HasPrefix(contentType, "image/") {
-		return src
+		if objectStore == nil {
+			return src
+		}
+		objectKey := objectStore.ObjectKeyFromURL(src)
+		if objectKey == "" {
+			return src
+		}
+		data, err = objectStore.ReadAll(ctx, objectKey, 10<<20)
+		if err != nil || len(data) == 0 {
+			return src
+		}
+		contentType = http.DetectContentType(data)
+		if !strings.HasPrefix(contentType, "image/") {
+			return src
+		}
 	}
 	return "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(data)
+}
+
+func validateOmniReferencePayload(payload map[string]interface{}) error {
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["model"]))), "omni") {
+		return nil
+	}
+	refs := payload["images"]
+	if refs == nil {
+		return nil
+	}
+	images := []string{}
+	switch value := refs.(type) {
+	case []string:
+		images = value
+	case []interface{}:
+		for _, item := range value {
+			images = append(images, strings.TrimSpace(fmt.Sprint(item)))
+		}
+	}
+	for _, image := range images {
+		if !strings.HasPrefix(strings.ToLower(image), "data:image/") {
+			return errors.New("Omni 参考图读取失败：请检查对象存储或素材公网地址，已阻止降级为无参考图生成")
+		}
+	}
+	return nil
 }
 
 type mediaItem struct {

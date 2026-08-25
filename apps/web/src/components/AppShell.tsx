@@ -218,7 +218,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
           : `?category=${category}`;
     const controller = new AbortController();
     apiForLocale<Model[]>(`/api/models${q}`, locale, { signal: controller.signal })
-      .then(setModels)
+      .then((items) => setModels(Array.isArray(items) ? items : []))
       .catch((error) => {
         if (error?.name !== "AbortError") setModels([]);
       });
@@ -237,7 +237,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
     }
     const controller = new AbortController();
     apiForLocale<Model>(`/api/models/${activeModelCode}`, locale, { signal: controller.signal })
-      .then(setActiveModel)
+      .then((item) => setActiveModel(item || null))
       .catch((error) => {
         if (error?.name !== "AbortError") setActiveModel(null);
       });
@@ -250,7 +250,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
     const controller = new AbortController();
     apiForLocale<{ items: AgentItem[] }>("/api/agents", locale, { signal: controller.signal })
       .then((r) => {
-        const items = r.items || [];
+        const items = Array.isArray(r?.items) ? r.items : [];
         setAgents(items);
         setAgentsLoaded(true);
         if (!isMobile) {
@@ -269,7 +269,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
 
   useEffect(() => {
     if (!isWorkbench || section !== "gallery") return;
-    api<{ items: GalleryTag[] }>("/api/gallery/tags").then((r) => setGalleryTags(r.items || []));
+    api<{ items: GalleryTag[] }>("/api/gallery/tags").then((r) => setGalleryTags(Array.isArray(r?.items) ? r.items : []));
   }, [isWorkbench, section]);
 
   const filteredModels = useMemo(() => {

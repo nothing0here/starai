@@ -1,11 +1,44 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/starai/worker/internal/storage"
 )
+
+func TestOmniReferenceUsesManagedAssetBytes(t *testing.T) {
+	store, err := storage.NewLocal(t.TempDir(), "http://127.0.0.1:1/uploads-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousStore := objectStore
+	objectStore = store
+	defer func() { objectStore = previousStore }()
+
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 'I', 'H', 'D', 'R'}
+	assetURL, err := store.Upload(context.Background(), "assets/1/ref.png", "image/png", bytes.NewReader(png), int64(len(png)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalized := normalizeReferenceImage(context.Background(), assetURL)
+	if !strings.HasPrefix(normalized, "data:image/png;base64,") {
+		t.Fatalf("managed reference was not embedded: %q", normalized)
+	}
+	payload := map[string]interface{}{"model": "omni_flash-10s", "images": []interface{}{normalized}}
+	if err := validateOmniReferencePayload(payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["images"] = []interface{}{assetURL}
+	if err := validateOmniReferencePayload(payload); err == nil {
+		t.Fatal("unresolved Omni reference must not silently degrade to text-only generation")
+	}
+}
 
 func TestParseUpstreamMediaKeepsTaskIDWhenMediaExists(t *testing.T) {
 	body := []byte(`{

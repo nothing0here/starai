@@ -51,6 +51,46 @@ func (c *LocalClient) Upload(ctx context.Context, objectName, contentType string
 	return c.publicURLFor(objectName), nil
 }
 
+func (c *LocalClient) ReadAll(ctx context.Context, objectName string, maxBytes int64) ([]byte, error) {
+	target, err := c.safePath(objectName)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("object exceeds size limit")
+	}
+	return data, nil
+}
+
+func (c *LocalClient) ObjectKeyFromURL(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	base, _ := url.Parse(c.publicURL)
+	if base == nil || base.Host == "" || !strings.EqualFold(u.Host, base.Host) {
+		return ""
+	}
+	path := strings.Trim(strings.TrimPrefix(u.Path, "/"), "/")
+	basePath := strings.Trim(strings.TrimPrefix(base.Path, "/"), "/")
+	if basePath != "" {
+		path = strings.TrimPrefix(path, basePath+"/")
+	}
+	if _, err := c.safePath(path); err != nil {
+		return ""
+	}
+	return path
+}
+
 func (c *LocalClient) publicURLFor(objectName string) string {
 	key := strings.Trim(strings.ReplaceAll(objectName, "\\", "/"), "/")
 	parts := strings.Split(key, "/")

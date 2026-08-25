@@ -1159,12 +1159,12 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
     api<PublicConfig>("/api/system-configs/public")
       .then((cfg) => {
         if (!alive) return;
-        const next = normalizeUILanguages(cfg.ui_languages);
+        const next = normalizeUILanguages(cfg?.ui_languages);
         setLanguages(next);
-        setOverrides(normalizeTranslationOverrides(cfg.ui_translation_overrides));
+        setOverrides(normalizeTranslationOverrides(cfg?.ui_translation_overrides));
         const stored = localStorage.getItem("site_locale") || "";
         const userLocale = user?.locale || "";
-        setLocaleState((current) => matchLocale([stored, current, userLocale, cfg.default_locale || "", navigator.language], next));
+        setLocaleState((current) => matchLocale([stored, current, userLocale, cfg?.default_locale || "", navigator.language], next));
       })
       .catch(() => {
         if (!alive) return;

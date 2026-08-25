@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -61,4 +63,37 @@ func (c *Client) Upload(ctx context.Context, objectName, contentType string, r i
 		return "", err
 	}
 	return fmt.Sprintf("%s/%s/%s", c.publicURL, c.bucket, objectName), nil
+}
+
+func (c *Client) ReadAll(ctx context.Context, objectName string, maxBytes int64) ([]byte, error) {
+	object, err := c.mc.GetObject(ctx, c.bucket, objectName, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer object.Close()
+	data, err := io.ReadAll(io.LimitReader(object, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("object exceeds size limit")
+	}
+	return data, nil
+}
+
+func (c *Client) ObjectKeyFromURL(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	base, _ := url.Parse(strings.TrimRight(c.publicURL, "/"))
+	if base == nil || base.Host == "" || !strings.EqualFold(u.Host, base.Host) {
+		return ""
+	}
+	path := strings.TrimPrefix(u.Path, "/")
+	basePath := strings.Trim(strings.TrimPrefix(base.Path, "/"), "/")
+	if basePath != "" {
+		path = strings.TrimPrefix(path, basePath+"/")
+	}
+	return strings.TrimPrefix(path, c.bucket+"/")
 }
