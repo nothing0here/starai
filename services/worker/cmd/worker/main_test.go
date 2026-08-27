@@ -201,6 +201,26 @@ func TestUnwrapUpstreamBodySupportsNestedTask(t *testing.T) {
 	}
 }
 
+func TestUnwrapUpstreamBodyPrefersDeepTaskStatus(t *testing.T) {
+	got := unwrapUpstreamBody(map[string]interface{}{
+		"status":   "processing",
+		"progress": 28,
+		"data": map[string]interface{}{
+			"task": map[string]interface{}{
+				"status":    "completed",
+				"progress":  100,
+				"video_url": "https://example.com/result.mp4",
+			},
+		},
+	})
+	if got["status"] != "completed" || got["progress"] != 100 {
+		t.Fatalf("deep task status was not preferred: %#v", got)
+	}
+	if got["video_url"] != "https://example.com/result.mp4" {
+		t.Fatalf("deep task media was not unwrapped: %#v", got)
+	}
+}
+
 func TestUpstreamRequestTimeoutSupportsAudioAndOverride(t *testing.T) {
 	if got := upstreamRequestTimeout(nil, true); got != 15*time.Minute {
 		t.Fatalf("audio timeout = %s", got)

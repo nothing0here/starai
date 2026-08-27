@@ -2009,23 +2009,22 @@ func detectRawAudioContentType(body []byte) string {
 }
 
 func unwrapUpstreamBody(raw map[string]interface{}) map[string]interface{} {
-	for _, rootKey := range []string{"data", "task"} {
+	merged := make(map[string]interface{}, len(raw))
+	for k, v := range raw {
+		merged[k] = v
+	}
+	for _, rootKey := range []string{"data", "task", "result", "output"} {
 		nested, ok := raw[rootKey].(map[string]interface{})
 		if !ok {
 			continue
 		}
-		merged := make(map[string]interface{}, len(raw)+len(nested))
-		for k, v := range raw {
+		for k, v := range unwrapUpstreamBody(nested) {
+			// The inner task is authoritative; gateway envelopes may retain stale
+			// status/progress values while the provider task is already complete.
 			merged[k] = v
 		}
-		for k, v := range nested {
-			if _, exists := merged[k]; !exists {
-				merged[k] = v
-			}
-		}
-		return merged
 	}
-	return raw
+	return merged
 }
 
 func extractMediaItems(raw map[string]interface{}) []mediaItem {
