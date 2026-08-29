@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 go build -p=2 -o /api ./cmd/api
 RUN CGO_ENABLED=0 go build -p=2 -o /migrate ./cmd/migrate
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates ffmpeg
 COPY --from=builder /api /api
 COPY --from=builder /migrate /migrate
 EXPOSE 8080

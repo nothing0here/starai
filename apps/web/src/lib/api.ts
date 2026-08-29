@@ -90,6 +90,13 @@ export async function uploadAsset(
   return json.data as { public_id: string; url: string; name?: string; kind?: string; asset_type?: string; mime_type?: string; size_bytes?: number };
 }
 
+export async function importAssetFromURL(url: string, name?: string) {
+  return api<{ public_id: string; url: string; name?: string; kind: string; asset_type: string; mime_type?: string; size_bytes?: number; duration_seconds?: number }>("/api/assets/import-url", {
+    method: "POST",
+    body: JSON.stringify({ url, ...(name ? { name } : {}) }),
+  });
+}
+
 export async function listAssets(params: { q?: string; tag?: string; kind?: string; type?: string; page?: number; page_size?: number } = {}) {
   const sp = new URLSearchParams();
   if (params.q) sp.set("q", params.q);

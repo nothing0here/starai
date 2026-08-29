@@ -110,13 +110,36 @@ func (s *CanvasService) List(ctx context.Context, userID int64, workflowCode str
 		workflowCode = "infinite_canvas"
 	}
 	var total int
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM infinite_canvases WHERE user_id=$1 AND workflow_code=$2`, userID, workflowCode).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM infinite_canvases
+		WHERE user_id=$1 AND workflow_code=$2
+		  AND (
+		    document ? 'submitted_at'
+		    OR EXISTS (
+		      SELECT 1 FROM jsonb_array_elements(document->'nodes') AS node
+		      WHERE COALESCE(node->'data'->>'taskNo', '') <> ''
+		         OR COALESCE(node->'data'->>'outputText', '') <> ''
+		         OR COALESCE(node->'data'->>'outputUrl', '') <> ''
+		         OR CASE WHEN jsonb_typeof(node->'data'->'taskNos') = 'array' THEN jsonb_array_length(node->'data'->'taskNos') ELSE 0 END > 0
+		    )
+		  )`, userID, workflowCode).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT public_id, workflow_code, title, created_at, updated_at
 		FROM infinite_canvases
 		WHERE user_id=$1 AND workflow_code=$2
+		  AND (
+		    document ? 'submitted_at'
+		    OR EXISTS (
+		      SELECT 1 FROM jsonb_array_elements(document->'nodes') AS node
+		      WHERE COALESCE(node->'data'->>'taskNo', '') <> ''
+		         OR COALESCE(node->'data'->>'outputText', '') <> ''
+		         OR COALESCE(node->'data'->>'outputUrl', '') <> ''
+		         OR CASE WHEN jsonb_typeof(node->'data'->'taskNos') = 'array' THEN jsonb_array_length(node->'data'->'taskNos') ELSE 0 END > 0
+		    )
+		  )
 		ORDER BY updated_at DESC
 		LIMIT $3 OFFSET $4`, userID, workflowCode, pageSize, (page-1)*pageSize)
 	if err != nil {

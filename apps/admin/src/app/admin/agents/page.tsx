@@ -302,6 +302,7 @@ const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "photo-restoration", name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图", template_id: "photo-restoration" },
   { id: "story-short-video", name: "故事短视频", description: "故事拆分为多关键帧、多视频片段并合成为完整成片", template_id: "story-short-video" },
   { id: "viral-remake", name: "爆款复刻", description: "多模态拆解爆款参考，生成多关键帧、多片段并合成为原创短视频", template_id: "viral-remake" },
+  { id: "one-click-viral-remake", name: "一键爆款复刻", description: "导入 TikTok 视频和商品素材，一键拆解并生成原创带货短视频", template_id: "one-click-viral-remake" },
 ];
 
 const defaultNodes = (analysis = "", generation = "", type: GenerationType = "image", imageModel = "", videoModel = ""): WorkflowNode[] => {

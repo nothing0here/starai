@@ -138,6 +138,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			auth.GET("/me", h.GetMe)
 			auth.POST("/upload", h.Upload)
 			auth.POST("/assets/upload", h.UploadAsset)
+			auth.POST("/assets/import-url", h.ImportAssetURL)
 			auth.GET("/assets", h.ListAssets)
 			auth.GET("/assets/:id", h.GetAsset)
 			auth.DELETE("/assets/:id", h.DeleteAsset)
