@@ -547,18 +547,46 @@ function ModelOrbit() {
 
 type CustomerServiceConfig = ReturnType<typeof useSiteBranding>;
 
+function isCustomerServiceEnabled(value: unknown) {
+  return value === undefined || !(value === false || value === 0 || String(value).toLowerCase() === "false");
+}
+
+function ThirdPartyCustomerServiceScript({ enabled, code }: { enabled: unknown; code?: string }) {
+  const mountRef = useRef<HTMLSpanElement>(null);
+  const active = isCustomerServiceEnabled(enabled);
+
+  useEffect(() => {
+    const source = code?.trim();
+    const mount = mountRef.current;
+    if (!active || !source || !mount) return;
+
+    const runtimeWindow = window as Window & { __starAICustomerServiceScript?: string };
+    if (runtimeWindow.__starAICustomerServiceScript === source) return;
+
+    const template = document.createElement("template");
+    template.innerHTML = source;
+    const scripts = Array.from(template.content.querySelectorAll("script"));
+    if (scripts.length === 0) return;
+
+    runtimeWindow.__starAICustomerServiceScript = source;
+    scripts.forEach((sourceScript) => {
+      const script = document.createElement("script");
+      Array.from(sourceScript.attributes).forEach((attribute) => script.setAttribute(attribute.name, attribute.value));
+      script.textContent = sourceScript.textContent;
+      script.dataset.staraiCustomerService = "true";
+      mount.appendChild(script);
+    });
+  }, [active, code]);
+
+  if (!active || !code?.trim()) return null;
+  return <span ref={mountRef} className="hidden" aria-hidden="true" />;
+}
+
 function CustomerService({ config }: { config: CustomerServiceConfig }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState("");
-  const enabledValue: unknown = config.customer_service_enabled;
-  const enabled =
-    enabledValue === undefined ||
-    !(
-      enabledValue === false ||
-      enabledValue === 0 ||
-      String(enabledValue).toLowerCase() === "false"
-    );
+  const enabled = isCustomerServiceEnabled(config.customer_service_enabled);
   if (!enabled) return null;
 
   const title = config.customer_service_title || t("customerService.title");
@@ -1078,7 +1106,11 @@ export default function LandingPageClient() {
         </div>
       </footer>
 
-      <CustomerService config={branding} />
+      {branding.customer_service_mode === "custom_script" && branding.customer_service_custom_script?.trim() ? (
+        <ThirdPartyCustomerServiceScript enabled={branding.customer_service_enabled} code={branding.customer_service_custom_script} />
+      ) : (
+        <CustomerService config={branding} />
+      )}
       <LoginModal open={showLogin} onClose={() => setShowLogin(false)} />
     </div>
   );

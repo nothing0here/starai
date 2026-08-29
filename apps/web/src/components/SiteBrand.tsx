@@ -25,6 +25,8 @@ type BrandData = Pick<
   | "privacy_content"
   | "image_captcha_enabled"
   | "customer_service_enabled"
+  | "customer_service_mode"
+  | "customer_service_custom_script"
   | "customer_service_title"
   | "customer_service_name"
   | "customer_service_subtitle"
@@ -49,6 +51,9 @@ const DEFAULT_BRANDING: BrandData = {
   terms_content: "",
   privacy_title: "隐私政策",
   privacy_content: "",
+  customer_service_enabled: false,
+  customer_service_mode: "builtin",
+  customer_service_custom_script: "",
 };
 
 let brandingCache: BrandData | null = null;

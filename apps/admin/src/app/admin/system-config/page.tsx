@@ -307,6 +307,7 @@ export default function SystemConfigPage() {
               String(cfg.customer_service_enabled).toLowerCase() === "false"
             );
       setConfigs({
+        customer_service_custom_script: "",
         customer_service_title: "联系客服",
         customer_service_name: "在线客服",
         customer_service_subtitle: "我们随时为您服务",
@@ -320,6 +321,7 @@ export default function SystemConfigPage() {
         email_provider: "smtp",
         ...cfg,
         customer_service_enabled: customerServiceEnabled,
+        customer_service_mode: cfg.customer_service_mode === "custom_script" ? "custom_script" : "builtin",
         image_captcha_enabled: cfg.image_captcha_enabled === undefined ? true : !(cfg.image_captcha_enabled === false || cfg.image_captcha_enabled === 0 || String(cfg.image_captcha_enabled).toLowerCase() === "false"),
       });
       setUiLanguageRows(normalizeUILanguageRows(cfg.ui_languages));
@@ -1164,12 +1166,49 @@ export default function SystemConfigPage() {
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
           <div className="mb-1 text-sm font-semibold text-gray-900">首页在线客服</div>
-          <p className="mb-5 text-xs leading-relaxed text-gray-400">配置首页右下角悬浮入口和客服弹窗。悬浮图会等比例显示在固定尺寸容器内，避免过小或过度占据页面。</p>
+          <p className="mb-5 text-xs leading-relaxed text-gray-400">启用后可使用平台现有客服，或在首页 Footer 后执行第三方客服提供的完整 JS 安装代码。</p>
 
+          <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+            {renderItem({ key: "customer_service_enabled", label: "启用首页在线客服", type: "checkbox" })}
+            {renderItem({
+              key: "customer_service_mode",
+              label: "客服方式",
+              type: "select",
+              options: [
+                { value: "builtin", label: "现有客服" },
+                { value: "custom_script", label: "第三方 JS 客服" },
+              ],
+            })}
+          </div>
+
+          {configs.customer_service_mode === "custom_script" ? (
+            <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+              <div>
+                <label className="text-xs text-gray-500">第三方客服 JS 安装代码</label>
+                <textarea
+                  value={String(configs.customer_service_custom_script ?? "")}
+                  onChange={(event) => setField("customer_service_custom_script", event.target.value)}
+                  spellCheck={false}
+                  placeholder={'<script>\n  // 粘贴第三方客服提供的完整安装代码\n</script>'}
+                  className="mt-1 min-h-72 w-full rounded-xl border border-gray-200 bg-gray-950 px-4 py-3 font-mono text-xs leading-6 text-emerald-300 focus:border-primary focus:outline-none"
+                />
+                <p className="mt-2 text-[11px] leading-5 text-amber-600">仅粘贴可信客服平台提供的官方代码。脚本会在用户首页执行，请勿填写管理密钥或私密 API Key。</p>
+              </div>
+              <div className="rounded-3xl bg-[#11151b] p-5 text-white">
+                <div className="text-xs font-medium uppercase tracking-wider text-white/40">第三方客服 · 状态</div>
+                <div className="mt-4 rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+                  <div className="flex items-center gap-3">
+                    <span className={`h-2.5 w-2.5 rounded-full ${String(configs.customer_service_custom_script || "").trim() ? "bg-emerald-400" : "bg-amber-400"}`} />
+                    <div className="font-semibold">{String(configs.customer_service_custom_script || "").trim() ? "安装代码已填写" : "等待填写安装代码"}</div>
+                  </div>
+                  <p className="mt-4 text-xs leading-6 text-white/50">管理后台不会执行这段代码。保存后打开用户端首页，即可验证第三方客服入口。</p>
+                </div>
+              </div>
+            </div>
+          ) : (
           <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
             <div className="space-y-5">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {renderItem({ key: "customer_service_enabled", label: "启用首页在线客服", type: "checkbox" })}
                 {renderItem({ key: "customer_service_title", label: "弹窗标题", type: "text", hint: "例如：联系客服。" })}
                 {renderItem({ key: "customer_service_name", label: "客服名称", type: "text", hint: "例如：乌苏、StarAI 客服。" })}
                 {renderItem({ key: "customer_service_subtitle", label: "弹窗副标题", type: "text", hint: "例如：我们随时为您服务。" })}
@@ -1271,6 +1310,7 @@ export default function SystemConfigPage() {
               </div>
             </div>
           </div>
+          )}
         </section>
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5">

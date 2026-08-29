@@ -160,6 +160,8 @@ export interface SystemConfig {
   privacy_content?: string;
   image_captcha_enabled?: boolean;
   customer_service_enabled?: boolean;
+  customer_service_mode?: "builtin" | "custom_script";
+  customer_service_custom_script?: string;
   customer_service_title?: string;
   customer_service_name?: string;
   customer_service_subtitle?: string;

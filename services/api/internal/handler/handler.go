@@ -3484,6 +3484,10 @@ func (h *Handler) AdminUpdateConfig(c *gin.Context) {
 		util.BadRequest(c, "参数错误")
 		return
 	}
+	if message := validateCustomerServiceConfig(req); message != "" {
+		util.BadRequest(c, message)
+		return
+	}
 	if _, hasEnabled := req["i18n_auto_translate_enabled"]; hasEnabled || req["i18n_translation_model_code"] != nil {
 		current, err := h.admin.GetSystemConfigs(c.Request.Context())
 		if err != nil {
@@ -3522,6 +3526,29 @@ func (h *Handler) AdminUpdateConfig(c *gin.Context) {
 	if enabled, ok := req["i18n_auto_translate_enabled"].(bool); ok && enabled {
 		h.StartContentTranslationBackfill()
 	}
+}
+
+func validateCustomerServiceConfig(req map[string]interface{}) string {
+	if value, ok := req["customer_service_mode"]; ok {
+		mode, valid := value.(string)
+		if !valid || (mode != "builtin" && mode != "custom_script") {
+			return "首页客服方式参数错误"
+		}
+	}
+	if value, ok := req["customer_service_custom_script"]; ok {
+		script, valid := value.(string)
+		if !valid {
+			return "第三方客服脚本参数错误"
+		}
+		if len(script) > 100*1024 {
+			return "第三方客服脚本不能超过 100KB"
+		}
+		lower := strings.ToLower(strings.TrimSpace(script))
+		if lower != "" && (!strings.Contains(lower, "<script") || !strings.Contains(lower, "</script>")) {
+			return "第三方客服脚本必须包含完整的 <script> 标签"
+		}
+	}
+	return ""
 }
 
 func (h *Handler) AdminListContentTranslations(c *gin.Context) {
@@ -3957,6 +3984,8 @@ func (h *Handler) GetPublicSystemConfigs(c *gin.Context) {
 		"privacy_content":                 cfg["privacy_content"],
 		"image_captcha_enabled":           cfg["image_captcha_enabled"],
 		"customer_service_enabled":        cfg["customer_service_enabled"],
+		"customer_service_mode":           cfg["customer_service_mode"],
+		"customer_service_custom_script":  cfg["customer_service_custom_script"],
 		"customer_service_title":          cfg["customer_service_title"],
 		"customer_service_name":           cfg["customer_service_name"],
 		"customer_service_subtitle":       cfg["customer_service_subtitle"],
