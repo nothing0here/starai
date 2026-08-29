@@ -703,7 +703,7 @@ func (s *ModelService) ListAll(ctx context.Context) ([]AdminModelDTO, error) {
 }
 
 func scanAdminModels(rows pgx.Rows) ([]AdminModelDTO, error) {
-	var models []AdminModelDTO
+	models := make([]AdminModelDTO, 0)
 	for rows.Next() {
 		var m AdminModelDTO
 		var tags, runtime, schema, defaults, extra, price []byte
