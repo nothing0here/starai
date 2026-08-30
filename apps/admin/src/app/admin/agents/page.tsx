@@ -6,14 +6,14 @@ import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2,
 import { adminApi } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
-type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on";
+type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "creative_agent";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
 type RuntimeConfig = {
-  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove";
+  agent_mode?: "simple_pipeline" | "custom_nodes" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "infinite_canvas" | "video_upscale" | "video_redraw" | "subtitle_remove" | "creative_chat";
   system_workspace?: boolean;
   analysis_model_code?: string;
   generation_model_code?: string;
-  generation_type?: GenerationType | "chat";
+  generation_type?: GenerationType | "chat" | "mixed";
   preset_code?: string;
   require_image?: boolean;
   default_count?: number;
@@ -27,6 +27,8 @@ type RuntimeConfig = {
   dialogue_model_codes?: string[];
   image_model_code?: string;
   video_model_code?: string;
+  speech_model_code?: string;
+  music_model_code?: string;
   narration_model_code?: string;
   audio_strategy?: "video_native" | "tts_only" | "hybrid";
   style_reference_mode?: string;
@@ -95,6 +97,8 @@ type FormState = {
   generation_model_code: string;
   image_model_code: string;
   video_model_code: string;
+  speech_model_code: string;
+  music_model_code: string;
   narration_model_code: string;
   audio_strategy: "video_native" | "tts_only" | "hybrid";
   dialogue_model_codes: string;
@@ -168,6 +172,18 @@ const COMIC_SCENES: SceneDef[] = [
 ];
 
 const TYPE_PRESETS = {
+  creative_agent: {
+    label: "通用智能体",
+    icon: "✦",
+    theme: "amber",
+    description: "通过聊天理解创作意图，自动选择图片或视频链路。",
+    placeholder: "描述想法、脚本或上传参考素材",
+    help: "直接描述需求，Agent 会先分析任务类型，再调用后台指定的图片或视频模型。",
+    imageLabel: "参考素材",
+    heroTags: ["Agent 模式", "图片生成", "视频生成"],
+    featureTags: ["意图识别", "自动选模型", "生成前确认"],
+    defaults: { require_image: false, allow_text_only: true, support_reference_image: true, support_multiple_references: true, support_first_last_frame: false },
+  },
   image: {
     label: "电商图片",
     icon: "🖼️",
@@ -285,9 +301,9 @@ const isTryOnImageModel = (model: AdminModel) => {
   const searchable = `${model.code} ${model.display_name} ${JSON.stringify(model.runtime_rule || {})}`.toLowerCase();
   return searchable.includes("nano_banana") || searchable.includes("nano banana") || searchable.includes("gpt-image-2") || searchable.includes("gemini");
 };
-const defaultScenes = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
-const sceneDefs = (type: GenerationType) => (isVideoUtilityType(type) ? [] : type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
-const presetCode = (type: GenerationType) => (isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "novel_workshop" ? "novel_workshop" : type === "photo_studio" ? "photo_studio" : type === "virtual_try_on" ? "virtual_try_on" : type === "video" ? "ecommerce_video" : "ecommerce_image");
+const defaultScenes = (type: GenerationType) => (type === "creative_agent" || isVideoUtilityType(type) ? [] : type === "comic_drama" ? ["ai_comic_drama"] : type === "video" ? ["product_video"] : ["main_image"]);
+const sceneDefs = (type: GenerationType) => (type === "creative_agent" || isVideoUtilityType(type) ? [] : type === "comic_drama" ? COMIC_SCENES : type === "video" ? VIDEO_SCENES : IMAGE_SCENES);
+const presetCode = (type: GenerationType) => (type === "creative_agent" ? "general_creative_agent" : isVideoUtilityType(type) ? type : type === "comic_drama" ? "ai_comic_drama" : type === "novel_workshop" ? "novel_workshop" : type === "photo_studio" ? "photo_studio" : type === "virtual_try_on" ? "virtual_try_on" : type === "video" ? "ecommerce_video" : "ecommerce_image");
 const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
   { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
@@ -306,6 +322,13 @@ const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
 ];
 
 const defaultNodes = (analysis = "", generation = "", type: GenerationType = "image", imageModel = "", videoModel = ""): WorkflowNode[] => {
+  if (type === "creative_agent") {
+    return [
+      { id: "plan", type: "llm", name: "意图分析", model_code: analysis, prompt_template: "", cost: 0 },
+      { id: "image", type: "image", name: "图片生成", model_code: imageModel, prompt_template: "", cost: 0 },
+      { id: "video", type: "video", name: "视频生成", model_code: videoModel, prompt_template: "", cost: 0 },
+    ];
+  }
   if (type === "video_upscale") {
     return [{ id: "upscale", type: "video", name: "AI 视频高清", model_code: generation, prompt_template: "", cost: 0 }];
   }
@@ -654,6 +677,24 @@ function runtimeConfig(form: FormState): RuntimeConfig {
       flow_options: { enable_step_confirm: false, enable_autopilot: true, allow_prompt_edit: true },
     };
   }
+  if (form.generation_type === "creative_agent") {
+    return {
+      agent_mode: "creative_chat",
+      analysis_model_code: form.analysis_model_code,
+      image_model_code: form.image_model_code,
+      video_model_code: form.video_model_code,
+      speech_model_code: form.speech_model_code,
+      music_model_code: form.music_model_code,
+      generation_model_code: form.image_model_code,
+      generation_type: "mixed",
+      preset_code: "general_creative_agent",
+      require_image: false,
+      default_count: 1,
+      candidate_count: 1,
+      input_capabilities: { allow_text_only: true, support_reference_image: true, support_reference_video: true, support_reference_audio: true, support_multiple_references: true },
+      flow_options: { enable_step_confirm: true, enable_autopilot: true, allow_prompt_edit: true },
+    };
+  }
   return {
     agent_mode: "simple_pipeline",
     analysis_model_code: form.analysis_model_code,
@@ -690,7 +731,7 @@ function presetBundle(form: FormState): PresetBundle {
       form.image_model_code,
       form.video_model_code
     ),
-    price_rule: { billing_type: "per_request", unit_price: Number(form.unit_price) || 0 },
+    price_rule: form.generation_type === "creative_agent" ? { billing_type: "model_actual", unit_price: 0 } : { billing_type: "per_request", unit_price: Number(form.unit_price) || 0 },
   };
 }
 
@@ -714,6 +755,8 @@ function makeEmptyForm(): FormState {
     generation_model_code: "",
     image_model_code: "image_fast_v1",
     video_model_code: "video_demo_v1",
+    speech_model_code: "",
+    music_model_code: "",
     narration_model_code: "",
     audio_strategy: "video_native",
     dialogue_model_codes: "chat_demo_v1",
@@ -758,7 +801,7 @@ function makeEmptyForm(): FormState {
 }
 
 function normalizeScenes(items: unknown, type: GenerationType): string[] {
-  if (isVideoUtilityType(type)) return [];
+  if (type === "creative_agent" || isVideoUtilityType(type)) return [];
   const fallback = type === "video" ? "product_video" : "main_image";
   const allowed = new Set(sceneDefs(type).map((item) => item.code));
   const raw = Array.isArray(items) ? items.map(String) : [];
@@ -772,6 +815,7 @@ function readBool(map: Record<string, any> | undefined, key: string, fallback: b
 }
 
 function typeFromRuntime(runtime: RuntimeConfig, category: string): GenerationType {
+  if (runtime.agent_mode === "creative_chat" || runtime.preset_code === "general_creative_agent" || runtime.generation_type === "mixed") return "creative_agent";
   if (runtime.agent_mode === "video_upscale" || runtime.preset_code === "video_upscale") return "video_upscale";
   if (runtime.agent_mode === "video_redraw" || runtime.preset_code === "video_redraw") return "video_redraw";
   if (runtime.agent_mode === "subtitle_remove" || runtime.preset_code === "subtitle_remove") return "subtitle_remove";
@@ -814,6 +858,14 @@ export default function AgentsAdminPage() {
       const properties = (m.input_schema?.properties || {}) as Record<string, unknown>;
       if (searchable.includes("music") || searchable.includes("suno") || "lyrics" in properties) return false;
       return true;
+    }),
+    [models]
+  );
+  const musicModels = useMemo(
+    () => models.filter((m) => {
+      if (!m.is_enabled || m.category !== "audio") return false;
+      const audio = (m.runtime_rule?.audio || {}) as Record<string, unknown>;
+      return audio.input_layout === "dual" || /(music|suno|音乐|歌曲)/i.test(`${m.code} ${m.display_name}`);
     }),
     [models]
   );
@@ -894,6 +946,8 @@ export default function AgentsAdminPage() {
       generation_model_code: runtime.generation_model_code || "",
       image_model_code: runtime.image_model_code || "image_fast_v1",
       video_model_code: runtime.video_model_code || runtime.generation_model_code || "video_demo_v1",
+      speech_model_code: runtime.speech_model_code || "",
+      music_model_code: runtime.music_model_code || "",
       narration_model_code: runtime.narration_model_code || "",
       audio_strategy: runtime.audio_strategy === "video_native" || runtime.audio_strategy === "tts_only" || runtime.audio_strategy === "hybrid"
         ? runtime.audio_strategy
@@ -1023,7 +1077,11 @@ export default function AgentsAdminPage() {
       setErr("硬字幕 AI 修复模式必须选择去字幕/视频修复模型");
       return;
     }
-    if (!form.system_workspace && form.generation_type !== "comic_drama" && form.generation_type !== "virtual_try_on" && !isVideoUtilityType(form.generation_type) && (!form.analysis_model_code || !form.generation_model_code)) {
+    if (!form.system_workspace && form.generation_type === "creative_agent" && (!form.analysis_model_code || !form.image_model_code || !form.video_model_code || !form.speech_model_code || !form.music_model_code)) {
+      setErr("通用智能体需要选择主聊天、图片、视频、语音和音乐模型");
+      return;
+    }
+    if (!form.system_workspace && form.generation_type !== "creative_agent" && form.generation_type !== "comic_drama" && form.generation_type !== "virtual_try_on" && !isVideoUtilityType(form.generation_type) && (!form.analysis_model_code || !form.generation_model_code)) {
       setErr("请选择分析模型和生成模型");
       return;
     }
@@ -1052,12 +1110,12 @@ export default function AgentsAdminPage() {
       name: form.name.trim(),
       description: form.description.trim(),
       icon: form.icon,
-      category: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "workflow" : form.generation_type,
+      category: form.generation_type === "creative_agent" ? "chat" : form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "workflow" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-      agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : form.generation_type === "virtual_try_on" ? "virtual_try_on" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
+       agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "creative_agent" ? "creative_chat" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : form.generation_type === "virtual_try_on" ? "virtual_try_on" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
-      generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_model_code,
+      generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_type === "creative_agent" ? form.image_model_code : form.generation_model_code,
       generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "image" : form.generation_type,
       preset_code: presetCode(form.generation_type),
       require_image: form.require_image,
@@ -1073,8 +1131,8 @@ export default function AgentsAdminPage() {
       allow_prompt_edit: form.allow_prompt_edit,
       nodes: bundle.nodes,
       input_schema: bundle.input_schema,
-      price_rule: form.generation_type === "novel_workshop" || form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on"
-        ? { billing_type: "model_actual", unit_price: Number(form.unit_price) || 0 }
+      price_rule: form.generation_type === "creative_agent" || form.generation_type === "novel_workshop" || form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on"
+        ? { billing_type: "model_actual", unit_price: form.generation_type === "creative_agent" ? 0 : Number(form.unit_price) || 0 }
         : bundle.price_rule,
       display_config: bundle.display_config,
       runtime_config: form.system_workspace
@@ -1087,7 +1145,9 @@ export default function AgentsAdminPage() {
         ? { ...bundle.runtime_config, analysis_model_code: form.analysis_model_code, generation_model_code: form.generation_model_code, default_count: Number(form.default_count) || 1 }
         : form.generation_type === "virtual_try_on"
         ? { ...bundle.runtime_config, generation_model_code: form.generation_model_code, default_count: Number(form.default_count) || 1 }
-        : { ...bundle.runtime_config, creative_scenes: normalizeScenes((bundle.runtime_config as any)?.creative_scenes || form.creative_scenes, form.generation_type), output_scenes: undefined },
+         : form.generation_type === "creative_agent"
+         ? { ...bundle.runtime_config, agent_mode: "creative_chat", generation_type: "mixed", preset_code: "general_creative_agent", analysis_model_code: form.analysis_model_code, image_model_code: form.image_model_code, video_model_code: form.video_model_code, speech_model_code: form.speech_model_code, music_model_code: form.music_model_code, generation_model_code: form.image_model_code }
+         : { ...bundle.runtime_config, creative_scenes: normalizeScenes((bundle.runtime_config as any)?.creative_scenes || form.creative_scenes, form.generation_type), output_scenes: undefined },
     };
     try {
       await adminApi(form.isEdit ? `/agents/${form.code}` : "/agents", {
@@ -1206,8 +1266,15 @@ export default function AgentsAdminPage() {
 
               {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
-                {!isVideoUtilityType(form.generation_type) && form.generation_type !== "virtual_try_on" && <Field label="分析大模型"><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择分析模型</option>{chatModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>}
-                {form.generation_type !== "comic_drama" && form.generation_type !== "novel_workshop" && (
+                {!isVideoUtilityType(form.generation_type) && form.generation_type !== "virtual_try_on" && <Field label={form.generation_type === "creative_agent" ? "Agent 主聊天模型" : "分析大模型"}><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择{form.generation_type === "creative_agent" ? "主聊天" : "分析"}模型</option>{chatModels.filter((m) => !/multi.?collab|多模型协作/i.test(`${m.code} ${m.display_name}`)).map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select>{form.generation_type === "creative_agent" && <p className="mt-1.5 text-[11px] leading-5 text-gray-400">Agent 会使用此模型理解需求、判断图片或视频意图，并生成执行计划。</p>}</Field>}
+                {form.generation_type === "creative_agent" ? (
+                  <>
+                    <Field label="Agent 图片生成模型"><select className="admin-input" value={form.image_model_code} onChange={(e) => setForm({ ...form, image_model_code: e.target.value })}><option value="">请选择图片模型</option>{imageModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                    <Field label="Agent 视频生成模型"><select className="admin-input" value={form.video_model_code} onChange={(e) => setForm({ ...form, video_model_code: e.target.value })}><option value="">请选择视频模型</option>{videoModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                    <Field label="Agent 文本转语音模型"><select className="admin-input" value={form.speech_model_code} onChange={(e) => setForm({ ...form, speech_model_code: e.target.value })}><option value="">请选择语音模型</option>{audioModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                    <Field label="Agent 歌曲音乐模型"><select className="admin-input" value={form.music_model_code} onChange={(e) => setForm({ ...form, music_model_code: e.target.value })}><option value="">请选择音乐模型</option>{musicModels.map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select></Field>
+                  </>
+                ) : form.generation_type !== "comic_drama" && form.generation_type !== "novel_workshop" && (
                   <Field label={form.generation_type === "video_upscale" ? "视频超分模型" : form.generation_type === "video_redraw" ? "视频转绘模型" : form.generation_type === "subtitle_remove" ? "硬字幕 AI 修复模型（可选）" : form.generation_type === "video" ? "视频生成模型" : "图片生成模型"}>
                     <select className="admin-input" value={form.generation_model_code} onChange={(e) => setForm({ ...form, generation_model_code: e.target.value })}>
                       <option value="">{form.generation_type === "subtitle_remove" ? "不配置（仅支持独立字幕轨）" : "请选择生成模型"}</option>{generationModels.map((m) => {
@@ -1274,9 +1341,10 @@ export default function AgentsAdminPage() {
                     <p className="mt-1.5 text-[11px] text-gray-400">用于章节创作、润色审校等所有文本生成环节。建议选择长上下文的chat模型。</p>
                   </Field>
                 )}
-                {!isVideoUtilityType(form.generation_type) && <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>}
-                {!isVideoUtilityType(form.generation_type) && <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>}
-                <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>
+                {form.generation_type !== "creative_agent" && !isVideoUtilityType(form.generation_type) && <Field label="默认生成数量"><input type="number" min={1} max={50} className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Math.max(1, Number(e.target.value) || 1) })} /></Field>}
+                {form.generation_type !== "creative_agent" && !isVideoUtilityType(form.generation_type) && <Field label="AI方案数量"><input type="number" min={1} max={5} className="admin-input" value={form.candidate_count} onChange={(e) => setForm({ ...form, candidate_count: Math.min(5, Math.max(1, Number(e.target.value) || 3)) })} /></Field>}
+                {form.generation_type !== "creative_agent" && <Field label="工作流收费"><input type="number" min={0} step="0.01" className="admin-input" value={form.unit_price} onChange={(e) => setForm({ ...form, unit_price: Number(e.target.value) || 0 })} /></Field>}
+                {form.generation_type === "creative_agent" && <p className="md:col-span-2 rounded-xl bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-500">通用智能体不额外收取固定工作流费用，主聊天分析和最终图片或视频分别按所配置模型的实际计费规则结算。</p>}
                 {form.generation_type === "novel_workshop" && <p className="self-end text-[11px] leading-5 text-gray-400">总费用 = 工作流收费 + 大模型用量费；大模型用量费取「上游真实扣费」与「按模型设定的输入/输出/缓存单价计算的费用」中的较低者。创建时按目标篇幅预估冻结，完成/取消/失败按实际用量结算。</p>}
                 {isVideoUtilityType(form.generation_type) && <p className="self-end text-[11px] leading-5 text-gray-400">最终冻结金额 = 工作流收费 + 所选模型估算费用；完成后按实际模型任务费用结算。独立字幕轨移除不产生模型费用。</p>}
               </section>}
@@ -1399,7 +1467,7 @@ export default function AgentsAdminPage() {
                 </section>
               )}
 
-              {!form.system_workspace && !isVideoUtilityType(form.generation_type) && <section className="rounded-2xl border border-gray-100 p-4">
+              {!form.system_workspace && form.generation_type !== "creative_agent" && !isVideoUtilityType(form.generation_type) && <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-gray-900">{form.generation_type === "video" ? <Video size={16} /> : <ImageIcon size={16} />}{form.generation_type === "video" ? "视频场景" : "出图场景"}</div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {sceneDefs(form.generation_type).map((scene) => {

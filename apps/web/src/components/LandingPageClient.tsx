@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { type CSSProperties, type Dispatch, type SetStateAction, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Bot, Boxes, Check, Clock3, Code2, Compass, Copy, Download, Headphones, ImageIcon, KeyRound, MessageCircle, Phone, Play, Sparkles, UserRound, Wand2, X } from "lucide-react";
 import { siAlibabacloud, siAnthropic, siDeepseek, siFlux, siGooglegemini, siHuggingface, siKuaishou, type SimpleIcon } from "simple-icons";
@@ -576,6 +575,10 @@ function ThirdPartyCustomerServiceScript({ enabled, code }: { enabled: unknown; 
       script.dataset.staraiCustomerService = "true";
       mount.appendChild(script);
     });
+
+    return () => {
+      if (runtimeWindow.__starAICustomerServiceScript === source) delete runtimeWindow.__starAICustomerServiceScript;
+    };
   }, [active, code]);
 
   if (!active || !code?.trim()) return null;
@@ -721,6 +724,10 @@ function GalleryPreview({ item, index }: { item: GalleryItem; index: number }) {
   return (
     <Link
       href={item.public_id.startsWith("landing-") ? "/app/gallery" : `/app/gallery/${item.public_id}`}
+      onClick={(event) => {
+        event.preventDefault();
+        window.location.assign(event.currentTarget.href);
+      }}
       className="tech-card group mb-4 block break-inside-avoid overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.06] text-left shadow-2xl shadow-black/20 transition hover:-translate-y-1 hover:border-primary/50"
     >
       {isVideo && mediaURL ? (
@@ -772,7 +779,6 @@ function withVideoPreviewTime(url: string) {
 
 export default function LandingPageClient() {
   const { t } = useI18n();
-  const router = useRouter();
   const { token, hydrate } = useAuthStore();
   const [showLogin, setShowLogin] = useState(false);
   const [gallery, setGallery] = useState<GalleryItem[]>(FALLBACK_GALLERY);
@@ -788,7 +794,7 @@ export default function LandingPageClient() {
   const enterAppOrLogin = () => {
     const hasToken = token || hasUserSession();
     if (hasToken) {
-      router.push("/app");
+      window.location.assign("/app");
       return;
     }
     setShowLogin(true);
@@ -896,7 +902,7 @@ export default function LandingPageClient() {
           />
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
             {apiDocsVisible && (
-              <Link href="/app/api-docs" className="hidden rounded-full border border-white/15 px-4 py-2 text-sm text-white/75 transition hover:border-primary/60 hover:text-white sm:inline-flex">
+              <Link href="/app/api-docs" onClick={(event) => { event.preventDefault(); window.location.assign(event.currentTarget.href); }} className="hidden rounded-full border border-white/15 px-4 py-2 text-sm text-white/75 transition hover:border-primary/60 hover:text-white sm:inline-flex">
                 {t("landing.apiDocs")}
               </Link>
             )}
@@ -926,7 +932,7 @@ export default function LandingPageClient() {
                   <span className="truncate">{t("landing.freeStart")}</span>
                   <ArrowRight size={18} className="transition group-hover:translate-x-0.5" />
                 </button>
-                <Link href="/app/gallery" className="box-border inline-flex w-full min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden rounded-full border border-white/18 px-5 py-3.5 text-sm font-semibold text-white/88 transition hover:border-primary/55 hover:text-white sm:w-auto sm:px-7 sm:text-base">
+                <Link href="/app/gallery" onClick={(event) => { event.preventDefault(); window.location.assign(event.currentTarget.href); }} className="box-border inline-flex w-full min-w-0 max-w-full items-center justify-center gap-2 overflow-hidden rounded-full border border-white/18 px-5 py-3.5 text-sm font-semibold text-white/88 transition hover:border-primary/55 hover:text-white sm:w-auto sm:px-7 sm:text-base">
                   <Compass size={18} className="shrink-0" />
                   <span className="truncate">{t("landing.gallery")}</span>
                 </Link>
@@ -1051,7 +1057,7 @@ export default function LandingPageClient() {
               <div className="mb-3 text-sm font-semibold text-primary">INSPIRATION GALLERY</div>
               <h2 className="text-3xl font-bold sm:text-5xl">{t("landing.section.gallery")}</h2>
             </div>
-            <Link href="/app/gallery" className="inline-flex items-center gap-2 rounded-full border border-white/15 px-5 py-2.5 text-sm font-semibold text-white/80 transition hover:border-primary/55 hover:text-white">
+            <Link href="/app/gallery" onClick={(event) => { event.preventDefault(); window.location.assign(event.currentTarget.href); }} className="inline-flex items-center gap-2 rounded-full border border-white/15 px-5 py-2.5 text-sm font-semibold text-white/80 transition hover:border-primary/55 hover:text-white">
               {t("landing.viewAll")}
               <ArrowRight size={16} />
             </Link>

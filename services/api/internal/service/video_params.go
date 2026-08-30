@@ -19,6 +19,36 @@ func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error 
 	return validateSchemaParams(model.InputSchema, params)
 }
 
+// NormalizeAgentVideoParams keeps planner-proposed durations within the
+// selected model's schema. Agent prompts may contain a duration unsupported by
+// the model; in that case the model default (or first allowed value) is safer
+// than rejecting the whole generation request.
+func NormalizeAgentVideoParams(model *ModelFull, params map[string]interface{}) {
+	if model == nil || params == nil {
+		return
+	}
+	normalizeVideoSchemaParamTypes(model.InputSchema, params)
+	props, _ := model.InputSchema["properties"].(map[string]interface{})
+	durationProp, _ := props["duration"].(map[string]interface{})
+	enumValues, _ := durationProp["enum"].([]interface{})
+	current, exists := params["duration"]
+	if !exists || len(enumValues) == 0 || enumContains(enumValues, current) {
+		return
+	}
+	if allowCustom, _ := durationProp["x-allow-custom"].(bool); allowCustom && validateIntRange(durationProp, current) {
+		return
+	}
+	if fallback, ok := model.DefaultParams["duration"]; ok {
+		normalized := map[string]interface{}{"duration": fallback}
+		normalizeVideoSchemaParamTypes(model.InputSchema, normalized)
+		if enumContains(enumValues, normalized["duration"]) {
+			params["duration"] = normalized["duration"]
+			return
+		}
+	}
+	params["duration"] = enumValues[0]
+}
+
 // normalizeVideoSchemaParamTypes accepts semantically equivalent legacy
 // duration values while preserving the exact enum type required by the
 // selected provider. For example, Veo declares "4s" while Seedance declares 4.

@@ -107,6 +107,22 @@ func TestValidateVideoParamsPreservesProviderDurationEnumType(t *testing.T) {
 	}
 }
 
+func TestNormalizeAgentVideoParamsFallsBackToModelDuration(t *testing.T) {
+	model := &ModelFull{ModelDTO: ModelDTO{
+		InputSchema: map[string]interface{}{
+			"properties": map[string]interface{}{
+				"duration": map[string]interface{}{"enum": []interface{}{"5s", "10s"}},
+			},
+		},
+		DefaultParams: map[string]interface{}{"duration": "5s"},
+	}}
+	params := map[string]interface{}{"duration": float64(8)}
+	NormalizeAgentVideoParams(model, params)
+	if params["duration"] != "5s" {
+		t.Fatalf("expected model default duration, got %#v", params["duration"])
+	}
+}
+
 func TestValidateVeoReferenceModes(t *testing.T) {
 	cfg := videoRuntimeConfig{
 		UploadProfile:      "veo_reference",

@@ -166,6 +166,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			auth.GET("/chat/conversations/:id", h.GetConversation)
 			auth.DELETE("/chat/conversations/:id", h.DeleteConversation)
 			auth.POST("/chat/completions", h.ChatCompletion)
+			auth.POST("/creative-agent/plan", h.CreativeAgentPlan)
+			auth.POST("/creative-agent/generate", h.CreativeAgentGenerate)
 			auth.POST("/tasks", h.CreateTask)
 			auth.GET("/tasks", h.ListTasks)
 			auth.GET("/tasks/:task_no", h.GetTask)
@@ -2195,6 +2197,291 @@ func (h *Handler) CreateTask(c *gin.Context) {
 		return
 	}
 	util.Created(c, task)
+}
+
+const creativeAgentPlannerPrompt = `你是 StarAI 的通用创作智能体。根据用户消息和已提供的素材，判断用户是想普通聊天、生成图片、生成视频、文本转语音还是生成歌曲音乐。
+只输出一个 JSON 对象，不要 Markdown，不要解释 JSON 以外的内容：
+{"intent":"chat|image|video|speech|music|clarify","reply":"给用户看的简短中文回复","prompt":"如果需要生成，整理后的完整生成内容，否则为空","params":{},"needs_confirm":true}
+规则：明确要出图时 intent=image，明确要做视频时 intent=video，朗读、配音或文本转语音时 intent=speech，写歌、生成歌曲或纯音乐时 intent=music；信息不足时 intent=clarify 并在 reply 中只追问最必要的问题；普通问题使用 chat。speech 的 prompt 必须是最终需要朗读的正文。music 的 prompt 应为完整歌词，纯音乐则为音乐描述并设置 params.is_instrumental=true；同时用 params.music_prompt 填写曲风、情绪和场景描述。params 只填写用户明确要求的 aspect_ratio、size、duration、count、music_prompt、is_instrumental 等，不要填写模型编码，不要编造素材 URL。`
+
+type creativeAgentPlanRequest struct {
+	ModelCode      string                `json:"model_code"`
+	ConversationID string                `json:"conversation_id"`
+	Messages       []runtime.ChatMessage `json:"messages"`
+	AssetIDs       []string              `json:"asset_ids"`
+	DeepThink      bool                  `json:"deep_think"`
+	PreferredType  string                `json:"preferred_media_type"`
+}
+
+type creativeAgentGenerateRequest struct {
+	ConversationID     string                 `json:"conversation_id"`
+	MediaType          string                 `json:"media_type"`
+	ModelCode          string                 `json:"model_code"`
+	Prompt             string                 `json:"prompt"`
+	Params             map[string]interface{} `json:"params"`
+	AssetIDs           []string               `json:"asset_ids"`
+	ReferenceIDs       []string               `json:"reference_asset_ids"`
+	ReferenceImageURLs []string               `json:"reference_image_urls"`
+	ReferenceVideoURLs []string               `json:"reference_video_urls"`
+	ReferenceAudioURLs []string               `json:"reference_audio_urls"`
+}
+
+func (h *Handler) CreativeAgentPlan(c *gin.Context) {
+	var req creativeAgentPlanRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.ModelCode) == "" || len(req.Messages) == 0 {
+		util.BadRequest(c, "通用智能体参数错误")
+		return
+	}
+	model, err := h.models.GetFullByCode(c.Request.Context(), strings.TrimSpace(req.ModelCode))
+	if err != nil || model == nil || model.Category != "chat" || model.Code == "multi_collab_chat" || (model.RequestMode != "chat_completions" && model.RequestMode != "responses") {
+		util.BadRequest(c, "通用智能体需要使用已启用的对话模型")
+		return
+	}
+	normalizedMessages := normalizeCreativeAgentMessages(req.Messages)
+	if len(normalizedMessages) == 0 || normalizedMessages[len(normalizedMessages)-1].Role != "user" {
+		util.BadRequest(c, "通用智能体消息格式错误")
+		return
+	}
+	conversationID := strings.TrimSpace(req.ConversationID)
+	if conversationID == "" {
+		title := "Agent 通用智能体"
+		for i := len(req.Messages) - 1; i >= 0; i-- {
+			if req.Messages[i].Role == "user" && strings.TrimSpace(req.Messages[i].Content) != "" {
+				title = "Agent 通用智能体：" + serviceTruncate(strings.TrimSpace(req.Messages[i].Content), 24)
+				break
+			}
+		}
+		conversation, createErr := h.chat.CreateConversation(c.Request.Context(), c.GetInt64("user_id"), model.Code, title)
+		if createErr != nil || conversation == nil {
+			util.BadRequest(c, "通用智能体会话创建失败")
+			return
+		}
+		conversationID = conversation.PublicID
+	}
+	plannerPrompt := creativeAgentPlannerPrompt
+	req.PreferredType = strings.ToLower(strings.TrimSpace(req.PreferredType))
+	if req.PreferredType == "image" || req.PreferredType == "video" || req.PreferredType == "speech" || req.PreferredType == "music" {
+		plannerPrompt += "\n用户已在自定义模式指定生成类型为 " + req.PreferredType + "，intent 必须使用该类型。"
+	} else {
+		req.PreferredType = ""
+	}
+	if req.DeepThink {
+		plannerPrompt += "\n深度思考已开启：请更充分地检查用户目标、素材约束、生成类型和参数冲突，再输出最终 JSON。"
+	}
+	input := service.CompletionInput{
+		ModelCode: strings.TrimSpace(req.ModelCode), ConversationID: conversationID,
+		Messages: append([]runtime.ChatMessage{{Role: "system", Content: plannerPrompt}}, normalizedMessages...),
+		Params:   map[string]interface{}{"temperature": 0.2, "asset_ids": req.AssetIDs, "deep_think": req.DeepThink}, Stream: false,
+	}
+	if !h.enforceContentSafety(c, c.GetInt64("user_id"), "creative_agent", req) {
+		return
+	}
+	h.attachAssetContext(c.Request.Context(), c.GetInt64("user_id"), &input)
+	result, err := h.chat.Completion(c.Request.Context(), c.GetInt64("user_id"), input)
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	plan := parseCreativeAgentPlan(result.Content)
+	if plan == nil {
+		plan = map[string]interface{}{"intent": "chat", "reply": result.Content, "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}
+	}
+	if req.PreferredType != "" {
+		plan["intent"] = req.PreferredType
+		if strings.TrimSpace(stringAny(plan["prompt"])) == "" {
+			plan["prompt"] = normalizedMessages[len(normalizedMessages)-1].Content
+		}
+	}
+	if len(req.AssetIDs) > 0 {
+		h.appendCreativeAgentEvent(c.Request.Context(), c.GetInt64("user_id"), result.ConversationID, map[string]interface{}{
+			"type": "creative_agent_assets", "asset_ids": req.AssetIDs,
+		})
+	}
+	util.OK(c, map[string]interface{}{
+		"conversation_id": result.ConversationID,
+		"plan":            plan,
+		"usage":           result.Usage,
+	})
+}
+
+func normalizeCreativeAgentMessages(messages []runtime.ChatMessage) []runtime.ChatMessage {
+	out := make([]runtime.ChatMessage, 0, len(messages))
+	for _, message := range messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		content := strings.TrimSpace(message.Content)
+		if content == "" || (role != "user" && role != "assistant") {
+			continue
+		}
+		if len(out) > 0 && out[len(out)-1].Role == role {
+			out[len(out)-1].Content += "\n" + content
+			continue
+		}
+		out = append(out, runtime.ChatMessage{Role: role, Content: content})
+	}
+	return out
+}
+
+func parseCreativeAgentPlan(content string) map[string]interface{} {
+	text := strings.TrimSpace(content)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(strings.TrimSpace(text), "```")
+	var plan map[string]interface{}
+	if json.Unmarshal([]byte(strings.TrimSpace(text)), &plan) == nil && plan != nil {
+		return plan
+	}
+	start, end := strings.Index(text, "{"), strings.LastIndex(text, "}")
+	if start >= 0 && end > start && json.Unmarshal([]byte(text[start:end+1]), &plan) == nil {
+		return plan
+	}
+	return nil
+}
+
+func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
+	var req creativeAgentGenerateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		util.BadRequest(c, "生成参数错误")
+		return
+	}
+	req.MediaType = strings.ToLower(strings.TrimSpace(req.MediaType))
+	if req.MediaType != "image" && req.MediaType != "video" && req.MediaType != "speech" && req.MediaType != "music" {
+		util.BadRequest(c, "通用智能体生成类型不受支持")
+		return
+	}
+	req.ModelCode = strings.TrimSpace(req.ModelCode)
+	req.Prompt = strings.TrimSpace(req.Prompt)
+	if req.ModelCode == "" || req.Prompt == "" {
+		util.BadRequest(c, "生成模型和提示词不能为空")
+		return
+	}
+	model, err := h.models.GetFullByCode(c.Request.Context(), req.ModelCode)
+	if err != nil || model == nil {
+		util.BadRequest(c, "生成模型不存在或未启用")
+		return
+	}
+	if !creativeAgentModelSupportsType(model, req.MediaType) {
+		util.BadRequest(c, "所选模型与生成类型不匹配")
+		return
+	}
+	if req.Params == nil {
+		req.Params = map[string]interface{}{}
+	}
+	if req.MediaType == "video" {
+		service.NormalizeAgentVideoParams(model, req.Params)
+	}
+	if req.MediaType == "music" {
+		audioConfig, _ := model.RuntimeRule["audio"].(map[string]interface{})
+		secondaryKey := strings.TrimSpace(stringAny(audioConfig["secondary_prompt_key"]))
+		if secondaryKey != "" && secondaryKey != "music_prompt" {
+			if value, ok := req.Params["music_prompt"]; ok {
+				req.Params[secondaryKey] = value
+			}
+		}
+	}
+	req.Params["asset_ids"] = append([]string{}, req.AssetIDs...)
+	req.Params["reference_asset_ids"] = append([]string{}, req.ReferenceIDs...)
+	// Asset IDs are useful for context/audit, but media workers need actual
+	// URLs in the model-specific reference fields. Resolve owned assets here so
+	// uploads and library selections behave like the existing model workspaces.
+	referenceIDs := append([]string{}, req.ReferenceIDs...)
+	if len(referenceIDs) == 0 && len(req.ReferenceImageURLs) == 0 && len(req.ReferenceVideoURLs) == 0 && len(req.ReferenceAudioURLs) == 0 {
+		referenceIDs = append(referenceIDs, req.AssetIDs...)
+	}
+	assetImageURLs, assetVideoURLs, assetAudioURLs := h.assetMediaURLs(c.Request.Context(), c.GetInt64("user_id"), referenceIDs)
+	imageURLs := uniqueModelCodes(append(append([]string{}, req.ReferenceImageURLs...), assetImageURLs...))
+	videoURLs := uniqueModelCodes(append(append([]string{}, req.ReferenceVideoURLs...), assetVideoURLs...))
+	audioURLs := uniqueModelCodes(append(append([]string{}, req.ReferenceAudioURLs...), assetAudioURLs...))
+	if len(imageURLs) > 0 && req.MediaType == "image" {
+		req.Params["reference_images"] = imageURLs
+	}
+	if len(imageURLs) > 0 && req.MediaType == "video" {
+		req.Params["reference_images"] = imageURLs
+	}
+	if len(videoURLs) > 0 && req.MediaType == "video" {
+		req.Params["reference_videos"] = videoURLs
+	}
+	if len(audioURLs) > 0 && (req.MediaType == "video" || req.MediaType == "speech" || req.MediaType == "music") {
+		req.Params["reference_audio"] = audioURLs[0]
+		req.Params["reference_audios"] = audioURLs
+	}
+	if !h.enforceContentSafety(c, c.GetInt64("user_id"), "creative_agent_generate", req) {
+		return
+	}
+	ids := append(append([]string{}, req.AssetIDs...), req.ReferenceIDs...)
+	if lines := h.assetContextLines(c.Request.Context(), c.GetInt64("user_id"), ids); len(lines) > 0 {
+		req.Params["asset_context"] = lines
+	}
+	task, err := h.tasks.Create(c.Request.Context(), c.GetInt64("user_id"), service.CreateTaskInput{ModelCode: req.ModelCode, Prompt: req.Prompt, Params: req.Params})
+	if err != nil {
+		util.BadRequest(c, err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ConversationID) != "" {
+		h.appendCreativeAgentEvent(c.Request.Context(), c.GetInt64("user_id"), req.ConversationID, map[string]interface{}{
+			"type": "creative_agent_generation", "task_no": task.TaskNo, "media_type": req.MediaType, "model_code": req.ModelCode, "prompt": req.Prompt, "asset_ids": req.AssetIDs,
+		})
+	}
+	util.Created(c, task)
+}
+
+func creativeAgentModelSupportsType(model *service.ModelFull, mediaType string) bool {
+	if model == nil {
+		return false
+	}
+	if mediaType == "image" {
+		return model.RequestMode == "images"
+	}
+	if mediaType == "video" {
+		return model.RequestMode == "video"
+	}
+	if model.RequestMode != "audio" || (mediaType != "speech" && mediaType != "music") {
+		return false
+	}
+	audioConfig, _ := model.RuntimeRule["audio"].(map[string]interface{})
+	hint := strings.ToLower(model.Code + " " + model.DisplayName + " " + strings.Join(model.Tags, " "))
+	isMusic := stringAny(audioConfig["input_layout"]) == "dual" || strings.Contains(hint, "music") || strings.Contains(hint, "suno") || strings.Contains(hint, "音乐") || strings.Contains(hint, "歌曲")
+	return (mediaType == "music") == isMusic
+}
+
+func (h *Handler) appendCreativeAgentEvent(ctx context.Context, userID int64, conversationID string, event map[string]interface{}) {
+	payload, err := json.Marshal(event)
+	if err == nil {
+		_ = h.chat.AppendConversationMessage(ctx, userID, conversationID, "system", string(payload))
+	}
+}
+
+func (h *Handler) assetMediaURLs(ctx context.Context, userID int64, ids []string) ([]string, []string, []string) {
+	if h.assets == nil {
+		return nil, nil, nil
+	}
+	seen := map[string]bool{}
+	images := make([]string, 0)
+	videos := make([]string, 0)
+	audios := make([]string, 0)
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		_, key, dto, err := h.assets.Get(ctx, userID, id)
+		if err != nil || dto == nil {
+			continue
+		}
+		url := h.storageURL(key)
+		if url == "" {
+			continue
+		}
+		switch strings.ToLower(dto.Kind) {
+		case "image":
+			images = append(images, url)
+		case "video":
+			videos = append(videos, url)
+		case "audio":
+			audios = append(audios, url)
+		}
+	}
+	return images, videos, audios
 }
 
 func jsonContainsString(value interface{}, expected string) bool {

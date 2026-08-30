@@ -2,7 +2,6 @@
 
 import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import type { User } from "@starai/shared-types";
@@ -133,7 +132,6 @@ export function LoginModal({ open, onClose }: Props) {
   const [oauthLoading, setOauthLoading] = useState("");
   const [legalDoc, setLegalDoc] = useState<LegalDoc | null>(null);
   const { setAuth } = useAuthStore();
-  const router = useRouter();
   const rawImageCaptchaEnabled = image_captcha_enabled as unknown;
   const captchaEnabled = !(
     rawImageCaptchaEnabled === false ||
@@ -248,7 +246,7 @@ export function LoginModal({ open, onClose }: Props) {
       } else {
         if (res.is_new_user) window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1");
         onClose();
-        router.push("/app");
+        window.location.assign("/app");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("login.verifyFailed"));
@@ -269,7 +267,7 @@ export function LoginModal({ open, onClose }: Props) {
       });
       setAuth(res.token, res.user);
       onClose();
-      router.push("/app");
+      window.location.assign("/app");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("login.loginFailed"));
       if (captchaEnabled) loadCaptcha();
@@ -288,7 +286,7 @@ export function LoginModal({ open, onClose }: Props) {
       await api("/api/auth/set-password", { method: "POST", body: JSON.stringify({ password }) });
       if (isNewUser) window.localStorage.setItem(SKIP_FORCED_ANNOUNCEMENT_ONCE_KEY, "1");
       onClose();
-      router.push("/app");
+      window.location.assign("/app");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("login.setPasswordFailed"));
     } finally {
@@ -321,7 +319,7 @@ export function LoginModal({ open, onClose }: Props) {
                 <button type="submit" disabled={loading} className="w-full rounded-xl bg-primary py-3 font-semibold text-dark transition hover:bg-primary/90 disabled:opacity-50">
                   {loading ? t("common.saving") : t("login.finish")}
                 </button>
-                <button type="button" onClick={() => { onClose(); router.push("/app"); }} className="w-full py-2 text-sm text-gray-400 hover:text-gray-600">
+                <button type="button" onClick={() => { onClose(); window.location.assign("/app"); }} className="w-full py-2 text-sm text-gray-400 hover:text-gray-600">
                   {t("login.later")}
                 </button>
               </form>

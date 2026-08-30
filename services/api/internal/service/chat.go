@@ -869,6 +869,25 @@ func (s *ChatService) GetConversation(ctx context.Context, userID int64, publicI
 	}, nil
 }
 
+func (s *ChatService) AppendConversationMessage(ctx context.Context, userID int64, publicID, role, content string) error {
+	role = strings.ToLower(strings.TrimSpace(role))
+	content = strings.TrimSpace(content)
+	if publicID == "" || content == "" || (role != "user" && role != "assistant" && role != "system") {
+		return errors.New("conversation message parameters are invalid")
+	}
+	result, err := s.db.Exec(ctx, `
+		INSERT INTO conversation_messages (conversation_id, role, content)
+		SELECT id, $3, $4 FROM conversations WHERE public_id=$1 AND user_id=$2`, publicID, userID, role, content)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return errors.New("conversation not found")
+	}
+	_, _ = s.db.Exec(ctx, `UPDATE conversations SET updated_at=now() WHERE public_id=$1 AND user_id=$2`, publicID, userID)
+	return nil
+}
+
 func (s *ChatService) DeleteConversation(ctx context.Context, userID int64, publicID string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM conversations WHERE public_id=$1 AND user_id=$2`, publicID, userID)
 	return err

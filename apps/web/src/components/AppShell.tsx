@@ -18,6 +18,7 @@ import { ReferralShareButton } from "./ReferralShareButton";
 import { useI18n } from "@/i18n/I18nProvider";
 import { WorkbenchTopActions } from "./WorkbenchTopActions";
 import { InfiniteCanvasWorkspace } from "./workbench/InfiniteCanvasWorkspace";
+import { CreativeAgentWorkspace } from "./workbench/CreativeAgentWorkspace";
 
 const PRIMARY_NAV = [
   { id: "models", label: "大模型", icon: LayoutGrid },
@@ -40,6 +41,7 @@ const INFINITE_CANVAS_CODE = "infinite_canvas";
 const VIRAL_REMAKE_CODE = "viral_remake";
 const ONE_CLICK_VIRAL_REMAKE_CODE = "one_click_viral_remake";
 const VIDEO_REMAKE_CODE = "video_remake";
+const GENERAL_CREATIVE_AGENT_CODE = "general_creative_agent";
 
 const MOBILE_SUBPAGE_LINKS = [
   { href: "/app", label: "工作台", icon: Home },
@@ -104,6 +106,8 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   const [category, setCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [models, setModels] = useState<Model[]>([]);
+  const [creativeAgent, setCreativeAgent] = useState<AgentItem | null>(null);
+  const [creativeAgentLoaded, setCreativeAgentLoaded] = useState(false);
   const [modelCategoryCodes, setModelCategoryCodes] = useState<string[]>([]);
   const [activeModelCode, setActiveModelCode] = useState<string | undefined>(selectedModelCode);
   const [activeModel, setActiveModel] = useState<Model | null>(null);
@@ -173,12 +177,28 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
 
   useEffect(() => {
     if (selectedAgentCode) {
+      if (selectedAgentCode === GENERAL_CREATIVE_AGENT_CODE) {
+        setSection("models");
+        setActiveModelCode(GENERAL_CREATIVE_AGENT_CODE);
+        setActiveAgentCode(undefined);
+        router.replace(`/app/models/${GENERAL_CREATIVE_AGENT_CODE}`);
+        return;
+      }
       setSection("agents");
       setActiveAgentCode(selectedAgentCode);
       setActiveModelCode(undefined);
       setActiveModel(null);
     }
-  }, [selectedAgentCode]);
+  }, [router, selectedAgentCode]);
+
+  useEffect(() => {
+    if (!isWorkbench || section !== "models") return;
+    setCreativeAgentLoaded(false);
+    apiForLocale<AgentItem>(`/api/agents/${GENERAL_CREATIVE_AGENT_CODE}`, locale)
+      .then((item) => setCreativeAgent(item || null))
+      .catch(() => setCreativeAgent(null))
+      .finally(() => setCreativeAgentLoaded(true));
+  }, [isWorkbench, locale, section]);
 
   useEffect(() => {
     if (!isWorkbench || section !== "models") return;
@@ -227,12 +247,17 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   }, [category, isWorkbench, section, locale]);
 
   useEffect(() => {
-    if (section !== "models" || activeModelCode || isMobile) return;
-    if (models.length > 0) setActiveModelCode(models[0].code);
-  }, [models, activeModelCode, section, isMobile]);
+    if (section !== "models" || activeModelCode || isMobile || !creativeAgentLoaded) return;
+    if (creativeAgent && (category === "all" || category === "chat")) setActiveModelCode(GENERAL_CREATIVE_AGENT_CODE);
+    else if (models.length > 0) setActiveModelCode(models[0].code);
+  }, [models, creativeAgent, creativeAgentLoaded, activeModelCode, category, section, isMobile]);
 
   useEffect(() => {
     if (!activeModelCode) {
+      setActiveModel(null);
+      return;
+    }
+    if (activeModelCode === GENERAL_CREATIVE_AGENT_CODE) {
       setActiveModel(null);
       return;
     }
@@ -296,11 +321,18 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
     };
     const source = agentsLoaded ? agents : [canvasAgent, ...agents.filter((item) => item.code !== INFINITE_CANVAS_CODE)];
     return source.filter((a) => {
+      if (a.code === GENERAL_CREATIVE_AGENT_CODE) return false;
       if (agentCategory !== "all" && (a.category || "workflow") !== agentCategory) return false;
       if (q && !a.name.toLowerCase().includes(q) && !a.description?.toLowerCase().includes(q)) return false;
       return true;
     });
   }, [agents, agentsLoaded, agentSearch, agentCategory, t]);
+
+  const showCreativeAgentModel = useMemo(() => {
+    if (!creativeAgent || (category !== "all" && category !== "chat")) return false;
+    const q = search.trim().toLowerCase();
+    return !q || `${creativeAgent.name} ${creativeAgent.description || ""} agent 通用智能体`.toLowerCase().includes(q);
+  }, [category, creativeAgent, search]);
 
   const showApiDocEntry = useMemo(() => {
     if (!apiDocsVisible) return false;
@@ -333,7 +365,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
 
   const sectionTitle =
     section === "models"
-      ? (activeModel ? td(`model.${activeModel.code}.name`, activeModel.display_name) : t("nav.models"))
+      ? (activeModelCode === GENERAL_CREATIVE_AGENT_CODE ? creativeAgent?.name || "Agent 通用智能体" : activeModel ? td(`model.${activeModel.code}.name`, activeModel.display_name) : t("nav.models"))
       : section === "agents"
         ? (() => {
             if (activeAgentCode === INFINITE_CANVAS_CODE) return t("canvas.title");
@@ -429,6 +461,36 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
             </div>
           </div>
           <div className="flex-1 overflow-y-auto px-2.5 space-y-2 min-h-0">
+            {showCreativeAgentModel && creativeAgent ? (
+              <button
+                type="button"
+                data-active={activeModelCode === GENERAL_CREATIVE_AGENT_CODE ? "true" : "false"}
+                onClick={() => {
+                  setActiveModelCode(GENERAL_CREATIVE_AGENT_CODE);
+                  setActiveModel(null);
+                  setSection("models");
+                  router.push(`/app/models/${GENERAL_CREATIVE_AGENT_CODE}`);
+                  closeDrawer();
+                }}
+                className={clsx(
+                  "tech-list-card w-full rounded-2xl border-2 p-3 text-left transition duration-200",
+                  activeModelCode === GENERAL_CREATIVE_AGENT_CODE
+                    ? "border-primary bg-white shadow-sm dark:bg-gray-900"
+                    : "border-transparent bg-gradient-to-br from-amber-50 to-cyan-50 hover:border-primary/30 dark:from-amber-500/10 dark:to-cyan-500/10"
+                )}
+              >
+                <div className="flex gap-3">
+                  <div className="tech-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-200 bg-gray-950 text-lg text-amber-300 shadow-sm dark:border-amber-400/20">{creativeAgent.icon || "✦"}</div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="tech-title truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{creativeAgent.name}</span>
+                      <span className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-400/10 dark:text-amber-200">Agent</span>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-gray-400">{creativeAgent.description}</p>
+                  </div>
+                </div>
+              </button>
+            ) : null}
             {filteredModels.map((model) => {
               const tag = CATEGORY_TAG[model.category] || {
                 label: model.category,
@@ -479,7 +541,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                 </button>
               );
             })}
-            {filteredModels.length === 0 && <div className="text-center text-xs text-gray-400 py-8">{t("common.noModels")}</div>}
+            {filteredModels.length === 0 && !showCreativeAgentModel && <div className="text-center text-xs text-gray-400 py-8">{t("common.noModels")}</div>}
           </div>
         </>
       )}
@@ -857,7 +919,15 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
         ) : (
           <>
             {section === "models" &&
-              (activeModel ? (
+              (activeModelCode === GENERAL_CREATIVE_AGENT_CODE ? (
+                <CreativeAgentWorkspace
+                  key={GENERAL_CREATIVE_AGENT_CODE}
+                  onOpenModelPicker={isMobile ? () => setActiveModelCode(undefined) : undefined}
+                  onOpenNav={isMobile ? () => setDrawerOpen(true) : undefined}
+                  onRecharge={() => setShowRecharge(true)}
+                  walletBalance={wallet?.compute_balance}
+                />
+              ) : activeModel ? (
                 <ModelWorkspace
                   key={`${activeModel.code}:${promptNonce}`}
                   model={activeModel}
@@ -895,6 +965,8 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                     workflowCode={VIDEO_REMAKE_CODE}
                     initialTemplateID="video-remake"
                   />
+                ) : activeAgentCode === GENERAL_CREATIVE_AGENT_CODE ? (
+                  <CreativeAgentWorkspace key={activeAgentCode} />
                 ) : (
                   <AgentWorkspace key={activeAgentCode} code={activeAgentCode} />
                 )
