@@ -349,6 +349,9 @@ routeLoop:
 		}
 		if len(resultData) == 0 && upstreamID != "" {
 			pollCfg := parsePollConfig(runtimeRule, endpoint)
+			if responsePollPath := upstreamPollPath(respBody, conn.BaseURL); responsePollPath != "" {
+				pollCfg.Path = responsePollPath
+			}
 			log.Printf("Task %s upstream async id=%s poll=%s interval=%s timeout=%s", p.TaskNo, upstreamID, pollCfg.Path, pollCfg.Interval, pollCfg.Timeout)
 			var pollPromptTokens, pollOutputTokens int
 			resultData, pollPromptTokens, pollOutputTokens, err = pollUpstreamTask(ctx, pool, conn, pollCfg, upstreamID, p.TaskNo)
@@ -2066,15 +2069,37 @@ func parseUpstreamMedia(body []byte) ([]mediaItem, string) {
 	}
 	raw = unwrapUpstreamBody(raw)
 	items := extractMediaItems(raw)
-	upstreamID := scalarString(raw, "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
+	upstreamID := scalarString(raw, "task_no", "taskNo", "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
 	if upstreamID == "" {
-		upstreamID = nestedScalarString(raw, "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
+		upstreamID = nestedScalarString(raw, "task_no", "taskNo", "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
 	}
 	if len(items) > 0 {
 		return items, upstreamID
 	}
 	// otuapi 等网关：异步任务 ID 在 task_id，顶层 id 常为数字记录号
 	return nil, upstreamID
+}
+
+func upstreamPollPath(body []byte, baseURL string) string {
+	var raw map[string]interface{}
+	if json.Unmarshal(body, &raw) != nil {
+		return ""
+	}
+	raw = unwrapUpstreamBody(raw)
+	pollPath := scalarString(raw, "poll_url", "pollUrl", "status_url", "statusUrl")
+	if pollPath == "" {
+		pollPath = nestedScalarString(raw, "poll_url", "pollUrl", "status_url", "statusUrl")
+	}
+	pollPath = strings.TrimSpace(pollPath)
+	if !isHTTPURL(pollPath) {
+		return pollPath
+	}
+	pollURL, pollErr := url.Parse(pollPath)
+	base, baseErr := url.Parse(baseURL)
+	if pollErr != nil || baseErr != nil || !strings.EqualFold(pollURL.Scheme, base.Scheme) || !strings.EqualFold(pollURL.Host, base.Host) {
+		return ""
+	}
+	return pollPath
 }
 
 func rawAudioMediaItem(body []byte) (mediaItem, bool) {
@@ -2799,7 +2824,7 @@ func parseProgressPercent(raw string) int {
 
 func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, int, int, error) {
 	escapedID := url.PathEscape(upstreamID)
-	pollURL := conn.BaseURL + strings.Replace(cfg.Path, "{id}", escapedID, 1)
+	pollURL := joinBaseEndpoint(conn.BaseURL, strings.Replace(cfg.Path, "{id}", escapedID, 1))
 	deadline := time.Now().Add(cfg.Timeout)
 	var lastStatus string
 	var consecutiveErrors int

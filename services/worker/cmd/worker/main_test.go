@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -180,6 +182,44 @@ func TestParseUpstreamMediaReadsTaskIDInsideArray(t *testing.T) {
 	items, upstreamID := parseUpstreamMedia([]byte(`{"data":[{"task_id":"task-array-1","status":"queued"}]}`))
 	if len(items) != 0 || upstreamID != "task-array-1" {
 		t.Fatalf("items=%#v upstreamID=%q", items, upstreamID)
+	}
+}
+
+func TestPlatformAsyncTaskResponseUsesPollURL(t *testing.T) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/tasks/task-production-1" {
+			t.Fatalf("poll path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_no":"task-production-1","status":"succeeded","output":{"images":[{"url":"https://example.com/result.png"}]}}`))
+	}))
+	defer server.Close()
+
+	created := []byte(`{"task_no":"task-production-1","status":"pending","poll_url":"/v1/tasks/task-production-1"}`)
+	items, upstreamID := parseUpstreamMedia(created)
+	if len(items) != 0 || upstreamID != "task-production-1" {
+		t.Fatalf("create response items=%#v upstreamID=%q", items, upstreamID)
+	}
+	pollPath := upstreamPollPath(created, server.URL)
+	if pollPath != "/v1/tasks/task-production-1" {
+		t.Fatalf("poll path = %q", pollPath)
+	}
+	items, _, _, err := pollUpstreamTask(context.Background(), nil, connectionConfig{BaseURL: server.URL, AuthType: "none"}, pollConfig{
+		Path: pollPath, Interval: time.Millisecond, Timeout: time.Second,
+	}, upstreamID, "local-task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.com/result.png" {
+		t.Fatalf("poll items = %#v", items)
+	}
+}
+
+func TestUpstreamPollPathRejectsForeignAbsoluteURL(t *testing.T) {
+	body := []byte(`{"task_no":"task-1","poll_url":"https://attacker.example/tasks/task-1"}`)
+	if got := upstreamPollPath(body, "https://api.example.com"); got != "" {
+		t.Fatalf("foreign poll URL accepted: %q", got)
 	}
 }
 
