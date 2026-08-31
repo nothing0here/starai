@@ -142,6 +142,20 @@ BUILD_SERVICES="api worker" bash scripts/deploy-prod.sh
 NO_CACHE_SERVICES="web admin" BUILD_SERVICES="web admin" bash scripts/deploy-prod.sh
 ```
 
+### 可选内置 SearXNG
+
+SearXNG 默认不启动。需要自建搜索时，在 `.env.production` 设置：
+
+```bash
+SEARXNG_ENABLED=true
+# 先运行 openssl rand -hex 32，再把输出粘贴到下面
+SEARXNG_SECRET=粘贴生成的随机值
+```
+
+重新运行部署脚本后，在管理后台“系统配置 → Agent 联网搜索”选择 `SearXNG`，服务地址填写 `http://searxng:8080`。服务仅在 Docker 内网开放，默认限制为 1 CPU、768 MB 内存；搜索结果继续使用 StarAI Redis 缓存。
+
+本地开发可在 `.env.local` 设置 `SEARXNG_ENABLED=true`，重启 `scripts/dev.ps1` 后使用 `http://127.0.0.1:8888`。
+
 详细部署教程：
 
 - [宝塔面板单域名部署教程](docs/deploy-single-domain-baota.md)

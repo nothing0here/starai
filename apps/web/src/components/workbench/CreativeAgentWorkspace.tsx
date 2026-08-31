@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowUp, AudioLines, ChevronDown, ChevronLeft, ChevronRight, Download, HelpCircle, History, ImageIcon, Loader2, Maximize2, Menu, Plus, SlidersHorizontal, Sparkles, Upload, UserRound, Video, X } from "lucide-react";
+import { ArrowUp, AudioLines, ChevronDown, ChevronLeft, ChevronRight, Download, Globe, HelpCircle, History, ImageIcon, Loader2, Maximize2, Menu, Plus, SlidersHorizontal, Sparkles, Upload, UserRound, Video, X } from "lucide-react";
 import type { Model, User } from "@starai/shared-types";
 import { api, uploadAsset } from "@/lib/api";
 import { useSiteBranding } from "@/components/SiteBrand";
@@ -12,12 +12,13 @@ import { ChatTopTools, type BottomBarState } from "./BottomBar";
 import { AGENT_THEMES } from "./categoryMeta";
 
 type Attachment = { public_id: string; name: string; url: string; kind?: string };
-type Message = { role: "user" | "assistant"; content: string; images?: string[]; videos?: string[]; audios?: string[]; attachments?: Attachment[] };
+type SearchResult = { title: string; url: string; snippet?: string; published_date?: string };
+type Message = { role: "user" | "assistant"; content: string; images?: string[]; videos?: string[]; audios?: string[]; attachments?: Attachment[]; sources?: SearchResult[]; searchWarning?: string; searchRequired?: boolean; retryText?: string };
 type Plan = { intent?: string; reply?: string; prompt?: string; params?: Record<string, unknown>; needs_confirm?: boolean };
 type TaskState = { task_no: string; type?: string; status: string; progress?: number; input?: Record<string, unknown>; output?: Record<string, unknown>; error_message?: string };
 type HistoryItem = { public_id: string; title?: string | null; updated_at: string };
 type AgentConfig = { runtime_config?: { analysis_model_code?: string; image_model_code?: string; video_model_code?: string; speech_model_code?: string; music_model_code?: string } };
-type AgentEvent = { type?: string; asset_ids?: string[]; task_no?: string; media_type?: string; prompt?: string };
+type AgentEvent = { type?: string; asset_ids?: string[]; task_no?: string; media_type?: string; prompt?: string; search_results?: SearchResult[]; search_warning?: string };
 type AssetRecord = { public_id: string; name?: string; url: string; kind?: string; mime_type?: string };
 type MediaSet = { images: string[]; videos: string[]; audios: string[] };
 type MediaPreview = { url: string; type: "image" | "video" };
@@ -137,15 +138,17 @@ export function CreativeAgentWorkspace({
   const [historyLoadingId, setHistoryLoadingId] = useState("");
   const [activeFeature, setActiveFeature] = useState(0);
   const [deepThink, setDeepThink] = useState(false);
+  const [searchAvailable, setSearchAvailable] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [latestGeneratedMedia, setLatestGeneratedMedia] = useState<MediaSet>({ images: [], videos: [], audios: [] });
   const [mediaPreview, setMediaPreview] = useState<MediaPreview | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    Promise.all([api<Model[]>("/api/models?category=chat"), api<Model[]>("/api/models?category=image"), api<Model[]>("/api/models?category=video"), api<Model[]>("/api/models?category=audio"), api<AgentConfig>("/api/agents/general_creative_agent"), api<User>("/api/me").catch(() => null)])
-      .then(([chats, images, videos, audios, agent, currentUser]) => {
+    Promise.all([api<Model[]>("/api/models?category=chat"), api<Model[]>("/api/models?category=image"), api<Model[]>("/api/models?category=video"), api<Model[]>("/api/models?category=audio"), api<AgentConfig>("/api/agents/general_creative_agent"), api<User>("/api/me").catch(() => null), api<{ web_search_enabled?: boolean }>("/api/system-configs/public").catch((): { web_search_enabled?: boolean } => ({}))])
+      .then(([chats, images, videos, audios, agent, currentUser, publicConfig]) => {
         const enabled = (items: Model[]) => (items || []).filter((item) => item.is_enabled !== false);
         const nextChats = enabled(chats).filter((item) => item.category === "chat" && item.code !== "multi_collab_chat" && !/多模型协作|multi.?collab/i.test(`${item.code} ${item.display_name || ""}`));
         const nextImages = enabled(images);
@@ -172,6 +175,7 @@ export function CreativeAgentWorkspace({
         setDefaultSpeechModelCode(defaultSpeech);
         setDefaultMusicModelCode(defaultMusic);
         setUser(currentUser);
+        setSearchAvailable(publicConfig.web_search_enabled === true);
       })
       .catch(() => setError("模型列表加载失败，请稍后重试"));
   }, []);
@@ -200,6 +204,17 @@ export function CreativeAgentWorkspace({
     }, 4500);
     return () => window.clearInterval(timer);
   }, [messages.length]);
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "end",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, busy, task?.progress, task?.status]);
 
   const assetIDs = useMemo(
     () => Array.from(new Set([...bottom.asset_ids, ...bottom.files.map((item) => item.public_id)])),
@@ -266,16 +281,20 @@ export function CreativeAgentWorkspace({
     setMessages((current) => [...current, { role: "assistant", content: `已自动创建${generationLabel(mediaType)}任务：${result.task_no}` }]);
   };
 
-  const sendMessage = async () => {
-    const text = prompt.trim();
+  const sendMessage = async (retryText = "", forceWebSearch = false) => {
+    const text = (retryText || prompt).trim();
     if (!text || busy || !chatModelCode) return;
-    const nextMessages = [...messages, { role: "user" as const, content: text }];
+    const cleanMessages = messages.filter((item) => !item.searchRequired);
+    const lastMessage = cleanMessages[cleanMessages.length - 1];
+    const nextMessages = retryText && lastMessage?.role === "user" && lastMessage.content === text
+      ? cleanMessages
+      : [...cleanMessages, { role: "user" as const, content: text }];
     setMessages(nextMessages);
-    setPrompt("");
+    if (!retryText) setPrompt("");
     setError("");
     setBusy(true);
     try {
-      const result = await api<{ conversation_id?: string; plan?: Plan }>("/api/creative-agent/plan", {
+      const result = await api<{ conversation_id?: string; plan?: Plan; search_required?: boolean; search_hint?: string; search_results?: SearchResult[]; search_warning?: string }>("/api/creative-agent/plan", {
         method: "POST",
         body: JSON.stringify({
           model_code: chatModelCode,
@@ -283,19 +302,30 @@ export function CreativeAgentWorkspace({
           messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
           asset_ids: assetIDs,
           deep_think: deepThink,
+          web_search: searchAvailable && (forceWebSearch || bottom.web_search),
           preferred_media_type: customEnabled ? customMediaType : "",
         }),
       });
+      if (result.search_required) {
+        setMessages([...nextMessages, {
+          role: "assistant",
+          content: result.search_hint || "这个问题需要查询实时信息，请先启用智能搜索。",
+          searchRequired: true,
+          retryText: text,
+        }]);
+        return;
+      }
       const activeConversationId = result.conversation_id || conversationId;
       if (activeConversationId) setConversationId(activeConversationId);
+      const sourceMeta = { sources: result.search_results || [], searchWarning: result.search_warning || "" };
       const nextPlan = { ...(result.plan || { intent: "chat", reply: "暂时无法理解这次需求，请换一种说法。" }) };
       if (customEnabled) nextPlan.intent = customMediaType;
       const nextIntent = nextPlan.intent;
       if (nextIntent === "image" || nextIntent === "video" || nextIntent === "speech" || nextIntent === "music") {
-        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || `已理解需求，正在创建${generationLabel(nextIntent)}任务。` }]);
+        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || `已理解需求，正在创建${generationLabel(nextIntent)}任务。`, ...sourceMeta }]);
         await createGeneration(nextPlan, activeConversationId);
       } else {
-        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || "请继续描述你的需求。" }]);
+        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || "请继续描述你的需求。", ...sourceMeta }]);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "智能体分析失败");
@@ -349,6 +379,16 @@ export function CreativeAgentWorkspace({
           continue;
         }
         const event = storedEvent(item.content);
+        if (event?.type === "creative_agent_web_search") {
+          for (let index = restored.length - 1; index >= 0; index -= 1) {
+            if (restored[index].role === "assistant") {
+              restored[index].sources = event.search_results || [];
+              restored[index].searchWarning = event.search_warning || "";
+              break;
+            }
+          }
+          continue;
+        }
         if ((event?.type === "creative_agent_assets" || event?.type === "creative_agent_generation") && event.asset_ids?.length) {
           for (let index = restored.length - 1; index >= 0; index -= 1) {
             if (restored[index].role === "user") {
@@ -530,6 +570,11 @@ export function CreativeAgentWorkspace({
                     {message.content && !(message.content === "生成完成" && (message.images?.length || message.videos?.length || message.audios?.length)) ? (
                       <div className={`w-fit max-w-full whitespace-pre-wrap rounded-2xl px-4 py-3 shadow-sm ${message.role === "user" ? "ml-auto bg-primary text-dark" : "border border-white/80 bg-white text-gray-700 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200"}`}>{message.content}</div>
                     ) : null}
+                    {message.searchRequired && message.retryText ? (
+                      <button type="button" disabled={busy} onClick={() => { setBottom((value) => ({ ...value, web_search: true })); void sendMessage(message.retryText, true); }} className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/10 px-3 text-sm text-primary transition hover:bg-primary/15 disabled:opacity-50">
+                        <Globe size={14} />启用智能搜索并继续
+                      </button>
+                    ) : null}
                     {message.images?.length ? (
                       <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
                         {message.images.map((url) => (
@@ -565,6 +610,22 @@ export function CreativeAgentWorkspace({
                         {message.attachments.filter((item) => item.kind !== "image" && item.kind !== "video" && item.kind !== "audio").map((item) => <a key={item.public_id} href={item.url} target="_blank" rel="noreferrer" className="max-w-[220px] truncate rounded-lg border border-black/10 px-2 py-1 text-xs underline-offset-2 hover:underline dark:border-white/10">{item.name}</a>)}
                       </div>
                     ) : null}
+                    {message.searchWarning ? <div className="mt-2 rounded-xl border border-amber-200/70 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-200">{message.searchWarning}</div> : null}
+                    {message.sources?.length ? (
+                      <details className="group mt-2 text-xs text-gray-400">
+                        <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-lg px-2 py-1 transition hover:bg-black/5 hover:text-gray-600 dark:hover:bg-white/5 dark:hover:text-gray-200">
+                          <Globe size={13} />参考来源 · {message.sources.length}
+                          <ChevronDown size={13} className="transition group-open:rotate-180" />
+                        </summary>
+                        <div className="mt-1 space-y-1 border-l border-gray-200 pl-3 dark:border-white/10">
+                          {message.sources.map((source, sourceIndex) => (
+                            <a key={`${source.url}-${sourceIndex}`} href={source.url} target="_blank" rel="noreferrer" className="block max-w-xl truncate py-0.5 underline-offset-2 hover:text-primary hover:underline">
+                              [{sourceIndex + 1}] {source.title || source.url}{source.published_date ? ` · ${source.published_date}` : ""}
+                            </a>
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -574,7 +635,7 @@ export function CreativeAgentWorkspace({
         {busy && (
           <div className="mx-auto mt-4 flex max-w-5xl items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             <Loader2 size={14} className="animate-spin text-primary" />
-            正在分析或创建任务...
+            正在理解需求、检索资料或创建任务...
           </div>
         )}
         {task && (
@@ -583,6 +644,7 @@ export function CreativeAgentWorkspace({
             <span className="shrink-0 font-medium text-gray-700 dark:text-gray-200">{task.status === "succeeded" ? "已完成" : task.status === "failed" ? task.error_message || "生成失败" : `生成中 ${task.progress || 0}%`}</span>
           </div>
         )}
+        <div ref={messagesEndRef} className="h-px" aria-hidden />
       </div>
 
       <div className="relative z-10 shrink-0 px-2 pb-2 pt-1 sm:px-6 sm:pb-5 sm:pt-2">
@@ -621,6 +683,7 @@ export function CreativeAgentWorkspace({
               <div className="scroll-x-only flex min-w-0 flex-1 flex-nowrap items-center gap-2 overflow-x-auto pb-1">
                 <button type="button" onClick={() => setCustomEnabled(false)} aria-pressed={!customEnabled} className={`h-8 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${!customEnabled ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}>Agent 模式</button>
                 <button type="button" onClick={() => setDeepThink((value) => !value)} aria-pressed={deepThink} className={`h-8 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${deepThink ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}>深度思考</button>
+                {searchAvailable && <button type="button" onClick={() => setBottom((value) => ({ ...value, web_search: !value.web_search }))} aria-pressed={bottom.web_search} className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${bottom.web_search ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><Globe size={14} />智能搜索</button>}
                 <button type="button" onClick={() => setCustomEnabled((value) => !value)} aria-pressed={customEnabled} className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${customEnabled ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><SlidersHorizontal size={14} />自定义</button>
                 {customEnabled && (
                   <>
@@ -654,6 +717,7 @@ export function CreativeAgentWorkspace({
               <p>连续创作时，上一轮成功生成的媒体会优先作为下一轮参考；重新上传或改选资产后则以新素材为准。</p>
               <p>需要指定模型时开启“自定义”，选择一种生成类型后只会显示该类型的模型。</p>
               <p>开启深度思考后，Agent 会更仔细检查目标、素材和参数，响应时间及模型费用可能增加。</p>
+              {searchAvailable && <p>开启智能搜索后，Agent 会先检索并交叉核验网页资料，再归纳提炼为直接回答；参考来源默认收起，可按需展开核验。联网问题会增加一次检索决策模型用量，并消耗搜索服务额度。</p>}
               <p>计费由两部分组成：主聊天模型按实际对话用量计费，生成任务按所选图片、视频或音频模型计费；不额外收取智能体工作流费。</p>
             </div>
           </div>

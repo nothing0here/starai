@@ -266,8 +266,25 @@ try {
 }
 
 $composeFile = Join-Path $Root "infra/docker/docker-compose.yml"
-if ((Invoke-External { docker compose -f $composeFile up -d postgres redis minio }) -ne 0) {
+$infraServices = @("postgres", "redis", "minio")
+$composeProfileArgs = @()
+$searxngEnabled = $env:SEARXNG_ENABLED -eq "true" -or $env:SEARXNG_ENABLED -eq "1"
+if ($searxngEnabled) {
+  $infraServices += "searxng"
+  $composeProfileArgs = @("--profile", "search")
+} else {
+  Invoke-External { docker compose -f $composeFile --profile search stop searxng } | Out-Null
+}
+if ((Invoke-External { & docker compose -f $composeFile @composeProfileArgs up -d @infraServices }) -ne 0) {
   Fail "Docker compose failed. Make sure Docker Desktop is running and can pull images, then re-run this script."
+}
+if ($searxngEnabled) {
+  $searxngPort = if ($env:SEARXNG_BIND_PORT) { $env:SEARXNG_BIND_PORT } else { "8888" }
+  Info "Waiting for optional SearXNG"
+  if (-not (Wait-HttpOk -Url "http://127.0.0.1:$searxngPort/healthz" -Retries 60 -DelayMs 1000)) {
+    Invoke-External { docker compose -f $composeFile --profile search logs --tail=80 searxng } | Out-Null
+    Fail "SearXNG failed its health check."
+  }
 }
 
 # wait for postgres readiness. A fresh volume can open port 5432 before init scripts are fully ready.

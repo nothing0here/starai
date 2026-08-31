@@ -1,0 +1,47 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - brave
+      - brave.news
+      - bing
+      - bing news
+      - duckduckgo
+
+general:
+  debug: false
+  instance_name: "StarAI Internal Search"
+  enable_metrics: false
+
+search:
+  safe_search: 1
+  autocomplete: ""
+  favicon_resolver: ""
+  default_lang: "auto"
+  max_page: 1
+  formats:
+    - json
+
+server:
+  secret_key: "overridden-by-SEARXNG_SECRET"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 8.0
+  pool_connections: 20
+  pool_maxsize: 10
+
+engines:
+  - name: brave
+    disabled: false
+  - name: brave.news
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: bing news
+    disabled: false
+  - name: duckduckgo
+    disabled: false

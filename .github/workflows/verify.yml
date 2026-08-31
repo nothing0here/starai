@@ -33,6 +33,12 @@ jobs:
       - name: Verify migration pairs
         run: node scripts/verify-migrations.js
 
+      - name: Validate deployment files
+        run: |
+          bash -n scripts/deploy-prod.sh
+          STARAI_ENV_FILE=../../.env.example docker compose --env-file .env.example -f infra/docker/docker-compose.prod.yml --profile search config --quiet
+          docker compose --env-file .env.local -f infra/docker/docker-compose.yml --profile search config --quiet
+
       - name: Test and vet API
         working-directory: services/api
         run: |

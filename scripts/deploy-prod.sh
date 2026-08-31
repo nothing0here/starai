@@ -34,7 +34,7 @@ fi
 
 env_value() {
   local key="$1"
-  grep -E "^[[:space:]]*${key}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+  { grep -E "^[[:space:]]*${key}=" "$ENV_FILE" || true; } | tail -n 1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
 }
 
 warn() {
@@ -49,6 +49,8 @@ postgres_password="$(env_value POSTGRES_PASSWORD)"
 jwt_secret="$(env_value JWT_SECRET)"
 admin_jwt_secret="$(env_value ADMIN_JWT_SECRET)"
 base_url="$(env_value BASE_URL)"
+searxng_enabled="$(env_value SEARXNG_ENABLED)"
+searxng_secret="$(env_value SEARXNG_SECRET)"
 
 if [ "$app_env" = "production" ]; then
   case "$base_url" in
@@ -129,11 +131,26 @@ if [ "$app_env" = "production" ]; then
   esac
 fi
 
+if [ "$searxng_enabled" = "1" ] || [ "$searxng_enabled" = "true" ]; then
+  case "$searxng_secret" in
+    ""|replace_with_a_random_internal_search_secret|change-this-internal-search-secret)
+      warn "SEARXNG_SECRET is using a default value. The service is private, but a random secret is recommended."
+      ;;
+  esac
+fi
+
 echo "==> Checking compose config"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null
 
 echo "==> Starting PostgreSQL and Redis"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres redis
+
+if [ "$searxng_enabled" = "1" ] || [ "$searxng_enabled" = "true" ]; then
+  echo "==> Starting optional private SearXNG"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile search up -d searxng
+else
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile search stop searxng >/dev/null 2>&1 || true
+fi
 
 echo "==> Saving current application images for rollback"
 for service in $BUILD_SERVICES; do
@@ -254,6 +271,28 @@ for service in $BUILD_SERVICES; do
     exit 1
   fi
 done
+
+if [ "$searxng_enabled" = "1" ] || [ "$searxng_enabled" = "true" ]; then
+  echo "==> Waiting for SearXNG health check"
+  searxng_id="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile search ps -q searxng || true)"
+  searxng_healthy=false
+  for _ in $(seq 1 45); do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$searxng_id" 2>/dev/null || true)"
+    if [ "$status" = "healthy" ]; then
+      searxng_healthy=true
+      break
+    fi
+    if [ "$status" = "unhealthy" ] || [ "$status" = "exited" ] || [ "$status" = "dead" ]; then
+      break
+    fi
+    sleep 2
+  done
+  if [ "$searxng_healthy" != "true" ]; then
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" --profile search logs --tail=80 searxng >&2 || true
+    echo "SearXNG failed its health check; application services were left running." >&2
+    exit 1
+  fi
+fi
 
 echo "==> Current status"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps

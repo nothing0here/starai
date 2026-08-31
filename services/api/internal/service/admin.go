@@ -1476,6 +1476,21 @@ func (s *AdminService) ListCardBatches(ctx context.Context) ([]CardBatchDTO, err
 }
 
 func (s *AdminService) GetSystemConfigs(ctx context.Context) (map[string]interface{}, error) {
+	result, err := s.GetRawSystemConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for key, v := range result {
+		if isSensitiveConfigKey(key) {
+			if text, ok := v.(string); ok && strings.TrimSpace(text) != "" {
+				result[key] = maskAdminSecret(text)
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *AdminService) GetRawSystemConfigs(ctx context.Context) (map[string]interface{}, error) {
 	rows, err := s.db.Query(ctx, `SELECT key, value FROM system_configs`)
 	if err != nil {
 		return nil, err
@@ -1488,11 +1503,6 @@ func (s *AdminService) GetSystemConfigs(ctx context.Context) (map[string]interfa
 		rows.Scan(&key, &value)
 		var v interface{}
 		json.Unmarshal(value, &v)
-		if isSensitiveConfigKey(key) {
-			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				v = maskAdminSecret(s)
-			}
-		}
 		result[key] = v
 	}
 	return result, nil

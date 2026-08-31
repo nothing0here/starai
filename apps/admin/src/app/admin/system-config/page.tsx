@@ -290,6 +290,8 @@ export default function SystemConfigPage() {
   const [translationFilling, setTranslationFilling] = useState(false);
   const [translationAI, setTranslationAI] = useState(false);
   const [translationModelTesting, setTranslationModelTesting] = useState(false);
+  const [webSearchTesting, setWebSearchTesting] = useState(false);
+  const [searchRouterModels, setSearchRouterModels] = useState<{ value: string; label: string }[]>([]);
   const [translationSourceLabels, setTranslationSourceLabels] = useState<TranslationSourceLabels>({});
   const [versionOpen, setVersionOpen] = useState(false);
   const [appVersion, setAppVersion] = useState("");
@@ -307,6 +309,17 @@ export default function SystemConfigPage() {
               String(cfg.customer_service_enabled).toLowerCase() === "false"
             );
       setConfigs({
+        web_search_enabled: false,
+        web_search_provider: "tavily",
+        web_search_api_key: "",
+        web_search_base_url: "",
+        web_search_depth: "basic",
+        web_search_max_results: 5,
+        web_search_timeout_sec: 12,
+        web_search_daily_limit: 100,
+        web_search_cache_ttl_sec: 600,
+        web_search_router_model_code: "",
+        agent_default_timezone: "Asia/Shanghai",
         customer_service_custom_script: "",
         customer_service_title: "联系客服",
         customer_service_name: "在线客服",
@@ -327,6 +340,17 @@ export default function SystemConfigPage() {
       setUiLanguageRows(normalizeUILanguageRows(cfg.ui_languages));
       setTranslationRows(normalizeTranslationRows(cfg.ui_translation_overrides));
     });
+  }, []);
+
+  useEffect(() => {
+    adminApi<any[] | { items?: any[] }>("/models")
+      .then((response) => {
+        const models = Array.isArray(response) ? response : response.items || [];
+        setSearchRouterModels(models
+          .filter((model) => model?.category === "chat" && model?.is_enabled !== false && model?.code !== "multi_collab_chat")
+          .map((model) => ({ value: String(model.code), label: `${model.display_name || model.name || model.code}（${model.code}）` })));
+      })
+      .catch(() => setSearchRouterModels([]));
   }, []);
 
   const loadVersionInfo = async () => {
@@ -536,6 +560,15 @@ export default function SystemConfigPage() {
       setSaveMsg(`翻译模型连接正常：${result.translation}`);
     } catch (err) { setSaveErr(err instanceof Error ? err.message : "翻译模型测试失败"); }
     finally { setTranslationModelTesting(false); }
+  };
+
+  const testWebSearch = async () => {
+    setWebSearchTesting(true); setSaveErr(""); setSaveMsg("");
+    try {
+      const result = await adminApi<{ provider: string; result_count: number; latency_ms: number }>("/system-configs/web-search/test", { method: "POST", body: JSON.stringify(configs) });
+      setSaveMsg(`联网搜索连接正常：${result.provider} 返回 ${result.result_count} 条结果，耗时 ${result.latency_ms}ms`);
+    } catch (err) { setSaveErr(err instanceof Error ? err.message : "联网搜索连接测试失败"); }
+    finally { setWebSearchTesting(false); }
   };
 
   const exportTranslations = () => {
@@ -1331,6 +1364,39 @@ export default function SystemConfigPage() {
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5">
           <div className="mb-4 text-sm font-semibold text-gray-900">内容安全</div>
           <div className="grid grid-cols-1 gap-4">{SAFETY_ITEMS.map((item) => renderItem(item))}</div>
+        </section>
+
+        <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
+          <div className="mb-1 text-sm font-semibold text-gray-900">Agent 联网搜索</div>
+          <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。Tavily 与 Brave 使用托管 API；SearXNG 使用你自行部署的 HTTP Search API。</p>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {renderItem({ key: "web_search_enabled", label: "启用智能搜索", type: "checkbox", hint: "关闭后用户端不显示智能搜索按钮。" })}
+            {renderItem({ key: "web_search_provider", label: "搜索服务商", type: "select", options: [
+              { value: "tavily", label: "Tavily（推荐）" },
+              { value: "brave", label: "Brave Search API" },
+              { value: "searxng", label: "SearXNG（自建）" },
+            ] })}
+            {String(configs.web_search_provider || "tavily") !== "searxng" ? renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "保存后只显示脱敏值，不会下发到用户端。" }) : renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发填写 http://127.0.0.1:8888。" })}
+            {renderItem({ key: "agent_default_timezone", label: "Agent 默认时区", type: "text", hint: "IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/New_York。用于可信系统时间工具。" })}
+            {renderItem({ key: "web_search_router_model_code", label: "模糊问题路由模型", type: "select", options: [
+              { value: "", label: "跟随 Agent 主模型" },
+              ...searchRouterModels,
+            ], hint: "仅模糊、依赖上下文的联网问题会调用。建议选择速度快、价格低的对话模型。" })}
+            {String(configs.web_search_provider || "tavily") === "tavily" && renderItem({ key: "web_search_depth", label: "Tavily 搜索深度", type: "select", options: [
+              { value: "basic", label: "Basic（1 Credit）" },
+              { value: "advanced", label: "Advanced（2 Credits，更高相关性）" },
+            ], hint: "时效范围和新闻主题由 Agent 自动判断；Advanced 会消耗更多 Tavily Credits。" })}
+            {renderItem({ key: "web_search_max_results", label: "每次最大结果数", type: "number", hint: "允许 1–10 条，建议 5 条。" })}
+            {renderItem({ key: "web_search_timeout_sec", label: "搜索超时（秒）", type: "number", hint: "允许 3–30 秒。超时会自动降级为普通 Agent 对话。" })}
+            {renderItem({ key: "web_search_daily_limit", label: "每用户每日搜索上限", type: "number", hint: "0 表示不限；需要 Redis 才能严格执行。" })}
+            {renderItem({ key: "web_search_cache_ttl_sec", label: "搜索缓存（秒）", type: "number", hint: "允许 0–3600，推荐 600；命中缓存不消耗搜索额度。" })}
+          </div>
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <button type="button" disabled={webSearchTesting} onClick={testWebSearch} className="rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-2 text-sm font-medium text-cyan-700 disabled:opacity-50">
+              {webSearchTesting ? "测试中..." : "测试搜索连接"}
+            </button>
+            <span className="text-xs text-gray-400">测试会发起一次真实搜索，可能消耗服务商免费额度。</span>
+          </div>
         </section>
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5">
