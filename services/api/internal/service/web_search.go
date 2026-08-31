@@ -130,7 +130,7 @@ func SearchWebWithOptions(ctx context.Context, cfg WebSearchConfig, input WebSea
 	if err != nil {
 		return nil, err
 	}
-	results = cleanWebSearchResults(results, cfg.MaxResults)
+	results = cleanWebSearchResults(results, cfg.MaxResults, input.IncludeDomains)
 	if len(results) == 0 {
 		return nil, errors.New("搜索服务未返回有效结果")
 	}
@@ -251,6 +251,17 @@ func searchSearXNG(ctx context.Context, client *http.Client, cfg WebSearchConfig
 		err = doSearchRequest(client, req, &payload)
 		return payload, err
 	}
+	hasUsableResults := func(payload searXNGPayload) bool {
+		if len(input.IncludeDomains) == 0 {
+			return len(payload.Results) > 0
+		}
+		for _, item := range payload.Results {
+			if searchResultMatchesDomains(item.URL, input.IncludeDomains) {
+				return true
+			}
+		}
+		return false
+	}
 
 	category := ""
 	if input.Topic == "news" {
@@ -260,10 +271,10 @@ func searchSearXNG(ctx context.Context, client *http.Client, cfg WebSearchConfig
 	if err != nil {
 		return nil, err
 	}
-	if len(payload.Results) == 0 && input.TimeRange != "" {
+	if !hasUsableResults(payload) && input.TimeRange != "" {
 		payload, err = search(category, "")
 	}
-	if err == nil && len(payload.Results) == 0 && category != "" {
+	if err == nil && !hasUsableResults(payload) && category != "" {
 		payload, err = search("", "")
 	}
 	if err != nil {
@@ -303,7 +314,7 @@ func doSearchRequest(client *http.Client, req *http.Request, target interface{})
 	return nil
 }
 
-func cleanWebSearchResults(items []WebSearchResult, limit int) []WebSearchResult {
+func cleanWebSearchResults(items []WebSearchResult, limit int, domains []string) []WebSearchResult {
 	out := make([]WebSearchResult, 0, limit)
 	seen := make(map[string]bool)
 	hostCounts := make(map[string]int)
@@ -317,7 +328,7 @@ func cleanWebSearchResults(items []WebSearchResult, limit int) []WebSearchResult
 			continue
 		}
 		host := strings.ToLower(parsed.Hostname())
-		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= 2 {
+		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= 2 || !searchResultMatchesDomains(item.URL, domains) {
 			continue
 		}
 		seen[item.URL] = true
@@ -334,6 +345,24 @@ func cleanWebSearchResults(items []WebSearchResult, limit int) []WebSearchResult
 		}
 	}
 	return out
+}
+
+func searchResultMatchesDomains(rawURL string, domains []string) bool {
+	if len(domains) == 0 {
+		return true
+	}
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	for _, domain := range domains {
+		domain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), "www.")
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeWebSearchRequest(input WebSearchRequest) WebSearchRequest {

@@ -62,6 +62,34 @@ func TestSearchWebWithSearXNGRelaxesUnsupportedFilters(t *testing.T) {
 	}
 }
 
+func TestSearchWebWithSearXNGEnforcesRequestedDomain(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("q") != "凤凰网 科技新闻 site:ifeng.com" {
+			t.Fatalf("unexpected query: %s", r.URL.Query().Get("q"))
+		}
+		switch requests {
+		case 1:
+			_, _ = w.Write([]byte(`{"results":[{"title":"百度地图","url":"https://map.baidu.com/a","content":"wrong domain"}]}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"results":[{"title":"凤凰科技","url":"https://tech.ifeng.com/a","content":"right domain"},{"title":"高德地图","url":"https://amap.com/a","content":"wrong domain"}]}`))
+		default:
+			t.Fatalf("unexpected request count: %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	results, err := SearchWebWithOptions(context.Background(), WebSearchConfig{Enabled: true, Provider: "searxng", BaseURL: server.URL, MaxResults: 5, TimeoutSec: 3}, WebSearchRequest{Query: "凤凰网 科技新闻", Topic: "news", TimeRange: "day", IncludeDomains: []string{"ifeng.com"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 || len(results) != 1 || results[0].Title != "凤凰科技" {
+		t.Fatalf("unexpected domain-filtered results: requests=%d results=%#v", requests, results)
+	}
+}
+
 func TestParseWebSearchConfigBounds(t *testing.T) {
 	cfg := ParseWebSearchConfig(map[string]interface{}{
 		"web_search_enabled": true, "web_search_provider": "BRAVE", "web_search_max_results": float64(99), "web_search_timeout_sec": float64(1), "web_search_daily_limit": float64(-2), "web_search_cache_ttl_sec": float64(9999),
