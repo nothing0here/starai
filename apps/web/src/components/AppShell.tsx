@@ -201,6 +201,13 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   }, [isWorkbench, locale, section]);
 
   useEffect(() => {
+    if (!creativeAgentLoaded || activeModelCode !== GENERAL_CREATIVE_AGENT_CODE || creativeAgent) return;
+    setActiveModelCode(undefined);
+    setActiveModel(null);
+    router.replace("/app");
+  }, [activeModelCode, creativeAgent, creativeAgentLoaded, router]);
+
+  useEffect(() => {
     if (!isWorkbench || section !== "models") return;
     api<ModelCategory[]>("/api/model-categories")
       .then((items) => setModelCategoryCodes((items || []).map((item) => item.code).filter(Boolean)))

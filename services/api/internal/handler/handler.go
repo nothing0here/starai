@@ -4011,9 +4011,11 @@ func (h *Handler) pollTaskUntilComplete(ctx context.Context, userID int64, taskN
 // openAPITaskToStandardFormat converts task output to OpenAI-compatible format.
 //
 // Output shapes are written by the worker (services/worker/cmd/worker/main.go):
-//   image: {"image_url": "...", "images": [{"url": "..."}], ...}
-//   video: {"video_url": "...", "videos": [{"url","thumbnail",...}], ...}
-//   audio: {"audio_url": "...", ...}
+//
+//	image: {"image_url": "...", "images": [{"url": "..."}], ...}
+//	video: {"video_url": "...", "videos": [{"url","thumbnail",...}], ...}
+//	audio: {"audio_url": "...", ...}
+//
 // There is no "items" key and no top-level "url" key.
 func openAPITaskToStandardFormat(task *service.TaskDTO, requestMode string) map[string]interface{} {
 	if task == nil || task.Output == nil {
@@ -6779,7 +6781,7 @@ func (h *Handler) ListAgents(c *gin.Context) {
 
 func (h *Handler) GetAgent(c *gin.Context) {
 	item, err := h.agents.Get(c.Request.Context(), c.Param("code"))
-	if err != nil {
+	if err != nil || item == nil || !item.IsEnabled {
 		util.NotFound(c, "智能体不存在")
 		return
 	}
