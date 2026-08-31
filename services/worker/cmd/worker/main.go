@@ -248,13 +248,14 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 		}
 	}
 
-	var requestMode, endpoint, newAPIModel string
+	var requestMode, category, endpoint, newAPIModel string
 	var extraParamsRaw, runtimeRuleRaw []byte
 	var retentionDays int
-	if err := pool.QueryRow(ctx, `SELECT request_mode, new_api_model, new_api_endpoint, new_api_extra_params, runtime_rule, retention_days FROM models WHERE id=$1`, p.ModelID).
-		Scan(&requestMode, &newAPIModel, &endpoint, &extraParamsRaw, &runtimeRuleRaw, &retentionDays); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT request_mode, category, new_api_model, new_api_endpoint, new_api_extra_params, runtime_rule, retention_days FROM models WHERE id=$1`, p.ModelID).
+		Scan(&requestMode, &category, &newAPIModel, &endpoint, &extraParamsRaw, &runtimeRuleRaw, &retentionDays); err != nil {
 		return failTask(ctx, pool, p, "MODEL_NOT_FOUND", "生成模型不存在或已被删除")
 	}
+	requestMode = normalizeWorkerMediaRequestMode(requestMode, category)
 	isVideo := requestMode == "video"
 	isAudio := requestMode == "audio"
 	isImage := !isVideo && !isAudio
@@ -538,6 +539,20 @@ routeLoop:
 	return nil
 }
 
+func normalizeWorkerMediaRequestMode(requestMode, category string) string {
+	if !strings.EqualFold(strings.TrimSpace(requestMode), "custom") {
+		return requestMode
+	}
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "image":
+		return "images"
+	case "video", "audio":
+		return strings.ToLower(strings.TrimSpace(category))
+	default:
+		return requestMode
+	}
+}
+
 func boolInput(m map[string]interface{}, key string) bool {
 	v, ok := m[key]
 	if !ok {
@@ -577,6 +592,23 @@ type workerModelRoute struct {
 	HealthStatus        string
 	ConsecutiveFailures int
 	CooldownUntil       *time.Time
+	// LegacyRequestTransform holds connection.request_transform recovered from the
+	// model's legacy extra_params before that block is stripped.
+	LegacyRequestTransform map[string]interface{}
+}
+
+// workerRouteRequestTransform returns the effective request_transform for a
+// route, preferring a route-level override over the model-level legacy value.
+func workerRouteRequestTransform(route workerModelRoute) map[string]interface{} {
+	if conn, ok := route.ExtraParams["connection"].(map[string]interface{}); ok {
+		if rt, ok := conn["request_transform"].(map[string]interface{}); ok && len(rt) > 0 {
+			return rt
+		}
+	}
+	if rt, ok := route.ExtraParams["request_transform"].(map[string]interface{}); ok && len(rt) > 0 {
+		return rt
+	}
+	return route.LegacyRequestTransform
 }
 
 func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int64, fallbackBaseURL, fallbackToken, legacyModel, legacyEndpoint string, legacyExtra, legacyRuntime map[string]interface{}) ([]workerModelRoute, error) {
@@ -611,6 +643,14 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 		_ = json.Unmarshal(costRaw, &route.CostRule)
 		legacyExtraWithoutConnection := mergeWorkerMaps(legacyExtra, map[string]interface{}{})
 		delete(legacyExtraWithoutConnection, "connection")
+		// Preserve the non-credential part of the legacy connection block before it
+		// is dropped: request_transform is configuration, not a secret, and the
+		// media payload builders need it to support non-OpenAI upstreams.
+		if legacyConn, ok := legacyExtra["connection"].(map[string]interface{}); ok {
+			if rt, ok := legacyConn["request_transform"].(map[string]interface{}); ok && len(rt) > 0 {
+				route.LegacyRequestTransform = rt
+			}
+		}
 		route.ExtraParams = mergeWorkerMaps(legacyExtraWithoutConnection, route.ExtraParams)
 		route.RuntimeRule = mergeWorkerMaps(legacyRuntime, route.RuntimeRule)
 		routes = append(routes, route)
@@ -854,7 +894,18 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	}
 	result := workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint, UpstreamModel: route.UpstreamModel, GenerationCount: 1}
 	extraParams := mergeWorkerMaps(route.ExtraParams, map[string]interface{}{})
-	extraParams["connection"] = map[string]interface{}{"base_url": route.Connection.BaseURL, "api_key": route.Connection.APIKey, "auth_type": route.Connection.AuthType, "api_key_header": route.Connection.APIKeyHeader}
+	// The credential-bearing connection block is rebuilt from the resolved route
+	// so downstream builders always see the effective base_url/api_key. Carry
+	// request_transform across explicitly: loadWorkerModelRoutes strips the
+	// legacy "connection" key, so it would otherwise be lost here.
+	effectiveConn := map[string]interface{}{
+		"base_url": route.Connection.BaseURL, "api_key": route.Connection.APIKey,
+		"auth_type": route.Connection.AuthType, "api_key_header": route.Connection.APIKeyHeader,
+	}
+	if rt := workerRouteRequestTransform(route); len(rt) > 0 {
+		effectiveConn["request_transform"] = rt
+	}
+	extraParams["connection"] = effectiveConn
 	endpoint, upstreamModel := result.Endpoint, result.UpstreamModel
 	var body []byte
 	if isVideo {
@@ -908,6 +959,10 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	result.Endpoint = endpoint
 	var payload map[string]interface{}
 	_ = json.Unmarshal(body, &payload)
+	// Apply the route's final custom field overlay after every media-specific
+	// builder. The video/audio builder intentionally strips connection (secrets),
+	// so doing this inside only one builder silently skipped custom media routes.
+	applyRequestTransform(payload, extraParams)
 	if isVideo {
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
@@ -931,6 +986,37 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		result.ResponseBody, result.StatusCode, err = doJSONRequestWithLimit(ctx, route.Connection, "POST", joinBaseEndpoint(route.Connection.BaseURL, resolveModelEndpoint(endpoint, upstreamModel)), body, timeout, 96<<20)
 	}
 	return result, err
+}
+
+// applyRequestTransform overlays connection.request_transform onto an outgoing
+// upstream payload, so OpenAI-incompatible providers can be supported by
+// configuration instead of code. A null value deletes the key, which is how a
+// caller drops a field the upstream rejects (e.g. "size").
+//
+// Contract matches the API-side adapters in runtime/chat_protocol.go.
+func applyRequestTransform(payload map[string]interface{}, extraParams map[string]interface{}) {
+	if payload == nil || extraParams == nil {
+		return
+	}
+	conn, ok := extraParams["connection"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	overrides, ok := conn["request_transform"].(map[string]interface{})
+	if !ok || len(overrides) == 0 {
+		return
+	}
+	for key, value := range overrides {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if value == nil {
+			delete(payload, key)
+			continue
+		}
+		payload[key] = value
+	}
 }
 
 func workerStatusCanFailover(status int) bool {
@@ -972,7 +1058,23 @@ func parseConnection(extra map[string]interface{}, fallbackBaseURL, fallbackToke
 		cfg.BaseURL = trimRightSlash(s)
 	}
 	if s, ok := conn["api_key"].(string); ok {
-		cfg.APIKey = s
+		apiKey := strings.TrimSpace(s)
+		// Decrypt at-rest secrets written by the API (util.EncryptSecret,
+		// "enc:v1:" prefix). Plaintext values pass through unchanged, so rows
+		// saved before encryption was introduced keep working.
+		if decrypted, err := decryptWorkerRouteSecret(apiKey, modelRouteCipherKey); err != nil {
+			log.Printf("model connection api_key decrypt failed; check MODEL_ROUTE_CIPHER_KEY: %v", err)
+		} else {
+			apiKey = decrypted
+		}
+		// Support environment variable reference: ${VAR_NAME}
+		if strings.HasPrefix(apiKey, "${") && strings.HasSuffix(apiKey, "}") {
+			envVar := strings.TrimSuffix(strings.TrimPrefix(apiKey, "${"), "}")
+			if envValue := strings.TrimSpace(os.Getenv(envVar)); envValue != "" {
+				apiKey = envValue
+			}
+		}
+		cfg.APIKey = apiKey
 	}
 	if s, ok := conn["auth_type"].(string); ok && s != "" {
 		cfg.AuthType = s
@@ -1964,7 +2066,10 @@ func parseUpstreamMedia(body []byte) ([]mediaItem, string) {
 	}
 	raw = unwrapUpstreamBody(raw)
 	items := extractMediaItems(raw)
-	upstreamID := scalarString(raw, "task_id", "taskId", "generation_id", "request_id", "id")
+	upstreamID := scalarString(raw, "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
+	if upstreamID == "" {
+		upstreamID = nestedScalarString(raw, "task_id", "taskId", "generation_id", "generationId", "job_id", "jobId", "prediction_id", "request_id", "id")
+	}
 	if len(items) > 0 {
 		return items, upstreamID
 	}
@@ -2029,10 +2134,11 @@ func unwrapUpstreamBody(raw map[string]interface{}) map[string]interface{} {
 
 func extractMediaItems(raw map[string]interface{}) []mediaItem {
 	raw = unwrapUpstreamBody(raw)
-	if it, ok := mediaItemFromMap(raw); ok {
-		return []mediaItem{it}
-	}
-	if data, ok := raw["data"].([]interface{}); ok {
+	for _, listKey := range []string{"data", "images", "videos", "audios", "results", "files"} {
+		data, ok := raw[listKey].([]interface{})
+		if !ok {
+			continue
+		}
 		var out []mediaItem
 		for _, item := range data {
 			m, _ := item.(map[string]interface{})
@@ -2050,6 +2156,9 @@ func extractMediaItems(raw map[string]interface{}) []mediaItem {
 			return out
 		}
 	}
+	if it, ok := mediaItemFromMap(raw); ok {
+		return []mediaItem{it}
+	}
 	if it, ok := mediaItemFromValue(raw["data"], raw); ok {
 		return []mediaItem{it}
 	}
@@ -2064,6 +2173,27 @@ func extractMediaItems(raw map[string]interface{}) []mediaItem {
 	return nil
 }
 
+func nestedScalarString(value interface{}, keys ...string) string {
+	switch current := value.(type) {
+	case map[string]interface{}:
+		if found := scalarString(current, keys...); found != "" {
+			return found
+		}
+		for _, child := range current {
+			if found := nestedScalarString(child, keys...); found != "" {
+				return found
+			}
+		}
+	case []interface{}:
+		for _, child := range current {
+			if found := nestedScalarString(child, keys...); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
 func mediaItemFromMap(m map[string]interface{}) (mediaItem, bool) {
 	if mediaURL := firstMediaURL(m, mediaURLKeys()...); mediaURL != "" {
 		thumb := firstMediaURL(m, "thumbnail", "cover_url", "poster_url", "last_frame_url")
@@ -2072,7 +2202,7 @@ func mediaItemFromMap(m map[string]interface{}) (mediaItem, bool) {
 	if b64 := firstString(m, encodedMediaKeys()...); b64 != "" && looksLikeEncodedMedia(b64) {
 		return mediaItem{B64JSON: b64, MimeType: firstString(m, "mime_type", "mime", "content_type", "format", "audio_format")}, true
 	}
-	for _, key := range []string{"data", "result", "output", "content", "audio_result"} {
+	for _, key := range []string{"data", "result", "output", "content", "audio_result", "images", "videos", "audios", "results", "files"} {
 		if it, ok := mediaItemFromValue(m[key], m); ok {
 			return it, true
 		}
@@ -2103,7 +2233,7 @@ func mediaItemFromValue(v interface{}, parent map[string]interface{}) (mediaItem
 }
 
 func mediaURLKeys() []string {
-	return []string{"url", "video_url", "result_url", "image_url", "audio_url", "audio", "audio_file", "download_url", "file_url", "content_url"}
+	return []string{"url", "uri", "src", "media_url", "output_url", "video_url", "result_url", "image_url", "audio_url", "audio", "audio_file", "download_url", "file_url", "content_url"}
 }
 
 func encodedMediaKeys() []string {
@@ -2849,7 +2979,102 @@ func redactSensitiveLogText(s string) string {
 	return out
 }
 
+// isFinalAsynqAttempt reports whether the current delivery is the last one
+// asynq will make. On the final attempt a transient failure must still settle
+// the task row and release the frozen balance, otherwise the task would be
+// archived silently and the user's funds would stay frozen until an admin ran
+// the 6-hour stale-task reconcile.
+func isFinalAsynqAttempt(ctx context.Context) bool {
+	retried, ok1 := asynq.GetRetryCount(ctx)
+	maxRetry, ok2 := asynq.GetMaxRetry(ctx)
+	if !ok1 || !ok2 {
+		// Not running under an asynq handler (e.g. direct call in tests):
+		// treat as final so we never skip settlement.
+		return true
+	}
+	return retried >= maxRetry
+}
+
+// isTransientError checks if an error is temporary and should be retried
+func isTransientError(code string, statusCode int, errMsg string) bool {
+	// Transient HTTP status codes
+	transientStatuses := map[int]bool{
+		408: true, // Request Timeout
+		429: true, // Too Many Requests
+		500: true, // Internal Server Error
+		502: true, // Bad Gateway
+		503: true, // Service Unavailable
+		504: true, // Gateway Timeout
+		520: true, // Cloudflare Unknown Error
+		521: true, // Web Server Is Down
+		522: true, // Connection Timed Out
+		524: true, // A Timeout Occurred
+	}
+	if transientStatuses[statusCode] {
+		return true
+	}
+
+	// Transient error codes.
+	// NOTE: MODEL_PROVIDER_ERROR is deliberately excluded — it is the worker's
+	// catch-all code and is also used for permanent failures (upstream rejected
+	// the request and cannot fail over, or the call succeeded but returned no
+	// media). Those must not be retried. Transient provider failures are already
+	// identified by their HTTP status code or message pattern below.
+	transientCodes := map[string]bool{
+		"MODEL_TIMEOUT":      true,
+		"MODEL_RATE_LIMITED": true,
+		"UPSTREAM_TIMEOUT":   true,
+		"NETWORK_ERROR":      true,
+		"CONNECTION_ERROR":   true,
+	}
+	if transientCodes[code] {
+		return true
+	}
+
+	// Check error message for timeout/network patterns
+	lowerMsg := strings.ToLower(errMsg)
+	transientPatterns := []string{
+		"timeout", "timed out", "deadline", "connection reset",
+		"connection refused", "rate limit", "too many requests",
+		"service unavailable", "bad gateway", "temporarily unavailable",
+	}
+	for _, pattern := range transientPatterns {
+		if strings.Contains(lowerMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// RetryableError wraps transient errors to signal Asynq to retry
+type RetryableError struct {
+	Code       string
+	Message    string
+	StatusCode int
+}
+
+func (e *RetryableError) Error() string {
+	return e.Message
+}
+
 func failTask(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, code, msg string) error {
+	return failTaskWithStatusCode(ctx, pool, p, code, msg, 0)
+}
+
+func failTaskWithStatusCode(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, code, msg string, statusCode int) error {
+	// Retry transient failures, but only while asynq still has attempts left.
+	// On the last attempt fall through and settle the row + refund below.
+	if isTransientError(code, statusCode, msg) && !isFinalAsynqAttempt(ctx) {
+		log.Printf("Task %s transient error (code=%s status=%d), will retry: %s", p.TaskNo, code, statusCode, msg)
+		return &RetryableError{
+			Code:       code,
+			Message:    msg,
+			StatusCode: statusCode,
+		}
+	}
+
+	// Permanent error - mark task as failed
 	var estimated float64
 	if err := pool.QueryRow(ctx, `SELECT estimated_cost FROM tasks WHERE task_no=$1`, p.TaskNo).Scan(&estimated); err != nil {
 		return err
@@ -2870,7 +3095,7 @@ func failTask(ctx context.Context, pool *pgxpool.Pool, p ImageTaskPayload, code,
 	}
 	insertNotification(ctx, pool, p.UserID, "生成失败",
 		fmt.Sprintf("%s，任务号：%s", msg, p.TaskNo), "task")
-	log.Printf("Task %s failed: %s", p.TaskNo, msg)
+	log.Printf("Task %s failed permanently: %s", p.TaskNo, msg)
 	return nil
 }
 

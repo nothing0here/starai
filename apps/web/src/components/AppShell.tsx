@@ -875,7 +875,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
   const showDesktopHeader = section === "models" && !activeModelCode;
 
   return (
-    <div className="flex h-screen bg-[#EEF1F6] overflow-hidden dark:bg-gray-950">
+    <div className="flex h-[100dvh] bg-[#EEF1F6] overflow-hidden dark:bg-gray-950">
       <aside
         className={clsx(
           "hidden lg:flex bg-white border-r border-gray-100 flex-col shrink-0 transition-all duration-300 shadow-[2px_0_12px_rgba(0,0,0,0.04)] dark:bg-gray-900 dark:border-white/10 dark:shadow-none",

@@ -491,13 +491,14 @@ func (s *ModelService) SyncPrimaryModelRoute(ctx context.Context, modelID int64,
 		protocol = "openai"
 	}
 	provider := strings.TrimSpace(stringValue(connection["provider"]))
+	headers, _ := json.Marshal(mapValue(connection["headers"]))
 	_, err = s.db.Exec(ctx, `UPDATE model_routes SET
 		provider=CASE WHEN $1='' THEN provider ELSE $1 END,protocol=$2,upstream_model=$3,endpoint=$4,
-		base_url=$5,api_key=$6,auth_type=$7,api_key_header=$8,updated_at=now() WHERE id=$9`,
+		base_url=$5,api_key=$6,auth_type=$7,api_key_header=$8,headers=$9,updated_at=now() WHERE id=$10`,
 		provider, protocol, strings.TrimSpace(modelInput.NewAPIModel), normalizeModelEndpoint(modelInput.NewAPIEndpoint),
 		strings.TrimRight(strings.TrimSpace(stringValue(connection["base_url"])), "/"), storedAPIKey,
 		firstNonEmptyService(strings.ToLower(strings.TrimSpace(stringValue(connection["auth_type"]))), "bearer"),
-		firstNonEmptyService(strings.TrimSpace(stringValue(connection["api_key_header"])), "Authorization"), routeID)
+		firstNonEmptyService(strings.TrimSpace(stringValue(connection["api_key_header"])), "Authorization"), headers, routeID)
 	return err
 }
 

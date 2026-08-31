@@ -3,8 +3,6 @@ use_default_settings:
     keep_only:
       - brave
       - brave.news
-      - bing
-      - bing news
       - duckduckgo
 
 general:
@@ -38,10 +36,6 @@ engines:
   - name: brave
     disabled: false
   - name: brave.news
-    disabled: false
-  - name: bing
-    disabled: false
-  - name: bing news
     disabled: false
   - name: duckduckgo
     disabled: false

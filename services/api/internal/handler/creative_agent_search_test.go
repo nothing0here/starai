@@ -49,7 +49,7 @@ func TestCreativeSearchDecisionParsingAndFallback(t *testing.T) {
 		t.Fatalf("hallucinated domain was retained: %#v", decision)
 	}
 	fallback := defaultCreativeSearchDecision("目前 TikTok 最火爆的短视频", clock)
-	if fallback.TimeRange != "month" || !strings.Contains(fallback.Query, "2026-08") {
+	if fallback.TimeRange != "week" || !strings.Contains(fallback.Query, "2026-08-30") {
 		t.Fatalf("unexpected fallback: %#v", fallback)
 	}
 	today := defaultCreativeSearchDecision("今天有什么人工智能新闻", clock)
@@ -63,6 +63,10 @@ func TestCreativeSearchDecisionParsingAndFallback(t *testing.T) {
 	phoenix := defaultCreativeSearchDecision("给我整一份凤凰网上此时的热搜新闻资讯", clock)
 	if len(phoenix.IncludeDomains) != 1 || phoenix.IncludeDomains[0] != "ifeng.com" {
 		t.Fatalf("Phoenix News domain was not recognized: %#v", phoenix)
+	}
+	phoenixTech := defaultCreativeSearchDecision("帮我整理凤凰网科技类最新新闻", clock)
+	if len(phoenixTech.IncludeDomains) != 1 || phoenixTech.IncludeDomains[0] != "tech.ifeng.com" {
+		t.Fatalf("Phoenix technology section was not recognized: %#v", phoenixTech)
 	}
 	mainstreamSites := []struct {
 		query string
@@ -106,6 +110,18 @@ func TestCreativeAgentFastSearchDecision(t *testing.T) {
 	if decided {
 		t.Fatal("context-dependent follow-up should use the router model")
 	}
+	decision, decided = creativeAgentFastSearchDecision([]runtime.ChatMessage{
+		{Role: "user", Content: "整理凤凰网当前热点"},
+		{Role: "assistant", Content: "这里是热点"},
+		{Role: "user", Content: "继续看看最新科技新闻"},
+	}, clock)
+	if !decided || len(decision.IncludeDomains) != 1 || decision.IncludeDomains[0] != "tech.ifeng.com" {
+		t.Fatalf("fast follow-up did not retain the requested site: %#v", decision)
+	}
+	diagnostic := defaultCreativeSearchDecision("帮我验证一下智能搜索是否可用", clock)
+	if diagnostic.Query != "2026-08-31 中国科技新闻" || diagnostic.Topic != "news" || diagnostic.TimeRange != "day" {
+		t.Fatalf("search diagnostic must use a safe deterministic probe: %#v", diagnostic)
+	}
 }
 
 func TestCreativeAgentSearchDomainContext(t *testing.T) {
@@ -115,7 +131,7 @@ func TestCreativeAgentSearchDomainContext(t *testing.T) {
 		{Role: "user", Content: "科技类呢？"},
 	})
 	retained := explicitSearchDomains(domains, context)
-	if len(retained) != 1 || retained[0] != "ifeng.com" {
+	if len(retained) != 1 || retained[0] != "tech.ifeng.com" {
 		t.Fatalf("follow-up did not retain the source site: %#v", retained)
 	}
 }
@@ -162,6 +178,24 @@ func TestCreativeAgentSearchPromptRequiresSynthesis(t *testing.T) {
 	)
 	if !strings.Contains(prompt, "先交叉核验，再归纳、提炼并直接回答") || !strings.Contains(prompt, "必须给出具体条目及其要点") {
 		t.Fatalf("search prompt must require a synthesized answer: %s", prompt)
+	}
+}
+
+func TestCreativeAgentResearchRequestsUseMultipleSources(t *testing.T) {
+	clock := creativeAgentClockAt(nil, time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
+	requests := creativeAgentResearchRequests(
+		creativeSearchDecision{Query: "August 31 2026 latest global technology news headlines", Topic: "news", TimeRange: "day"},
+		clock,
+	)
+	if len(requests) != 3 || !strings.Contains(requests[1].Query, "人工智能") || !strings.Contains(requests[2].Query, "global technology") {
+		t.Fatalf("unexpected technology research plan: %#v", requests)
+	}
+	google := creativeAgentResearchRequests(
+		creativeSearchDecision{Query: "Google News 科技资讯 2026-08-31", Topic: "news", TimeRange: "day", IncludeDomains: []string{"news.google.com"}},
+		clock,
+	)
+	if len(google) != 3 || len(google[0].IncludeDomains) != 1 || len(google[1].IncludeDomains) != 0 || len(google[2].IncludeDomains) != 0 {
+		t.Fatalf("Google News must be discovered first and verified with publishers: %#v", google)
 	}
 }
 

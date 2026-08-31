@@ -149,6 +149,66 @@ func TestParseUpstreamMediaReadsNestedAudioResult(t *testing.T) {
 	}
 }
 
+func TestParseUpstreamMediaReadsPluralMediaLists(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"images", `{"data":{"images":[{"url":"https://example.com/1.png"},{"image_url":"https://example.com/2.png"}]}}`, []string{"https://example.com/1.png", "https://example.com/2.png"}},
+		{"videos", `{"result":{"videos":[{"video_url":"https://example.com/1.mp4"}]}}`, []string{"https://example.com/1.mp4"}},
+		{"audios", `{"output":{"audios":[{"audio_url":"https://example.com/1.mp3"}]}}`, []string{"https://example.com/1.mp3"}},
+		{"results", `{"results":[{"url":"https://example.com/1.webp"}]}`, []string{"https://example.com/1.webp"}},
+		{"nested plural list", `{"data":[{"files":[{"uri":"https://example.com/1.wav"}]}]}`, []string{"https://example.com/1.wav"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			items, _ := parseUpstreamMedia([]byte(tt.body))
+			if len(items) != len(tt.want) {
+				t.Fatalf("items = %#v", items)
+			}
+			for i, want := range tt.want {
+				if items[i].URL != want {
+					t.Fatalf("items[%d].URL = %q, want %q", i, items[i].URL, want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseUpstreamMediaReadsTaskIDInsideArray(t *testing.T) {
+	items, upstreamID := parseUpstreamMedia([]byte(`{"data":[{"task_id":"task-array-1","status":"queued"}]}`))
+	if len(items) != 0 || upstreamID != "task-array-1" {
+		t.Fatalf("items=%#v upstreamID=%q", items, upstreamID)
+	}
+}
+
+func TestApplyRequestTransformUsesEffectiveConnection(t *testing.T) {
+	payload := map[string]interface{}{"n": 1, "size": "1024x1024"}
+	applyRequestTransform(payload, map[string]interface{}{
+		"connection": map[string]interface{}{
+			"request_transform": map[string]interface{}{"n": nil, "size": nil, "num_images": float64(2)},
+		},
+	})
+	if _, ok := payload["n"]; ok {
+		t.Fatalf("n was not removed: %#v", payload)
+	}
+	if _, ok := payload["size"]; ok {
+		t.Fatalf("size was not removed: %#v", payload)
+	}
+	if payload["num_images"] != float64(2) {
+		t.Fatalf("num_images was not applied: %#v", payload)
+	}
+}
+
+func TestNormalizeWorkerMediaRequestMode(t *testing.T) {
+	for category, want := range map[string]string{"image": "images", "video": "video", "audio": "audio", "text": "custom"} {
+		if got := normalizeWorkerMediaRequestMode("custom", category); got != want {
+			t.Fatalf("category %s: got %q, want %q", category, got, want)
+		}
+	}
+}
+
 func TestParseUpstreamMediaReadsRawMP3Audio(t *testing.T) {
 	body := append([]byte("ID3\x04\x00\x00\x00\x00\x00\x21TXXX=AIGC"), []byte("audio-audio-audio-audio-audio")...)
 

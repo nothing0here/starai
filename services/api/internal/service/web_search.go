@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ type WebSearchConfig struct {
 	TimeoutSec  int
 	DailyLimit  int
 	CacheTTLSec int
+	UnitPrice   float64
 }
 
 type WebSearchResult struct {
@@ -41,6 +44,8 @@ type WebSearchRequest struct {
 	IncludeDomains []string
 }
 
+var tavilySearchURL = "https://api.tavily.com/search"
+
 func ParseWebSearchConfig(values map[string]interface{}) WebSearchConfig {
 	cfg := WebSearchConfig{
 		Enabled:     boolConfigValue(values["web_search_enabled"]),
@@ -52,6 +57,7 @@ func ParseWebSearchConfig(values map[string]interface{}) WebSearchConfig {
 		TimeoutSec:  intConfigValue(values["web_search_timeout_sec"], 12),
 		DailyLimit:  intConfigValue(values["web_search_daily_limit"], 100),
 		CacheTTLSec: intConfigValue(values["web_search_cache_ttl_sec"], 600),
+		UnitPrice:   floatConfigValue(values["web_search_unit_price"]),
 	}
 	if cfg.Provider == "" {
 		cfg.Provider = "tavily"
@@ -81,10 +87,22 @@ func ParseWebSearchConfig(values map[string]interface{}) WebSearchConfig {
 }
 
 func ValidateWebSearchConfig(cfg WebSearchConfig) error {
+	if cfg.UnitPrice < 0 || math.IsNaN(cfg.UnitPrice) || math.IsInf(cfg.UnitPrice, 0) {
+		return errors.New("智能搜索单次费用必须是大于或等于 0 的有效数字")
+	}
 	switch cfg.Provider {
 	case "tavily", "brave":
 		if cfg.Enabled && cfg.APIKey == "" {
 			return errors.New("启用联网搜索前请填写搜索服务 API Key")
+		}
+	case "hybrid":
+		if cfg.Enabled && (cfg.APIKey == "" || cfg.BaseURL == "") {
+			return errors.New("启用混合搜索前请同时填写 Tavily API Key 和 SearXNG 服务地址")
+		}
+		if cfg.BaseURL != "" {
+			if _, err := searchEndpoint(cfg.BaseURL, "/search"); err != nil {
+				return errors.New("SearXNG 服务地址必须是有效的 HTTP/HTTPS 地址")
+			}
 		}
 	case "searxng":
 		if cfg.Enabled && cfg.BaseURL == "" {
@@ -126,11 +144,24 @@ func SearchWebWithOptions(ctx context.Context, cfg WebSearchConfig, input WebSea
 		results, err = searchBrave(ctx, client, cfg, input)
 	case "searxng":
 		results, err = searchSearXNG(ctx, client, cfg, input)
+	case "hybrid":
+		// Self-hosted search is the free first choice, but it must never hold the
+		// whole Agent request hostage when public engines are slow or blocked.
+		searxCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		searxClient := &http.Client{Timeout: 3 * time.Second}
+		results, err = searchSearXNG(searxCtx, searxClient, cfg, input)
+		cancel()
+		if err == nil {
+			results = cleanWebSearchResults(results, cfg.MaxResults, input)
+		}
+		if err != nil || len(results) == 0 {
+			results, err = searchTavily(ctx, client, cfg, input)
+		}
 	}
 	if err != nil {
 		return nil, err
 	}
-	results = cleanWebSearchResults(results, cfg.MaxResults, input.IncludeDomains)
+	results = cleanWebSearchResults(results, cfg.MaxResults, input)
 	if len(results) == 0 {
 		return nil, errors.New("搜索服务未返回有效结果")
 	}
@@ -149,7 +180,7 @@ func searchTavily(ctx context.Context, client *http.Client, cfg WebSearchConfig,
 		payloadBody["include_domains"] = input.IncludeDomains
 	}
 	body, _ := json.Marshal(payloadBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.tavily.com/search", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tavilySearchURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -230,9 +261,10 @@ func searchSearXNG(ctx context.Context, client *http.Client, cfg WebSearchConfig
 	search := func(category, timeRange string) (searXNGPayload, error) {
 		requestURL := *endpoint
 		params := requestURL.Query()
-		params.Set("q", searchQueryWithDomains(input))
+		params.Set("q", searXNGSearchQuery(input))
 		params.Set("format", "json")
-		params.Set("language", "auto")
+		params.Set("language", searchLanguage(input.Query))
+		params.Set("safesearch", "1")
 		if category != "" {
 			params.Set("categories", category)
 		}
@@ -314,7 +346,7 @@ func doSearchRequest(client *http.Client, req *http.Request, target interface{})
 	return nil
 }
 
-func cleanWebSearchResults(items []WebSearchResult, limit int, domains []string) []WebSearchResult {
+func cleanWebSearchResults(items []WebSearchResult, limit int, input WebSearchRequest) []WebSearchResult {
 	out := make([]WebSearchResult, 0, limit)
 	seen := make(map[string]bool)
 	hostCounts := make(map[string]int)
@@ -328,7 +360,9 @@ func cleanWebSearchResults(items []WebSearchResult, limit int, domains []string)
 			continue
 		}
 		host := strings.ToLower(parsed.Hostname())
-		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= 2 || !searchResultMatchesDomains(item.URL, domains) {
+		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= 2 ||
+			!searchResultMatchesDomains(item.URL, input.IncludeDomains) || unsafeWebSearchResult(host, item.Title, item.Snippet) ||
+			!relevantWebSearchResult(input, item) {
 			continue
 		}
 		seen[item.URL] = true
@@ -396,10 +430,136 @@ func normalizeWebSearchRequest(input WebSearchRequest) WebSearchRequest {
 
 func searchQueryWithDomains(input WebSearchRequest) string {
 	query := input.Query
-	for _, domain := range input.IncludeDomains {
-		query += " site:" + domain
+	if len(input.IncludeDomains) == 1 {
+		return query + " site:" + input.IncludeDomains[0]
+	}
+	if len(input.IncludeDomains) > 1 {
+		parts := make([]string, 0, len(input.IncludeDomains))
+		for _, domain := range input.IncludeDomains {
+			parts = append(parts, "site:"+domain)
+		}
+		return query + " (" + strings.Join(parts, " OR ") + ")"
 	}
 	return query
+}
+
+func searXNGSearchQuery(input WebSearchRequest) string {
+	// SearXNG aggregates engines with inconsistent support for site: filters.
+	// Domain filtering is applied to the returned URLs below.
+	query := regexp.MustCompile(`(?i)麻烦(?:你)?|请(?:你)?|能否|可以|帮我|给我|替我|为我|整理一下|整理一份|整一份|搜索一下|搜一下|查一下|查找一下|看一下|看看|告诉我|列出|列一下|汇总一下`).ReplaceAllString(input.Query, " ")
+	query = regexp.MustCompile(`(?:的)?前\s*\d+\s*(?:条|个|篇|则)?`).ReplaceAllString(query, " ")
+	if input.TimeRange != "" {
+		query = regexp.MustCompile(`今天|今日|当前|现在|此时此刻|此时|此刻`).ReplaceAllString(query, " ")
+	}
+	for _, keyword := range []string{"热搜", "热点", "新闻", "资讯", "科技", "财经", "天气", "气温", "预报", "价格", "股价", "汇率", "比分", "赛程"} {
+		query = strings.ReplaceAll(query, keyword, " "+keyword+" ")
+	}
+	query = strings.Join(strings.Fields(query), " ")
+	if query == "" {
+		return input.Query
+	}
+	return query
+}
+
+func searchLanguage(query string) string {
+	if regexp.MustCompile(`[\p{Han}]`).MatchString(query) {
+		return "zh-CN"
+	}
+	return "en"
+}
+
+func unsafeWebSearchResult(host, title, snippet string) bool {
+	value := strings.ToLower(host + " " + title + " " + snippet)
+	// Some upstream SearXNG/Bing builds can return their engine self-test query
+	// instead of the user's query. Treat those healthy-looking HTTP responses as
+	// unusable so hybrid search can fall back to the configured managed provider.
+	if strings.Contains(value, "test query for encyclopedia backstage") {
+		return true
+	}
+	blockedHosts := []string{"f95zone.", "nhentai.", "pornhub.", "xvideos.", "xnxx.", "redgifs.", "rule34."}
+	for _, blocked := range blockedHosts {
+		if strings.Contains(value, blocked) {
+			return true
+		}
+	}
+	return regexp.MustCompile(`(?i)\b(?:nsfw|hentai|porn|xxx|sex game|adult game)\b|成人视频|色情|成人游戏`).MatchString(value)
+}
+
+func relevantWebSearchResult(input WebSearchRequest, item WebSearchResult) bool {
+	if len(input.IncludeDomains) > 0 {
+		return true
+	}
+	signals := searchRelevanceSignals(input.Query)
+	if len(signals) == 0 {
+		return input.Topic != "news" || trustedNewsResult(item)
+	}
+	value := strings.ToLower(item.Title + " " + item.Snippet)
+	for _, signal := range signals {
+		if strings.Contains(value, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedNewsResult(item WebSearchResult) bool {
+	parsed, err := url.Parse(item.URL)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimPrefix(strings.ToLower(parsed.Hostname()), "www.")
+	trusted := []string{
+		"reuters.com", "apnews.com", "bbc.com", "cnn.com", "theguardian.com", "aljazeera.com", "cnbc.com",
+		"bloomberg.com", "ft.com", "nytimes.com", "washingtonpost.com", "wsj.com", "dw.com", "yahoo.com",
+		"msn.com", "thehindu.com", "indianexpress.com", "news.cn", "xinhuanet.com", "people.com.cn", "cctv.com",
+		"chinanews.com.cn", "thepaper.cn", "ifeng.com", "sina.com.cn", "sina.cn", "qq.com", "163.com", "sohu.com",
+		"stcn.com", "yicai.com", "caixin.com", "36kr.com", "ithome.com",
+	}
+	for _, domain := range trusted {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return strings.Contains(host, "news")
+}
+
+func searchRelevanceSignals(query string) []string {
+	value := strings.ToLower(query)
+	value = regexp.MustCompile(`\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?|\d+`).ReplaceAllString(value, " ")
+	noise := []string{
+		"帮我", "请问", "整理", "整一份", "列出", "列一下", "看看", "搜索", "查找", "一下",
+		"今天", "今日", "当前", "目前", "现在", "此时", "此刻", "最新", "近期", "最近", "热门", "热搜",
+		"新闻", "资讯", "热点", "焦点", "头条", "全球", "世界", "国际", "top", "latest", "current",
+		"today", "recent", "trending", "breaking", "news", "headline", "global", "world", "august",
+		"凤凰网", "凤凰新闻", "新华网", "央视新闻", "人民网", "新浪新闻", "腾讯新闻", "网易新闻",
+	}
+	for _, word := range noise {
+		value = strings.ReplaceAll(value, word, " ")
+	}
+	value = regexp.MustCompile(`[^\p{Han}a-z0-9]+`).ReplaceAllString(value, " ")
+	signals := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, token := range strings.Fields(value) {
+		if regexp.MustCompile(`^[a-z][a-z0-9.+-]*$`).MatchString(token) {
+			if len(token) >= 2 && !seen[token] {
+				seen[token] = true
+				signals = append(signals, token)
+			}
+			continue
+		}
+		runes := []rune(token)
+		if len(runes) == 1 {
+			continue
+		}
+		for index := 0; index < len(runes)-1; index++ {
+			signal := string(runes[index : index+2])
+			if !seen[signal] {
+				seen[signal] = true
+				signals = append(signals, signal)
+			}
+		}
+	}
+	return signals
 }
 
 func boolConfigValue(value interface{}) bool {
@@ -433,4 +593,22 @@ func intConfigValue(value interface{}, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func floatConfigValue(value interface{}) float64 {
+	switch item := value.(type) {
+	case float64:
+		return item
+	case float32:
+		return float64(item)
+	case int:
+		return float64(item)
+	case int64:
+		return float64(item)
+	case string:
+		parsed, _ := strconv.ParseFloat(strings.TrimSpace(item), 64)
+		return parsed
+	default:
+		return 0
+	}
 }

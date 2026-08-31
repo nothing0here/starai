@@ -30,12 +30,63 @@ func TestValidateCustomerServiceConfig(t *testing.T) {
 }
 
 func TestParseCreativeAgentPlan(t *testing.T) {
-	plan := parseCreativeAgentPlan("```json\n{\"intent\":\"image\",\"prompt\":\"一只猫\"}\n```")
-	if plan == nil || plan["intent"] != "image" || plan["prompt"] != "一只猫" {
-		t.Fatalf("unexpected plan: %#v", plan)
+	tests := []struct {
+		name    string
+		content string
+		intent  string
+		reply   string
+	}{
+		{
+			name:    "fenced json",
+			content: "```json\n{\"intent\":\"image\",\"prompt\":\"一只猫\"}\n```",
+			intent:  "image",
+		},
+		{
+			name:    "preamble and fenced json",
+			content: "下面是执行计划：\n```JSON\n{\"intent\":\"chat\",\"reply\":\"## 科技资讯\\n- 结论 [1]\"}\n```\n",
+			intent:  "chat",
+			reply:   "## 科技资讯\n- 结论 [1]",
+		},
+		{
+			name:    "quoted json",
+			content: `"{\"intent\":\"chat\",\"reply\":\"含有 {花括号} 的回答\"}"`,
+			intent:  "chat",
+			reply:   "含有 {花括号} 的回答",
+		},
+		{
+			name:    "json followed by explanation",
+			content: "{\"intent\":\"chat\",\"reply\":\"已整理\"}\n以上为搜索结果。",
+			intent:  "chat",
+			reply:   "已整理",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := parseCreativeAgentPlan(tt.content)
+			if plan == nil || plan["intent"] != tt.intent {
+				t.Fatalf("unexpected plan: %#v", plan)
+			}
+			if tt.reply != "" && plan["reply"] != tt.reply {
+				t.Fatalf("reply = %#v, want %#v", plan["reply"], tt.reply)
+			}
+		})
 	}
 	if parseCreativeAgentPlan("not json") != nil {
 		t.Fatal("expected invalid planner output to return nil")
+	}
+	if parseCreativeAgentPlan("{\"sources\":[1,2]}") != nil {
+		t.Fatal("expected unrelated JSON object to return nil")
+	}
+}
+
+func TestCreativeAgentPlanFromStream(t *testing.T) {
+	chat := creativeAgentPlanFromStream("CHAT\n## 今日资讯\n- 第一条 [1]")
+	if chat["intent"] != "chat" || chat["reply"] != "## 今日资讯\n- 第一条 [1]" {
+		t.Fatalf("unexpected streamed chat plan: %#v", chat)
+	}
+	image := creativeAgentPlanFromStream("PLAN\n{\"intent\":\"image\",\"reply\":\"正在生成\",\"prompt\":\"一只猫\",\"params\":{}}")
+	if image["intent"] != "image" || image["prompt"] != "一只猫" {
+		t.Fatalf("unexpected streamed generation plan: %#v", image)
 	}
 }
 

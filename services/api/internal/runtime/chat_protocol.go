@@ -678,3 +678,140 @@ func mergeChatUsage(target *ChatUsage, source *ChatUsage) {
 		target.TotalTokens = target.PromptTokens + target.CompletionTokens
 	}
 }
+
+// Media protocol adapters for images, video, and audio
+
+func mediaProtocol(extra map[string]interface{}) string {
+	conn, _ := extra["connection"].(map[string]interface{})
+	protocol, _ := conn["protocol"].(string)
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	// Most image/video/audio APIs follow OpenAI format, but allow override
+	switch protocol {
+	case "openai", "":
+		return "openai"
+	default:
+		return protocol
+	}
+}
+
+// applyMediaProtocolHeaders adds protocol-specific headers for media calls.
+//
+// Media endpoints are reached over plain HTTP with the channel's configured
+// headers (see applyAuthHeaders + connection.headers), so there is currently no
+// protocol that requires an extra header the way Claude requires
+// anthropic-version. Custom headers belong in connection.headers; this hook
+// exists so a future protocol can be added in one place.
+func applyMediaProtocolHeaders(req *http.Request, protocol string, extra map[string]interface{}) {
+	if protocol == chatProtocolClaude {
+		req.Header.Set("anthropic-version", connectionValue(extra, "anthropic_version", "2023-06-01"))
+	}
+}
+
+func prepareImageRequest(req ImageRequest, protocol string, extra map[string]interface{}) ([]byte, error) {
+	base := map[string]interface{}{
+		"model":  req.Model,
+		"prompt": req.Prompt,
+		"n":      req.N,
+		"size":   req.Size,
+	}
+	switch protocol {
+	case "openai":
+		return json.Marshal(base)
+	default:
+		// For custom protocols, merge with extra params
+		if conn, ok := extra["connection"].(map[string]interface{}); ok {
+			if customFields, ok := conn["request_transform"].(map[string]interface{}); ok {
+				for k, v := range customFields {
+					base[k] = v
+				}
+			}
+		}
+		return json.Marshal(base)
+	}
+}
+
+// decodeImageResponse parses an image response.
+//
+// All known providers return either OpenAI's {"data":[...]} envelope or a shape
+// that unmarshals compatibly, so there is one implementation rather than a
+// per-protocol switch. The protocol argument is kept for symmetry with the
+// prepare* functions and for future divergence.
+func decodeImageResponse(protocol string, raw []byte) (*ImageResponse, error) {
+	var result ImageResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func prepareVideoRequest(req VideoRequest, protocol string, extra map[string]interface{}) ([]byte, error) {
+	base := map[string]interface{}{
+		"model":  req.Model,
+		"prompt": req.Prompt,
+	}
+	for k, v := range req.Extra {
+		if k != "" && v != nil {
+			base[k] = v
+		}
+	}
+	switch protocol {
+	case "openai":
+		return json.Marshal(base)
+	default:
+		if conn, ok := extra["connection"].(map[string]interface{}); ok {
+			if customFields, ok := conn["request_transform"].(map[string]interface{}); ok {
+				for k, v := range customFields {
+					base[k] = v
+				}
+			}
+		}
+		return json.Marshal(base)
+	}
+}
+
+func decodeVideoResponse(protocol string, raw []byte) (*VideoResponse, error) {
+	var result VideoResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func prepareAudioRequest(req AudioRequest, protocol string, extra map[string]interface{}) ([]byte, error) {
+	base := map[string]interface{}{
+		"model": req.Model,
+		"input": req.Input,
+	}
+	if req.Voice != "" {
+		base["voice"] = req.Voice
+	}
+	if req.Format != "" {
+		base["response_format"] = req.Format
+	}
+	for k, v := range req.Extra {
+		if k != "" && v != nil {
+			base[k] = v
+		}
+	}
+	switch protocol {
+	case "openai":
+		return json.Marshal(base)
+	default:
+		if conn, ok := extra["connection"].(map[string]interface{}); ok {
+			if customFields, ok := conn["request_transform"].(map[string]interface{}); ok {
+				for k, v := range customFields {
+					base[k] = v
+				}
+			}
+		}
+		return json.Marshal(base)
+	}
+}
+
+func decodeAudioResponse(protocol string, raw []byte) (*AudioResponse, error) {
+	var result AudioResponse
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}

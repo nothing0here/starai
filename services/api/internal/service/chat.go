@@ -623,6 +623,9 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 		return "", fmt.Errorf("对话结算失败: %w", err)
 	}
 	s.logCallWithRoute(ctx, requestID, userID, model.ID, routeID(selectedRoute), nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, actualCost, providerCost, "success", nil, 0)
+	if input.Ephemeral {
+		return input.ConversationID, nil
+	}
 
 	convID := input.ConversationID
 	if convID == "" && len(input.Messages) > 0 {

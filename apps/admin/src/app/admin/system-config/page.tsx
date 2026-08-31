@@ -44,6 +44,8 @@ interface ConfigItem {
   label: string;
   type: "text" | "number" | "checkbox" | "password" | "textarea" | "select";
   hint?: string;
+  min?: number;
+  step?: number;
   options?: { value: string; label: string }[];
 }
 
@@ -318,6 +320,7 @@ export default function SystemConfigPage() {
         web_search_timeout_sec: 12,
         web_search_daily_limit: 100,
         web_search_cache_ttl_sec: 600,
+        web_search_unit_price: 0,
         web_search_router_model_code: "",
         agent_default_timezone: "Asia/Shanghai",
         customer_service_custom_script: "",
@@ -709,6 +712,8 @@ export default function SystemConfigPage() {
       ) : (
         <input
           type={item.type}
+          min={item.min}
+          step={item.step}
           value={String(configs[item.key] ?? "")}
           onChange={(e) => setField(item.key, item.type === "number" ? Number(e.target.value) || 0 : e.target.value)}
           className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:border-primary focus:outline-none"
@@ -1368,24 +1373,27 @@ export default function SystemConfigPage() {
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
           <div className="mb-1 text-sm font-semibold text-gray-900">Agent 联网搜索</div>
-          <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。Tavily 与 Brave 使用托管 API；SearXNG 使用你自行部署的 HTTP Search API。</p>
+          <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。生产环境推荐混合模式：优先使用自建 SearXNG，结果为空或异常时再由 Tavily 兜底。</p>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {renderItem({ key: "web_search_enabled", label: "启用智能搜索", type: "checkbox", hint: "关闭后用户端不显示智能搜索按钮。" })}
             {renderItem({ key: "web_search_provider", label: "搜索服务商", type: "select", options: [
               { value: "tavily", label: "Tavily（推荐）" },
+              { value: "hybrid", label: "混合模式（SearXNG 优先，Tavily 兜底）" },
               { value: "brave", label: "Brave Search API" },
               { value: "searxng", label: "SearXNG（自建）" },
             ] })}
-            {String(configs.web_search_provider || "tavily") !== "searxng" ? renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "保存后只显示脱敏值，不会下发到用户端。" }) : renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发填写 http://127.0.0.1:8888。" })}
+            {String(configs.web_search_provider || "tavily") !== "searxng" && renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "Tavily / Brave 使用；保存后只显示脱敏值，不会下发到用户端。" })}
+            {["searxng", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发填写 http://127.0.0.1:8888。" })}
             {renderItem({ key: "agent_default_timezone", label: "Agent 默认时区", type: "text", hint: "IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/New_York。用于可信系统时间工具。" })}
             {renderItem({ key: "web_search_router_model_code", label: "模糊问题路由模型", type: "select", options: [
               { value: "", label: "跟随 Agent 主模型" },
               ...searchRouterModels,
             ], hint: "仅模糊、依赖上下文的联网问题会调用。建议选择速度快、价格低的对话模型。" })}
-            {String(configs.web_search_provider || "tavily") === "tavily" && renderItem({ key: "web_search_depth", label: "Tavily 搜索深度", type: "select", options: [
+            {["tavily", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_depth", label: "Tavily 搜索深度", type: "select", options: [
               { value: "basic", label: "Basic（1 Credit）" },
               { value: "advanced", label: "Advanced（2 Credits，更高相关性）" },
             ], hint: "时效范围和新闻主题由 Agent 自动判断；Advanced 会消耗更多 Tavily Credits。" })}
+            {renderItem({ key: "web_search_unit_price", label: "单次真实搜索售价（算力）", type: "number", min: 0, step: 0.001, hint: "支持 0.001、0.01、0.1 等价格。真实搜索成功后扣费；命中缓存或搜索失败不收费。0 表示免费。" })}
             {renderItem({ key: "web_search_max_results", label: "每次最大结果数", type: "number", hint: "允许 1–10 条，建议 5 条。" })}
             {renderItem({ key: "web_search_timeout_sec", label: "搜索超时（秒）", type: "number", hint: "允许 3–30 秒。超时会自动降级为普通 Agent 对话。" })}
             {renderItem({ key: "web_search_daily_limit", label: "每用户每日搜索上限", type: "number", hint: "0 表示不限；需要 Redis 才能严格执行。" })}

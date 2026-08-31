@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -26,6 +27,13 @@ func TestSettlementNeverCreditsNegativeActualCost(t *testing.T) {
 	balance, frozen := settlementWalletValues(100, 10, 10, -5)
 	if balance != 100 || frozen != 0 {
 		t.Fatalf("balance/frozen = %v/%v, want 100/0", balance, frozen)
+	}
+}
+
+func TestSettlementPreservesThousandthPrecision(t *testing.T) {
+	balance, frozen := settlementWalletValues(10, 0.001, 0.001, 0.001)
+	if math.Abs(balance-9.999) > 0.0000001 || math.Abs(frozen) > 0.0000001 {
+		t.Fatalf("balance/frozen = %.6f/%.6f, want 9.999000/0", balance, frozen)
 	}
 }
 

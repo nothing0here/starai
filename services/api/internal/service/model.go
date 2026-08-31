@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/starai/api/internal/util"
 )
 
 type ModelService struct {
@@ -139,6 +141,8 @@ func (s *ModelService) GetFullByCode(ctx context.Context, code string) (*ModelFu
 	json.Unmarshal(schema, &m.InputSchema)
 	json.Unmarshal(defaults, &m.DefaultParams)
 	json.Unmarshal(extra, &m.NewAPIExtraParams)
+	m.NewAPIExtraParams = decryptModelConnectionSecret(m.NewAPIExtraParams, s.routeCipherKey)
+	m.RequestMode = normalizeCustomMediaRequestMode(m.RequestMode, m.Category)
 	json.Unmarshal(price, &m.PriceRule)
 	json.Unmarshal(runtime, &m.RuntimeRule)
 	return &m, nil
@@ -169,6 +173,8 @@ func (s *ModelService) GetFullByIDForAdmin(ctx context.Context, id int64) (*Mode
 	json.Unmarshal(schema, &m.InputSchema)
 	json.Unmarshal(defaults, &m.DefaultParams)
 	json.Unmarshal(extra, &m.NewAPIExtraParams)
+	m.NewAPIExtraParams = decryptModelConnectionSecret(m.NewAPIExtraParams, s.routeCipherKey)
+	m.RequestMode = normalizeCustomMediaRequestMode(m.RequestMode, m.Category)
 	json.Unmarshal(price, &m.PriceRule)
 	json.Unmarshal(runtimeRule, &m.RuntimeRule)
 	return &m, nil
@@ -210,6 +216,8 @@ func (s *ModelService) ResolveChatModel(ctx context.Context, identifier string) 
 	json.Unmarshal(schema, &m.InputSchema)
 	json.Unmarshal(defaults, &m.DefaultParams)
 	json.Unmarshal(extra, &m.NewAPIExtraParams)
+	m.NewAPIExtraParams = decryptModelConnectionSecret(m.NewAPIExtraParams, s.routeCipherKey)
+	m.RequestMode = normalizeCustomMediaRequestMode(m.RequestMode, m.Category)
 	json.Unmarshal(price, &m.PriceRule)
 	json.Unmarshal(runtime, &m.RuntimeRule)
 	if m.RetentionDays <= 0 {
@@ -283,6 +291,8 @@ func (s *ModelService) ResolveTaskModel(ctx context.Context, identifier string, 
 	json.Unmarshal(schema, &m.InputSchema)
 	json.Unmarshal(defaults, &m.DefaultParams)
 	json.Unmarshal(extra, &m.NewAPIExtraParams)
+	m.NewAPIExtraParams = decryptModelConnectionSecret(m.NewAPIExtraParams, s.routeCipherKey)
+	m.RequestMode = normalizeCustomMediaRequestMode(m.RequestMode, m.Category)
 	json.Unmarshal(price, &m.PriceRule)
 	json.Unmarshal(runtime, &m.RuntimeRule)
 	if m.RetentionDays <= 0 {
@@ -1301,6 +1311,7 @@ type CreateModelInput struct {
 }
 
 func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*ModelDTO, error) {
+	input.RequestMode = normalizeCustomMediaRequestMode(input.RequestMode, input.Category)
 	if err := validateModelConnection(input); err != nil {
 		return nil, err
 	}
@@ -1308,17 +1319,21 @@ func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*Mod
 		return nil, err
 	}
 	input.NewAPIEndpoint = normalizeModelEndpoint(input.NewAPIEndpoint)
+	sealedExtra, err := encryptModelConnectionSecret(input.NewAPIExtraParams, s.routeCipherKey)
+	if err != nil {
+		return nil, err
+	}
 	tags, _ := json.Marshal(input.Tags)
 	runtime, _ := json.Marshal(input.RuntimeRule)
 	schema, _ := json.Marshal(input.InputSchema)
 	defaults, _ := json.Marshal(input.DefaultParams)
-	extra, _ := json.Marshal(input.NewAPIExtraParams)
+	extra, _ := json.Marshal(sealedExtra)
 	price, _ := json.Marshal(input.PriceRule)
 	if input.NewAPIEndpoint == "" {
 		input.NewAPIEndpoint = "/v1/chat/completions"
 	}
 	var id int64
-	err := s.db.QueryRow(ctx, `
+	err = s.db.QueryRow(ctx, `
 		INSERT INTO models (code, display_name, new_api_model, new_api_endpoint, request_mode, category, icon_url, description, tags, runtime_rule, input_schema, default_params, new_api_extra_params, price_rule, is_enabled, sort_order)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
 		input.Code, input.DisplayName, input.NewAPIModel, input.NewAPIEndpoint, input.RequestMode, input.Category,
@@ -1350,6 +1365,7 @@ func modelCreateError(code string, err error) error {
 }
 
 func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelInput) (*ModelDTO, error) {
+	input.RequestMode = normalizeCustomMediaRequestMode(input.RequestMode, input.Category)
 	if err := s.preserveExistingModelSecrets(ctx, id, &input); err != nil {
 		return nil, err
 	}
@@ -1360,13 +1376,17 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 		return nil, err
 	}
 	input.NewAPIEndpoint = normalizeModelEndpoint(input.NewAPIEndpoint)
+	sealedExtra, err := encryptModelConnectionSecret(input.NewAPIExtraParams, s.routeCipherKey)
+	if err != nil {
+		return nil, err
+	}
 	tags, _ := json.Marshal(input.Tags)
 	runtime, _ := json.Marshal(input.RuntimeRule)
 	schema, _ := json.Marshal(input.InputSchema)
 	defaults, _ := json.Marshal(input.DefaultParams)
-	extra, _ := json.Marshal(input.NewAPIExtraParams)
+	extra, _ := json.Marshal(sealedExtra)
 	price, _ := json.Marshal(input.PriceRule)
-	_, err := s.db.Exec(ctx, `
+	_, err = s.db.Exec(ctx, `
 		UPDATE models SET display_name=$1, new_api_model=$2, new_api_endpoint=$3, request_mode=$4, category=$5,
 			icon_url=$6, description=$7, tags=$8, runtime_rule=$9, input_schema=$10, default_params=$11, new_api_extra_params=$12, price_rule=$13, is_enabled=$14, sort_order=$15, updated_at=now()
 		WHERE id=$16`,
@@ -1448,6 +1468,70 @@ func (s *ModelService) preserveExistingModelSecrets(ctx context.Context, id int6
 	return nil
 }
 
+// encryptModelConnectionSecret encrypts connection.api_key before persisting.
+//
+// util.EncryptSecret is idempotent and version-prefixed ("enc:v1:"), so calling
+// it on an already-encrypted value is a no-op. Environment-variable references
+// ("${VAR}") are left as-is: they contain no secret and must stay readable so
+// resolveConfig can expand them.
+func encryptModelConnectionSecret(extra map[string]interface{}, cipherKey string) (map[string]interface{}, error) {
+	if extra == nil || cipherKey == "" {
+		return extra, nil
+	}
+	conn, ok := extra["connection"].(map[string]interface{})
+	if !ok {
+		return extra, nil
+	}
+	raw, _ := conn["api_key"].(string)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || isEnvSecretRef(trimmed) {
+		return extra, nil
+	}
+	sealed, err := util.EncryptSecret(trimmed, cipherKey)
+	if err != nil {
+		return nil, fmt.Errorf("模型密钥加密失败: %w", err)
+	}
+	out := copyMap(extra)
+	nextConn := copyMap(conn)
+	nextConn["api_key"] = sealed
+	out["connection"] = nextConn
+	return out, nil
+}
+
+// decryptModelConnectionSecret is the read-side counterpart. Plaintext values
+// (rows written before encryption was introduced) pass through unchanged, so no
+// data migration is required — they are sealed on the next save.
+func decryptModelConnectionSecret(extra map[string]interface{}, cipherKey string) map[string]interface{} {
+	if extra == nil || cipherKey == "" {
+		return extra
+	}
+	conn, ok := extra["connection"].(map[string]interface{})
+	if !ok {
+		return extra
+	}
+	raw, _ := conn["api_key"].(string)
+	if strings.TrimSpace(raw) == "" {
+		return extra
+	}
+	opened, err := util.DecryptSecret(raw, cipherKey)
+	if err != nil {
+		// Do not fail the read: surfacing the model without a usable key gives a
+		// clear upstream auth error rather than making the whole page 500.
+		log.Printf("model connection api_key decrypt failed; check MODEL_ROUTE_CIPHER_KEY: %v", err)
+		return extra
+	}
+	if opened == raw {
+		return extra
+	}
+	conn["api_key"] = opened
+	extra["connection"] = conn
+	return extra
+}
+
+func isEnvSecretRef(v string) bool {
+	return strings.HasPrefix(v, "${") && strings.HasSuffix(v, "}")
+}
+
 func maskModelSecrets(extra map[string]interface{}) map[string]interface{} {
 	if extra == nil {
 		return nil
@@ -1455,7 +1539,17 @@ func maskModelSecrets(extra map[string]interface{}) map[string]interface{} {
 	out := copyMap(extra)
 	if conn, ok := out["connection"].(map[string]interface{}); ok {
 		if key, ok := conn["api_key"].(string); ok && strings.TrimSpace(key) != "" {
-			conn["api_key"] = maskSecret(key)
+			// Env references are not secrets — show them so the operator can see
+			// which variable is wired up. Encrypted blobs must not be masked
+			// character-wise (that would leak ciphertext and read as garbage).
+			switch {
+			case isEnvSecretRef(strings.TrimSpace(key)):
+				conn["api_key"] = strings.TrimSpace(key)
+			case strings.HasPrefix(key, "enc:v1:"):
+				conn["api_key"] = "********"
+			default:
+				conn["api_key"] = maskSecret(key)
+			}
 		}
 		out["connection"] = conn
 	}
@@ -1491,28 +1585,92 @@ func maskSecret(v string) string {
 }
 
 func validateModelConnection(input CreateModelInput) error {
+	// Validate request_mode. Keep this in sync with REQUEST_MODES in
+	// apps/admin/src/app/admin/models/page.tsx, which offers "custom" too.
+	allowedModes := map[string]bool{
+		"chat_completions": true,
+		"responses":        true,
+		"images":           true,
+		"video":            true,
+		"audio":            true,
+		"custom":           true,
+	}
+	if !allowedModes[input.RequestMode] {
+		return fmt.Errorf("不支持的 request_mode: %s，允许的值：chat_completions, responses, images, video, audio, custom", input.RequestMode)
+	}
+
 	if input.Category == "multi_collab" {
 		return nil
 	}
+
+	// Validate connection config
 	conn, _ := input.NewAPIExtraParams["connection"].(map[string]interface{})
 	if conn == nil {
 		return errors.New("模型接入配置缺少 connection")
 	}
+
 	baseURL, _ := conn["base_url"].(string)
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		return errors.New("模型接入配置的 Base URL 为必填")
 	}
+
+	// Validate Base URL format
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		return errors.New("Base URL 必须以 http:// 或 https:// 开头")
+	}
+
 	authType, _ := conn["auth_type"].(string)
 	if authType == "" {
 		authType = "bearer"
 	}
+
+	// Validate auth_type
+	allowedAuthTypes := map[string]bool{
+		"bearer":         true,
+		"api_key_header": true,
+		"none":           true,
+		"env":            true,
+	}
+	if !allowedAuthTypes[authType] {
+		return fmt.Errorf("不支持的 auth_type: %s，允许的值：bearer, api_key_header, none, env", authType)
+	}
+
 	if authType != "none" {
 		apiKey, _ := conn["api_key"].(string)
+		apiKey = strings.TrimSpace(apiKey)
 		if apiKey == "" {
-			return errors.New("模型接入配置的 API Key 为必填")
+			return errors.New("模型接入配置的 API Key 为必填（auth_type 为 none 时可省略）")
+		}
+		// Validate env reference format
+		if authType == "env" {
+			if !strings.HasPrefix(apiKey, "${") || !strings.HasSuffix(apiKey, "}") {
+				return errors.New("auth_type 为 env 时，api_key 必须是环境变量引用格式：${VAR_NAME}")
+			}
 		}
 	}
+
+	// NOTE: connection.protocol is deliberately NOT allowlisted here. The admin UI
+	// stores values like openai_compatible / custom_http / new_api (legacy), while
+	// runtime.chatProtocol() accepts a different set of aliases and already falls
+	// back to the OpenAI protocol for anything unrecognized. An allowlist here
+	// would reject valid, already-saved configurations.
+
 	return nil
+}
+
+func normalizeCustomMediaRequestMode(requestMode, category string) string {
+	if strings.ToLower(strings.TrimSpace(requestMode)) != "custom" {
+		return requestMode
+	}
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "image":
+		return "images"
+	case "video", "audio":
+		return strings.ToLower(strings.TrimSpace(category))
+	default:
+		return requestMode
+	}
 }
 
 func normalizeModelEndpoint(endpoint string) string {

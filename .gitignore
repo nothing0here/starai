@@ -73,3 +73,14 @@ Thumbs.db
 .vscode/
 .tmp-i18n-hardcoded.txt
 .tmp-i18n-hardcoded.txt
+
+# Generated analysis and fix reports (do not commit)
+StarAI-系统缺陷分析报告.md
+修复完成报告.md
+修复说明-简化版.md
+修复总结.md
+缺陷*.md
+修复*.md
+*-分析报告.md
+*-缺陷分析报告.md
+*.superseded

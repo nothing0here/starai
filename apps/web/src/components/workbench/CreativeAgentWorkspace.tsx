@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowUp, AudioLines, ChevronDown, ChevronLeft, ChevronRight, Download, Globe, HelpCircle, History, ImageIcon, Loader2, Maximize2, Menu, Plus, SlidersHorizontal, Sparkles, Upload, UserRound, Video, X } from "lucide-react";
+import { ArrowUp, AudioLines, BrainCircuit, ChevronDown, ChevronRight, Download, Globe, HelpCircle, History, ImageIcon, Loader2, Maximize2, Menu, Music2, Plus, SlidersHorizontal, Sparkles, Upload, UserRound, Video, X } from "lucide-react";
 import type { Model, User } from "@starai/shared-types";
-import { api, uploadAsset } from "@/lib/api";
+import { API_URL, api, legacyAuthHeaders, uploadAsset } from "@/lib/api";
 import { useSiteBranding } from "@/components/SiteBrand";
 import { WorkbenchTopActions } from "@/components/WorkbenchTopActions";
 import { AgentLanding } from "./AgentLanding";
@@ -13,16 +13,18 @@ import { AGENT_THEMES } from "./categoryMeta";
 
 type Attachment = { public_id: string; name: string; url: string; kind?: string };
 type SearchResult = { title: string; url: string; snippet?: string; published_date?: string };
-type Message = { role: "user" | "assistant"; content: string; images?: string[]; videos?: string[]; audios?: string[]; attachments?: Attachment[]; sources?: SearchResult[]; searchWarning?: string; searchRequired?: boolean; retryText?: string };
+type SearchTrace = { queries?: string[]; searched_count?: number; browsed_count?: number; duration_ms?: number };
+type Message = { role: "user" | "assistant"; content: string; images?: string[]; videos?: string[]; audios?: string[]; attachments?: Attachment[]; sources?: SearchResult[]; searchTrace?: SearchTrace; searchWarning?: string; searchRequired?: boolean; retryText?: string };
 type Plan = { intent?: string; reply?: string; prompt?: string; params?: Record<string, unknown>; needs_confirm?: boolean };
 type TaskState = { task_no: string; type?: string; status: string; progress?: number; input?: Record<string, unknown>; output?: Record<string, unknown>; error_message?: string };
 type HistoryItem = { public_id: string; title?: string | null; updated_at: string };
 type AgentConfig = { runtime_config?: { analysis_model_code?: string; image_model_code?: string; video_model_code?: string; speech_model_code?: string; music_model_code?: string } };
-type AgentEvent = { type?: string; asset_ids?: string[]; task_no?: string; media_type?: string; prompt?: string; search_results?: SearchResult[]; search_warning?: string };
+type AgentEvent = { type?: string; asset_ids?: string[]; task_no?: string; media_type?: string; prompt?: string; search_results?: SearchResult[]; search_trace?: SearchTrace; search_warning?: string };
 type AssetRecord = { public_id: string; name?: string; url: string; kind?: string; mime_type?: string };
 type MediaSet = { images: string[]; videos: string[]; audios: string[] };
 type MediaPreview = { url: string; type: "image" | "video" };
 type GenerationType = "image" | "video" | "speech" | "music";
+type AgentPlanResponse = { conversation_id?: string; plan?: Plan; search_required?: boolean; search_hint?: string; search_results?: SearchResult[]; search_trace?: SearchTrace; search_warning?: string };
 
 const HOT_PROMPTS = ["生成一张产品主图", "做一个 10 秒产品展示视频", "把这段文字合成自然旁白", "为品牌写一首宣传歌曲"];
 const CREATIVE_FEATURES = [
@@ -32,6 +34,56 @@ const CREATIVE_FEATURES = [
   { icon: "🎵", title: "语音与音乐", subtitle: "分别调用文本转语音或歌曲音乐模型完成创作" },
 ];
 const MOBILE_FEATURE_ICONS = [Sparkles, ImageIcon, Video, AudioLines];
+
+async function streamAgentPlan(payload: Record<string, unknown>, onEvent: (event: string, data: AgentPlanResponse & { content?: string; message?: string }) => void) {
+  const locale = typeof window === "undefined" ? "zh-CN" : localStorage.getItem("site_locale") || "zh-CN";
+  const response = await fetch(`${API_URL}/api/creative-agent/plan`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept-Language": locale,
+      "X-Locale": locale,
+      ...legacyAuthHeaders(),
+    },
+    body: JSON.stringify({ ...payload, stream: true }),
+  });
+  const contentType = response.headers.get("content-type") || "";
+  if (!response.ok || !contentType.includes("text/event-stream")) {
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.message || "智能体分析失败");
+    return body.data as AgentPlanResponse;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("当前浏览器不支持流式输出");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let meta: AgentPlanResponse = {};
+  let result: AgentPlanResponse = {};
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() || "";
+    for (const block of blocks) {
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) continue;
+      const data = JSON.parse(dataLines.join("\n")) as AgentPlanResponse & { content?: string; message?: string };
+      if (event === "meta") meta = { ...meta, ...data };
+      if (event === "done") result = { ...meta, ...data };
+      if (event === "error") throw new Error(data.message || "智能体生成失败");
+      onEvent(event, data);
+    }
+    if (done) break;
+  }
+  return result;
+}
 
 function urls(value: unknown): string[] {
   if (typeof value === "string") return value.trim() ? [value.trim()] : [];
@@ -73,6 +125,10 @@ function generationLabel(type: string) {
   return type === "video" ? "视频" : type === "speech" ? "语音" : type === "music" ? "歌曲音乐" : "图片";
 }
 
+function generationTypeIcon(type: GenerationType) {
+  return type === "image" ? <ImageIcon size={15} /> : type === "video" ? <Video size={15} /> : type === "music" ? <Music2 size={15} /> : <AudioLines size={15} />;
+}
+
 function storedPlan(content: string): Plan | null {
   try {
     const value = JSON.parse(content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")) as Plan;
@@ -89,6 +145,71 @@ function storedEvent(content: string): AgentEvent | null {
   } catch {
     return null;
   }
+}
+
+function renderAgentInline(text: string, sources: SearchResult[] = []): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|\[\d{1,3}\])/g).filter(Boolean).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index} className="font-semibold text-gray-950 dark:text-white">{part.slice(2, -2)}</strong>;
+    }
+    const citation = part.match(/^\[(\d{1,3})\]$/);
+    if (citation) {
+      const source = sources[Number(citation[1]) - 1];
+      return source ? (
+        <a key={index} href={source.url} target="_blank" rel="noreferrer" title={source.title} className="mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary/10 px-1 text-[10px] font-semibold leading-none text-primary hover:bg-primary/20">
+          {citation[1]}
+        </a>
+      ) : <span key={index}>{part}</span>;
+    }
+    return <span key={index}>{part}</span>;
+  });
+}
+
+function AgentRichText({ content, sources = [] }: { content: string; sources?: SearchResult[] }) {
+  return (
+    <div className="space-y-2.5 text-[14px] leading-7">
+      {content.split(/\r?\n/).map((raw, index) => {
+        const line = raw.trim();
+        if (!line) return <div key={index} className="h-1" />;
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          const size = heading[1].length === 1 ? "text-xl" : heading[1].length === 2 ? "text-lg" : "text-base";
+          return <div key={index} className={`${size} pt-1 font-bold tracking-tight text-gray-950 dark:text-white`}>{renderAgentInline(heading[2], sources)}</div>;
+        }
+        const bullet = line.match(/^[-*•]\s+(.+)$/);
+        if (bullet) return <div key={index} className="flex gap-2 pl-1"><span className="mt-[9px] h-1.5 w-1.5 shrink-0 rounded-full bg-primary" /><div>{renderAgentInline(bullet[1], sources)}</div></div>;
+        const numbered = line.match(/^(\d+)[.)、]\s*(.+)$/);
+        if (numbered) return <div key={index} className="flex gap-2"><span className="mt-0.5 flex h-6 min-w-6 items-center justify-center rounded-full bg-primary/10 px-1 text-xs font-semibold text-primary">{numbered[1]}</span><div>{renderAgentInline(numbered[2], sources)}</div></div>;
+        return <p key={index}>{renderAgentInline(line.replace(/^>\s*/, ""), sources)}</p>;
+      })}
+    </div>
+  );
+}
+
+function SearchResearchTrace({ trace, sources = [] }: { trace: SearchTrace; sources?: SearchResult[] }) {
+  const seconds = Math.max(1, Math.round((trace.duration_ms || 0) / 1000));
+  return (
+    <details open className="group mb-3 rounded-2xl border border-primary/15 bg-primary/[0.035] px-3 py-2.5 text-xs text-gray-500 dark:border-primary/20 dark:bg-primary/[0.06] dark:text-gray-300">
+      <summary className="flex cursor-pointer list-none items-center gap-2 font-medium text-gray-700 dark:text-gray-100">
+        <Sparkles size={14} className="text-primary" />
+        已完成深度搜索（用时 {seconds} 秒）
+        <ChevronDown size={13} className="ml-auto transition group-open:rotate-180" />
+      </summary>
+      <div className="mt-2.5 space-y-2 border-l border-primary/20 pl-3 leading-5">
+        <p>已理解问题，并行执行 {trace.queries?.length || 1} 组中英文检索。</p>
+        <p><Globe size={13} className="mr-1 inline" />搜索到 {trace.searched_count || sources.length} 个网页，读取并整理 {trace.browsed_count || 0} 条有效资料。</p>
+        {sources.length > 0 && (
+          <div className="space-y-1">
+            {sources.slice(0, 6).map((source, index) => (
+              <a key={`${source.url}-${index}`} href={source.url} target="_blank" rel="noreferrer" className="block truncate underline-offset-2 hover:text-primary hover:underline">
+                [{index + 1}] {source.title || source.url}
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
+  );
 }
 
 export function CreativeAgentWorkspace({
@@ -139,6 +260,7 @@ export function CreativeAgentWorkspace({
   const [activeFeature, setActiveFeature] = useState(0);
   const [deepThink, setDeepThink] = useState(false);
   const [searchAvailable, setSearchAvailable] = useState(false);
+  const [searchUnitPrice, setSearchUnitPrice] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [latestGeneratedMedia, setLatestGeneratedMedia] = useState<MediaSet>({ images: [], videos: [], audios: [] });
@@ -147,7 +269,7 @@ export function CreativeAgentWorkspace({
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    Promise.all([api<Model[]>("/api/models?category=chat"), api<Model[]>("/api/models?category=image"), api<Model[]>("/api/models?category=video"), api<Model[]>("/api/models?category=audio"), api<AgentConfig>("/api/agents/general_creative_agent"), api<User>("/api/me").catch(() => null), api<{ web_search_enabled?: boolean }>("/api/system-configs/public").catch((): { web_search_enabled?: boolean } => ({}))])
+    Promise.all([api<Model[]>("/api/models?category=chat"), api<Model[]>("/api/models?category=image"), api<Model[]>("/api/models?category=video"), api<Model[]>("/api/models?category=audio"), api<AgentConfig>("/api/agents/general_creative_agent"), api<User>("/api/me").catch(() => null), api<{ web_search_enabled?: boolean; web_search_unit_price?: number }>("/api/system-configs/public").catch((): { web_search_enabled?: boolean; web_search_unit_price?: number } => ({}))])
       .then(([chats, images, videos, audios, agent, currentUser, publicConfig]) => {
         const enabled = (items: Model[]) => (items || []).filter((item) => item.is_enabled !== false);
         const nextChats = enabled(chats).filter((item) => item.category === "chat" && item.code !== "multi_collab_chat" && !/多模型协作|multi.?collab/i.test(`${item.code} ${item.display_name || ""}`));
@@ -176,6 +298,7 @@ export function CreativeAgentWorkspace({
         setDefaultMusicModelCode(defaultMusic);
         setUser(currentUser);
         setSearchAvailable(publicConfig.web_search_enabled === true);
+        setSearchUnitPrice(Math.max(0, Number(publicConfig.web_search_unit_price) || 0));
       })
       .catch(() => setError("模型列表加载失败，请稍后重试"));
   }, []);
@@ -293,41 +416,61 @@ export function CreativeAgentWorkspace({
     if (!retryText) setPrompt("");
     setError("");
     setBusy(true);
+    setMessages([...nextMessages, { role: "assistant", content: "" }]);
     try {
-      const result = await api<{ conversation_id?: string; plan?: Plan; search_required?: boolean; search_hint?: string; search_results?: SearchResult[]; search_warning?: string }>("/api/creative-agent/plan", {
-        method: "POST",
-        body: JSON.stringify({
-          model_code: chatModelCode,
-          conversation_id: conversationId,
-          messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
-          asset_ids: assetIDs,
-          deep_think: deepThink,
-          web_search: searchAvailable && (forceWebSearch || bottom.web_search),
-          preferred_media_type: customEnabled ? customMediaType : "",
-        }),
+      const updateAssistant = (update: Partial<Message> | ((message: Message) => Message)) => setMessages((current) => {
+        const next = [...current];
+        const index = next.length - 1;
+        if (index < 0 || next[index].role !== "assistant") return current;
+        next[index] = typeof update === "function" ? update(next[index]) : { ...next[index], ...update };
+        return next;
+      });
+      const result = await streamAgentPlan({
+        model_code: chatModelCode,
+        conversation_id: conversationId,
+        messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
+        asset_ids: assetIDs,
+        deep_think: deepThink,
+        web_search: searchAvailable && (forceWebSearch || bottom.web_search),
+        preferred_media_type: customEnabled ? customMediaType : "",
+      }, (event, data) => {
+        if (event === "meta") {
+          if (data.conversation_id) setConversationId(data.conversation_id);
+          updateAssistant({
+            sources: data.search_results || [],
+            searchTrace: data.search_trace?.queries?.length ? data.search_trace : undefined,
+            searchWarning: data.search_warning || "",
+          });
+        } else if (event === "delta" && data.content) {
+          updateAssistant((message) => ({ ...message, content: message.content + data.content }));
+        }
       });
       if (result.search_required) {
-        setMessages([...nextMessages, {
-          role: "assistant",
+        updateAssistant({
           content: result.search_hint || "这个问题需要查询实时信息，请先启用智能搜索。",
           searchRequired: true,
           retryText: text,
-        }]);
+        });
         return;
       }
       const activeConversationId = result.conversation_id || conversationId;
       if (activeConversationId) setConversationId(activeConversationId);
-      const sourceMeta = { sources: result.search_results || [], searchWarning: result.search_warning || "" };
+      const sourceMeta = {
+        sources: result.search_results || [],
+        searchTrace: result.search_trace?.queries?.length ? result.search_trace : undefined,
+        searchWarning: result.search_warning || "",
+      };
       const nextPlan = { ...(result.plan || { intent: "chat", reply: "暂时无法理解这次需求，请换一种说法。" }) };
       if (customEnabled) nextPlan.intent = customMediaType;
       const nextIntent = nextPlan.intent;
       if (nextIntent === "image" || nextIntent === "video" || nextIntent === "speech" || nextIntent === "music") {
-        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || `已理解需求，正在创建${generationLabel(nextIntent)}任务。`, ...sourceMeta }]);
+        updateAssistant({ content: nextPlan.reply || `已理解需求，正在创建${generationLabel(nextIntent)}任务。`, ...sourceMeta });
         await createGeneration(nextPlan, activeConversationId);
       } else {
-        setMessages((current) => [...current, { role: "assistant", content: nextPlan.reply || "请继续描述你的需求。", ...sourceMeta }]);
+        updateAssistant({ content: nextPlan.reply || "请继续描述你的需求。", ...sourceMeta });
       }
     } catch (err) {
+      setMessages((current) => current[current.length - 1]?.role === "assistant" && !current[current.length - 1].content ? current.slice(0, -1) : current);
       setError(err instanceof Error ? err.message : "智能体分析失败");
     } finally {
       setBusy(false);
@@ -383,6 +526,7 @@ export function CreativeAgentWorkspace({
           for (let index = restored.length - 1; index >= 0; index -= 1) {
             if (restored[index].role === "assistant") {
               restored[index].sources = event.search_results || [];
+              restored[index].searchTrace = event.search_trace;
               restored[index].searchWarning = event.search_warning || "";
               break;
             }
@@ -503,39 +647,21 @@ export function CreativeAgentWorkspace({
       <div className={messages.length === 0 ? "relative z-10 flex min-h-0 flex-1 flex-col overflow-hidden px-2 py-1 sm:px-5 sm:py-3 lg:px-8 lg:py-4" : "relative z-10 min-h-0 flex-1 overflow-y-auto px-3 py-3 sm:px-6 sm:py-4"}>
         {messages.length === 0 ? (
           <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
-            <div className="flex flex-col items-center px-3 pt-5 text-center md:hidden">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/15 text-primary"><Sparkles size={22} /></div>
-              <h1 className="mt-3 text-xl font-bold tracking-tight text-gray-950 dark:text-gray-50">Agent 通用智能体</h1>
-              <p className="mt-2 max-w-sm text-xs leading-5 text-gray-600 dark:text-gray-300">说出目标，Agent 会连续完成图片、视频、语音或音乐创作。</p>
-              <div className="mt-4 grid w-full max-w-sm grid-cols-2 gap-2">
-                {HOT_PROMPTS.map((item) => <button key={item} type="button" onClick={() => setPrompt(item)} className="min-h-10 rounded-xl border border-gray-200 bg-white/70 px-2 py-2 text-xs leading-4 text-gray-600 transition active:scale-[.98] dark:border-white/10 dark:bg-white/5 dark:text-gray-300">{item}</button>)}
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 py-2 text-center md:hidden">
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/15 text-primary"><Sparkles size={19} /></div>
+              <h1 className="mt-2 text-lg font-bold text-gray-950 dark:text-gray-50">Agent 通用智能体</h1>
+              <p className="mt-1 max-w-sm text-xs leading-5 text-gray-600 dark:text-gray-300">说出目标，连续完成图片、视频、语音或音乐创作。</p>
+              <div className="mt-3 grid w-full max-w-sm grid-cols-2 gap-1.5">
+                {HOT_PROMPTS.map((item) => <button key={item} type="button" onClick={() => setPrompt(item)} className="min-h-9 rounded-xl border border-gray-200 bg-white/70 px-2 py-1.5 text-xs leading-4 text-gray-600 transition active:scale-[.98] dark:border-white/10 dark:bg-white/5 dark:text-gray-300">{item}</button>)}
               </div>
-              <section className="mt-4 flex min-h-[220px] w-full max-w-sm flex-col rounded-2xl border border-cyan-200/70 bg-white/75 p-4 text-left shadow-sm backdrop-blur dark:border-cyan-400/20 dark:bg-white/[0.05]" aria-label="创作能力轮播">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold text-cyan-700 dark:text-cyan-200">智能理解与生成</span>
-                  <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-medium text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200">支持图片、视频与音频</span>
-                </div>
-                <div className="mt-4 flex items-start gap-3">
-                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary"><ActiveMobileFeatureIcon size={23} /></div>
+              <button type="button" onClick={() => setPrompt(HOT_PROMPTS[activeFeature] || HOT_PROMPTS[0])} className="mt-3 flex w-full max-w-sm items-center gap-3 rounded-xl border border-cyan-200/70 bg-white/75 p-3 text-left shadow-sm backdrop-blur transition active:scale-[.98] dark:border-cyan-400/20 dark:bg-white/[0.05]" aria-label={`快捷创作：${activeMobileFeature.title}`}>
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary"><ActiveMobileFeatureIcon size={20} /></div>
                   <div className="min-w-0 flex-1">
-                    <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">{activeMobileFeature.title}</h2>
-                    <p className="mt-1 text-xs leading-5 text-gray-500 dark:text-gray-400">{activeMobileFeature.subtitle}</p>
+                    <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">{activeMobileFeature.title}</h2>
+                    <p className="mt-0.5 line-clamp-1 text-xs text-gray-500 dark:text-gray-400">{activeMobileFeature.subtitle}</p>
                   </div>
-                </div>
-                <button type="button" onClick={() => setPrompt(HOT_PROMPTS[activeFeature] || HOT_PROMPTS[0])} className="mt-4 flex min-h-10 items-center justify-between gap-3 rounded-xl bg-cyan-500/10 px-3 py-2 text-left text-xs font-medium text-cyan-800 transition active:scale-[.98] dark:text-cyan-100">
-                  <span className="shrink-0 text-[10px] text-cyan-600 dark:text-cyan-300">快捷创作</span>
-                  <span className="truncate">{HOT_PROMPTS[activeFeature] || HOT_PROMPTS[0]}</span>
-                </button>
-                <div className="mt-auto flex items-center justify-between pt-4">
-                  <div className="flex items-center gap-1.5">
-                    {CREATIVE_FEATURES.map((item, index) => <button key={item.title} type="button" onClick={() => setActiveFeature(index)} className={`h-1.5 rounded-full transition-all ${index === activeFeature ? "w-5 bg-primary" : "w-1.5 bg-gray-300 dark:bg-white/20"}`} aria-label={`查看${item.title}`} aria-current={index === activeFeature ? "true" : undefined} />)}
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button type="button" onClick={() => setActiveFeature((activeFeature + CREATIVE_FEATURES.length - 1) % CREATIVE_FEATURES.length)} className="flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 text-gray-500 transition active:scale-[.96] dark:border-white/10 dark:text-gray-300" aria-label="上一项"><ChevronLeft size={16} /></button>
-                    <button type="button" onClick={() => setActiveFeature((activeFeature + 1) % CREATIVE_FEATURES.length)} className="flex h-8 w-8 items-center justify-center rounded-lg border border-gray-200 text-gray-500 transition active:scale-[.96] dark:border-white/10 dark:text-gray-300" aria-label="下一项"><ChevronRight size={16} /></button>
-                  </div>
-                </div>
-              </section>
+                  <ChevronRight size={16} className="shrink-0 text-cyan-600 dark:text-cyan-300" />
+              </button>
             </div>
             <div className="hidden min-h-0 flex-1 md:flex">
               <AgentLanding
@@ -567,8 +693,15 @@ export function CreativeAgentWorkspace({
                     )}
                   </div>
                   <div className="min-w-0 max-w-[calc(100%_-_46px)] text-sm leading-6">
+                    {message.searchTrace ? <SearchResearchTrace trace={message.searchTrace} sources={message.sources} /> : null}
                     {message.content && !(message.content === "生成完成" && (message.images?.length || message.videos?.length || message.audios?.length)) ? (
-                      <div className={`w-fit max-w-full whitespace-pre-wrap rounded-2xl px-4 py-3 shadow-sm ${message.role === "user" ? "ml-auto bg-primary text-dark" : "border border-white/80 bg-white text-gray-700 dark:border-white/10 dark:bg-gray-900 dark:text-gray-200"}`}>{message.content}</div>
+                      message.role === "user" ? (
+                        <div className="ml-auto w-fit max-w-full whitespace-pre-wrap rounded-2xl bg-primary px-4 py-3 text-dark shadow-sm">{message.content}</div>
+                      ) : (
+                        <div className="w-full max-w-full rounded-2xl border border-white/80 bg-white px-4 py-3 text-gray-700 shadow-sm dark:border-white/10 dark:bg-gray-900 dark:text-gray-200">
+                          <AgentRichText content={message.content} sources={message.sources} />
+                        </div>
+                      )
                     ) : null}
                     {message.searchRequired && message.retryText ? (
                       <button type="button" disabled={busy} onClick={() => { setBottom((value) => ({ ...value, web_search: true })); void sendMessage(message.retryText, true); }} className="mt-2 inline-flex h-9 items-center gap-1.5 rounded-xl border border-primary/30 bg-primary/10 px-3 text-sm text-primary transition hover:bg-primary/15 disabled:opacity-50">
@@ -611,7 +744,7 @@ export function CreativeAgentWorkspace({
                       </div>
                     ) : null}
                     {message.searchWarning ? <div className="mt-2 rounded-xl border border-amber-200/70 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/10 dark:text-amber-200">{message.searchWarning}</div> : null}
-                    {message.sources?.length ? (
+                    {message.sources?.length && !message.searchTrace ? (
                       <details className="group mt-2 text-xs text-gray-400">
                         <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-lg px-2 py-1 transition hover:bg-black/5 hover:text-gray-600 dark:hover:bg-white/5 dark:hover:text-gray-200">
                           <Globe size={13} />参考来源 · {message.sources.length}
@@ -680,22 +813,30 @@ export function CreativeAgentWorkspace({
               </div>
             )}
             <div className="flex items-center gap-2 border-t border-gray-50 px-2 py-2 dark:border-white/10 sm:px-4 sm:py-3">
-              <div className="scroll-x-only flex min-w-0 flex-1 flex-nowrap items-center gap-2 overflow-x-auto pb-1">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 pb-1">
                 <button type="button" onClick={() => setCustomEnabled(false)} aria-pressed={!customEnabled} className={`h-8 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${!customEnabled ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}>Agent 模式</button>
-                <button type="button" onClick={() => setDeepThink((value) => !value)} aria-pressed={deepThink} className={`h-8 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${deepThink ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}>深度思考</button>
-                {searchAvailable && <button type="button" onClick={() => setBottom((value) => ({ ...value, web_search: !value.web_search }))} aria-pressed={bottom.web_search} className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${bottom.web_search ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><Globe size={14} />智能搜索</button>}
-                <button type="button" onClick={() => setCustomEnabled((value) => !value)} aria-pressed={customEnabled} className={`inline-flex h-8 items-center gap-1.5 whitespace-nowrap rounded-xl border px-2.5 text-xs transition sm:h-9 sm:px-3 sm:text-sm ${customEnabled ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><SlidersHorizontal size={14} />自定义</button>
+                <button type="button" onClick={() => setDeepThink((value) => !value)} aria-label="深度思考" title="深度思考" aria-pressed={deepThink} className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border transition sm:h-9 sm:w-auto sm:gap-1.5 sm:px-3 sm:text-sm ${deepThink ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><BrainCircuit size={15} /><span className="hidden sm:inline">深度思考</span></button>
+                {searchAvailable && <button type="button" onClick={() => setBottom((value) => ({ ...value, web_search: !value.web_search }))} aria-label="智能搜索" title="智能搜索" aria-pressed={bottom.web_search} className={`inline-flex h-8 w-8 shrink-0 items-center justify-center whitespace-nowrap rounded-xl border text-xs transition sm:h-9 sm:w-auto sm:gap-1.5 sm:px-3 sm:text-sm ${bottom.web_search ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><Globe size={14} /><span className="hidden sm:inline">智能搜索</span></button>}
+                <button type="button" onClick={() => setCustomEnabled((value) => !value)} aria-label="自定义" title="自定义" aria-pressed={customEnabled} className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border transition sm:h-9 sm:w-auto sm:gap-1.5 sm:px-3 sm:text-sm ${customEnabled ? "border-primary/30 bg-primary/10 text-primary" : "border-gray-200 bg-gray-50 text-gray-600 dark:border-white/10 dark:bg-white/5 dark:text-gray-300"}`}><SlidersHorizontal size={14} /><span className="hidden sm:inline">自定义</span></button>
                 {customEnabled && (
                   <>
-                    <select value={customMediaType} onChange={(event) => setCustomMediaType(event.target.value as GenerationType)} aria-label="生成类型" className="h-9 rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm text-gray-600 outline-none focus:border-primary [color-scheme:light] dark:border-white/15 dark:bg-gray-900 dark:text-gray-100 dark:[color-scheme:dark]">
-                      <option value="image">生成图片</option>
-                      <option value="video">生成视频</option>
-                      <option value="speech">语音合成</option>
-                      <option value="music">歌曲音乐</option>
-                    </select>
-                    <select value={customModelCode} onChange={(event) => customMediaType === "video" ? setVideoModelCode(event.target.value) : customMediaType === "speech" ? setSpeechModelCode(event.target.value) : customMediaType === "music" ? setMusicModelCode(event.target.value) : setImageModelCode(event.target.value)} aria-label={`${generationLabel(customMediaType)}模型`} className="h-9 max-w-[240px] rounded-xl border border-gray-200 bg-gray-50 px-3 text-sm text-gray-600 outline-none focus:border-primary [color-scheme:light] dark:border-white/15 dark:bg-gray-900 dark:text-gray-100 dark:[color-scheme:dark]">
-                      {customModels.map((model) => <option key={model.code} value={model.code}>{model.display_name}</option>)}
-                    </select>
+                    <div className="relative h-8 w-9 shrink-0 sm:h-9 sm:w-auto">
+                      <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center text-gray-600 dark:text-gray-200 sm:hidden">{generationTypeIcon(customMediaType)}</span>
+                      <select value={customMediaType} onChange={(event) => setCustomMediaType(event.target.value as GenerationType)} aria-label="生成类型" title={`生成类型：${generationLabel(customMediaType)}`} className="h-full w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-1 text-transparent outline-none focus:border-primary [color-scheme:light] sm:px-3 sm:text-sm sm:text-gray-600 dark:border-white/15 dark:bg-gray-900 dark:text-transparent dark:[color-scheme:dark] dark:sm:text-gray-100">
+                        <option className="bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-100" value="image">生成图片</option>
+                        <option className="bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-100" value="video">生成视频</option>
+                        <option className="bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-100" value="speech">语音合成</option>
+                        <option className="bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-100" value="music">歌曲音乐</option>
+                      </select>
+                      <ChevronDown size={12} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-gray-500 sm:hidden" />
+                    </div>
+                    <div className="relative h-8 w-9 shrink-0 sm:h-9 sm:w-auto sm:max-w-[240px]">
+                      <Sparkles className="pointer-events-none absolute left-2 top-1/2 z-10 -translate-y-1/2 text-gray-500 sm:hidden" size={14} />
+                      <select value={customModelCode} onChange={(event) => customMediaType === "video" ? setVideoModelCode(event.target.value) : customMediaType === "speech" ? setSpeechModelCode(event.target.value) : customMediaType === "music" ? setMusicModelCode(event.target.value) : setImageModelCode(event.target.value)} aria-label={`${generationLabel(customMediaType)}模型`} title={`模型：${customModels.find((model) => model.code === customModelCode)?.display_name || "未选择"}`} className="h-full w-full appearance-none rounded-xl border border-gray-200 bg-gray-50 px-1 text-transparent outline-none focus:border-primary [color-scheme:light] sm:px-3 sm:text-sm sm:text-gray-600 dark:border-white/15 dark:bg-gray-900 dark:text-transparent dark:[color-scheme:dark] dark:sm:text-gray-100">
+                        {customModels.map((model) => <option className="bg-white text-gray-700 dark:bg-gray-900 dark:text-gray-100" key={model.code} value={model.code}>{model.display_name}</option>)}
+                      </select>
+                      <ChevronDown size={12} className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-gray-500 sm:hidden" />
+                    </div>
                   </>
                 )}
                 {assetIDs.length > 0 && <span className="whitespace-nowrap text-xs text-gray-400">已选素材 {assetIDs.length}</span>}
@@ -717,8 +858,8 @@ export function CreativeAgentWorkspace({
               <p>连续创作时，上一轮成功生成的媒体会优先作为下一轮参考；重新上传或改选资产后则以新素材为准。</p>
               <p>需要指定模型时开启“自定义”，选择一种生成类型后只会显示该类型的模型。</p>
               <p>开启深度思考后，Agent 会更仔细检查目标、素材和参数，响应时间及模型费用可能增加。</p>
-              {searchAvailable && <p>开启智能搜索后，Agent 会先检索并交叉核验网页资料，再归纳提炼为直接回答；参考来源默认收起，可按需展开核验。联网问题会增加一次检索决策模型用量，并消耗搜索服务额度。</p>}
-              <p>计费由两部分组成：主聊天模型按实际对话用量计费，生成任务按所选图片、视频或音频模型计费；不额外收取智能体工作流费。</p>
+              {searchAvailable && <p>开启智能搜索后，Agent 会先检索并交叉核验网页资料，再归纳提炼为直接回答。成功完成一次真实联网检索{searchUnitPrice > 0 ? `扣除 ${searchUnitPrice} 算力` : "当前免费"}；命中缓存或搜索失败不收费，检索决策模型用量另行计算。</p>}
+              <p>主聊天模型按实际对话用量计费，生成任务按所选图片、视频或音频模型计费；不额外收取智能体工作流费。</p>
             </div>
           </div>
         </div>

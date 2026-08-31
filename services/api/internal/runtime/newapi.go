@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -213,13 +214,26 @@ type ImageResponse struct {
 }
 
 func (c *Client) ImageGeneration(ctx context.Context, endpoint string, req ImageRequest) (*ImageResponse, error) {
+	return c.ImageGenerationWithConfig(ctx, endpoint, req, nil)
+}
+
+func (c *Client) ImageGenerationWithConfig(ctx context.Context, endpoint string, req ImageRequest, cfg map[string]interface{}) (*ImageResponse, error) {
+	requestCfg := c.resolveConfig(cfg)
 	endpoint = defaultEndpoint(endpoint, "/v1/images/generations")
-	body, _ := json.Marshal(req)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(c.baseURL, endpoint), bytes.NewReader(body))
+
+	// Support protocol adaptation for images
+	protocol := mediaProtocol(cfg)
+	body, err := prepareImageRequest(req, protocol, cfg)
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(requestCfg.BaseURL, endpoint), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyAuthHeaders(httpReq, requestCfg)
+	applyMediaProtocolHeaders(httpReq, protocol, cfg)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -230,11 +244,11 @@ func (c *Client) ImageGeneration(ctx context.Context, endpoint string, req Image
 	if resp.StatusCode >= 400 {
 		return nil, normalizeHTTPError(resp)
 	}
-	var result ImageResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return decodeImageResponse(protocol, raw)
 }
 
 func (c *Client) resolveConfig(extra map[string]interface{}) RequestConfig {
@@ -247,7 +261,15 @@ func (c *Client) resolveConfig(extra map[string]interface{}) RequestConfig {
 		cfg.BaseURL = strings.TrimRight(strings.TrimSpace(s), "/")
 	}
 	if s, ok := conn["api_key"].(string); ok {
-		cfg.APIKey = strings.TrimSpace(s)
+		apiKey := strings.TrimSpace(s)
+		// Support environment variable reference: ${VAR_NAME}
+		if strings.HasPrefix(apiKey, "${") && strings.HasSuffix(apiKey, "}") {
+			envVar := strings.TrimSuffix(strings.TrimPrefix(apiKey, "${"), "}")
+			if envValue := strings.TrimSpace(getEnv(envVar)); envValue != "" {
+				apiKey = envValue
+			}
+		}
+		cfg.APIKey = apiKey
 	}
 	if s, ok := conn["auth_type"].(string); ok && s != "" {
 		cfg.AuthType = s
@@ -503,6 +525,41 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 			result.Message = "测试请求创建失败：" + err.Error()
 			return result
 		}
+	} else if requestMode == "images" {
+		protocol = mediaProtocol(extra)
+		body, err = prepareImageRequest(ImageRequest{
+			Model:  model,
+			Prompt: "test",
+			N:      1,
+			Size:   "1024x1024",
+		}, protocol, extra)
+		if err != nil {
+			result.Message = "测试请求创建失败：" + err.Error()
+			return result
+		}
+	} else if requestMode == "video" {
+		protocol = mediaProtocol(extra)
+		body, err = prepareVideoRequest(VideoRequest{
+			Model:  model,
+			Prompt: "test",
+			Extra:  map[string]interface{}{"duration": "5s", "size": "1280x720"},
+		}, protocol, extra)
+		if err != nil {
+			result.Message = "测试请求创建失败：" + err.Error()
+			return result
+		}
+	} else if requestMode == "audio" {
+		protocol = mediaProtocol(extra)
+		body, err = prepareAudioRequest(AudioRequest{
+			Model:  model,
+			Input:  "test",
+			Voice:  "alloy",
+			Format: "mp3",
+		}, protocol, extra)
+		if err != nil {
+			result.Message = "测试请求创建失败：" + err.Error()
+			return result
+		}
 	} else {
 		probePayload := map[string]interface{}{"model": model, "stream": false}
 		if requestMode == "responses" {
@@ -518,7 +575,11 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 		return result
 	}
 	applyAuthHeaders(req, cfg)
-	applyChatProtocolHeaders(req, protocol, extra)
+	if requestMode == "chat_completions" {
+		applyChatProtocolHeaders(req, protocol, extra)
+	} else if requestMode == "images" || requestMode == "video" || requestMode == "audio" {
+		applyMediaProtocolHeaders(req, protocol, extra)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
@@ -581,6 +642,107 @@ func connectionTestMessage(raw []byte) string {
 	return text
 }
 
+type VideoRequest struct {
+	Model  string                 `json:"model"`
+	Prompt string                 `json:"prompt"`
+	Extra  map[string]interface{} `json:"-"`
+}
+
+type VideoResponse struct {
+	TaskID string `json:"task_id,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+func (c *Client) VideoGeneration(ctx context.Context, endpoint string, req VideoRequest) (*VideoResponse, error) {
+	return c.VideoGenerationWithConfig(ctx, endpoint, req, nil)
+}
+
+func (c *Client) VideoGenerationWithConfig(ctx context.Context, endpoint string, req VideoRequest, cfg map[string]interface{}) (*VideoResponse, error) {
+	requestCfg := c.resolveConfig(cfg)
+	endpoint = defaultEndpoint(endpoint, "/v1/video/generations")
+
+	protocol := mediaProtocol(cfg)
+	body, err := prepareVideoRequest(req, protocol, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(requestCfg.BaseURL, endpoint), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyAuthHeaders(httpReq, requestCfg)
+	applyMediaProtocolHeaders(httpReq, protocol, cfg)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, normalizeHTTPError(resp)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	return decodeVideoResponse(protocol, raw)
+}
+
+type AudioRequest struct {
+	Model  string                 `json:"model"`
+	Input  string                 `json:"input"`
+	Voice  string                 `json:"voice,omitempty"`
+	Format string                 `json:"format,omitempty"`
+	Extra  map[string]interface{} `json:"-"`
+}
+
+type AudioResponse struct {
+	TaskID string `json:"task_id,omitempty"`
+	ID     string `json:"id,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+func (c *Client) AudioGeneration(ctx context.Context, endpoint string, req AudioRequest) (*AudioResponse, error) {
+	return c.AudioGenerationWithConfig(ctx, endpoint, req, nil)
+}
+
+func (c *Client) AudioGenerationWithConfig(ctx context.Context, endpoint string, req AudioRequest, cfg map[string]interface{}) (*AudioResponse, error) {
+	requestCfg := c.resolveConfig(cfg)
+	endpoint = defaultEndpoint(endpoint, "/v1/audio/speech")
+
+	protocol := mediaProtocol(cfg)
+	body, err := prepareAudioRequest(req, protocol, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", joinEndpoint(requestCfg.BaseURL, endpoint), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyAuthHeaders(httpReq, requestCfg)
+	applyMediaProtocolHeaders(httpReq, protocol, cfg)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, normalizeHTTPError(resp)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	return decodeAudioResponse(protocol, raw)
+}
+
 // OpenAuthenticatedStream GETs an upstream media URL with channel credentials and transient retries.
 func (c *Client) OpenAuthenticatedStream(ctx context.Context, extra map[string]interface{}, mediaURL string) (*http.Response, error) {
 	cfg := c.resolveConfig(extra)
@@ -619,4 +781,9 @@ func (c *Client) OpenAuthenticatedStream(ctx context.Context, extra map[string]i
 		return nil, mapError(lastErr)
 	}
 	return nil, &PlatformError{Code: "MODEL_PROVIDER_ERROR", Message: "上游视频暂不可用"}
+}
+
+// getEnv retrieves environment variable value with fallback
+func getEnv(key string) string {
+	return os.Getenv(key)
 }

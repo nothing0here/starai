@@ -77,6 +77,16 @@ func (c *Client) Allow(ctx context.Context, key string, limit int, window time.D
 	return current <= int64(limit), time.Duration(ttl) * time.Second, nil
 }
 
+func (c *Client) ReleaseAllowance(ctx context.Context, key string) {
+	if c == nil || c.rdb == nil || key == "" {
+		return
+	}
+	rateKey := "rate:" + key
+	if count, err := c.rdb.Decr(ctx, rateKey).Result(); err == nil && count <= 0 {
+		_ = c.rdb.Del(ctx, rateKey).Err()
+	}
+}
+
 // SetTemp stores a short-lived value (e.g. OAuth state).
 func (c *Client) SetTemp(ctx context.Context, key, value string, ttl time.Duration) error {
 	if c == nil || c.rdb == nil {
