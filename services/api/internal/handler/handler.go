@@ -3814,8 +3814,15 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 	if prompt == "" && promptField != "prompt" {
 		prompt = strings.TrimSpace(stringAny(body["prompt"]))
 	}
-	lyricsOnlyAudio := requestMode == "audio" && strings.TrimSpace(stringAny(body["lyrics"])) != ""
-	if prompt == "" && !lyricsOnlyAudio && requestMode != "video" {
+	model, err := h.models.ResolveTaskModel(c.Request.Context(), modelName, requestMode)
+	if err != nil {
+		openAPIError(c, http.StatusBadRequest, "model_not_found", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
+		return
+	}
+	if requestMode == "audio" {
+		prompt = openAPIAudioPrimaryInput(body, model, prompt)
+	}
+	if prompt == "" && openAPIMediaPromptRequired(model, requestMode) {
 		if promptField == "input" {
 			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "input 不能为空")
 		} else {
@@ -3824,11 +3831,6 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 		return
 	}
 	if !h.enforceContentSafety(c, c.GetInt64("user_id"), "openapi", body) {
-		return
-	}
-	model, err := h.models.ResolveTaskModel(c.Request.Context(), modelName, requestMode)
-	if err != nil {
-		openAPIError(c, http.StatusBadRequest, "model_not_found", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
 		return
 	}
 	params := normalizeOpenAPIMediaParams(body, model, requestMode, promptField)
@@ -3883,6 +3885,34 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 		// Async mode: return task_no for polling
 		c.JSON(http.StatusOK, openAPITaskResponse(task))
 	}
+}
+
+func openAPIMediaPromptRequired(model *service.ModelFull, requestMode string) bool {
+	if model == nil {
+		return true
+	}
+	ruleName := "image"
+	switch requestMode {
+	case "video":
+		ruleName = "video"
+	case "audio":
+		ruleName = "audio"
+	}
+	rule, _ := model.RuntimeRule[ruleName].(map[string]interface{})
+	return rule["prompt_required"] != false
+}
+
+func openAPIAudioPrimaryInput(body map[string]interface{}, model *service.ModelFull, input string) string {
+	if strings.TrimSpace(input) != "" || model == nil {
+		return strings.TrimSpace(input)
+	}
+	upstream, _ := model.RuntimeRule["upstream"].(map[string]interface{})
+	mapping, _ := upstream["map"].(map[string]interface{})
+	promptTarget := strings.ToLower(strings.TrimSpace(stringAny(mapping["prompt"])))
+	if strings.Contains(promptTarget, "lyrics") {
+		return strings.TrimSpace(stringAny(body["lyrics"]))
+	}
+	return ""
 }
 
 func normalizeOpenAPIMediaParams(body map[string]interface{}, model *service.ModelFull, requestMode, promptField string) map[string]interface{} {

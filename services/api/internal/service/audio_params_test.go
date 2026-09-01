@@ -58,3 +58,54 @@ func TestBuildUpstreamAudioPayloadSupportsNestedMap(t *testing.T) {
 		t.Fatalf("response_format should not be sent: %#v", got)
 	}
 }
+
+func TestValidateAudioTaskParamsForOptionalMusicInputs(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   *ModelFull
+		params  map[string]interface{}
+		wantErr bool
+	}{
+		{
+			name:   "fun music rejects empty request",
+			model:  &ModelFull{NewAPIModel: "fun-music-v1", RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"prompt_required": false}}},
+			params: map[string]interface{}{}, wantErr: true,
+		},
+		{
+			name:   "fun music accepts lyrics only",
+			model:  &ModelFull{NewAPIModel: "fun-music-v1", RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"prompt_required": false}}},
+			params: map[string]interface{}{"lyrics": "la la la"},
+		},
+		{
+			name:  "minimax instrumental requires description",
+			model: minimaxMusicValidationModel(), params: map[string]interface{}{"is_instrumental": true}, wantErr: true,
+		},
+		{
+			name:  "minimax instrumental accepts description",
+			model: minimaxMusicValidationModel(), params: map[string]interface{}{"is_instrumental": true, "music_prompt": "warm piano"},
+		},
+		{
+			name:  "minimax vocal requires lyrics by default",
+			model: minimaxMusicValidationModel(), params: map[string]interface{}{"music_prompt": "warm piano"}, wantErr: true,
+		},
+		{
+			name:  "minimax optimizer can create lyrics from description",
+			model: minimaxMusicValidationModel(), params: map[string]interface{}{"lyrics_optimizer": true, "music_prompt": "warm piano"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateAudioTaskParams(test.model, test.params)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("validateAudioTaskParams() error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func minimaxMusicValidationModel() *ModelFull {
+	return &ModelFull{
+		NewAPIModel: "music-2.6", NewAPIEndpoint: "/v1/music_generation",
+		RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"prompt_required": false}},
+	}
+}

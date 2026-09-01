@@ -66,3 +66,28 @@ func TestNormalizeOpenAIAudioVoiceAlias(t *testing.T) {
 		t.Fatalf("voice alias leaked alongside voice_id: %#v", params)
 	}
 }
+
+func TestOpenAPIMediaPromptRequiredUsesModelRuntime(t *testing.T) {
+	optionalAudio := &service.ModelFull{RuntimeRule: map[string]interface{}{
+		"audio": map[string]interface{}{"prompt_required": false},
+	}}
+	if openAPIMediaPromptRequired(optionalAudio, "audio") {
+		t.Fatal("audio input should be optional when the selected model says so")
+	}
+	if !openAPIMediaPromptRequired(&service.ModelFull{}, "audio") {
+		t.Fatal("audio input should remain required by default")
+	}
+}
+
+func TestOpenAPIAudioPrimaryInputSupportsConfiguredLyricsAlias(t *testing.T) {
+	model := &service.ModelFull{RuntimeRule: map[string]interface{}{
+		"upstream": map[string]interface{}{"map": map[string]interface{}{"prompt": "lyrics"}},
+	}}
+	got := openAPIAudioPrimaryInput(map[string]interface{}{"lyrics": "[Verse] hello"}, model, "")
+	if got != "[Verse] hello" {
+		t.Fatalf("lyrics alias was not promoted to primary input: %q", got)
+	}
+	if got := openAPIAudioPrimaryInput(map[string]interface{}{"lyrics": "ignored"}, model, "explicit"); got != "explicit" {
+		t.Fatalf("explicit input must win: %q", got)
+	}
+}

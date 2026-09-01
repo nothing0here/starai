@@ -1,6 +1,9 @@
 package service
 
-import "errors"
+import (
+	"errors"
+	"strings"
+)
 
 // ValidateAudioParams checks input_schema enums/required fields for audio tasks.
 func ValidateAudioParams(model *ModelFull, params map[string]interface{}) error {
@@ -54,13 +57,55 @@ func BuildUpstreamAudioPayload(model *ModelFull, params map[string]interface{}) 
 }
 
 func validateAudioTaskParams(model *ModelFull, params map[string]interface{}) error {
+	prompt := strings.TrimSpace(audioStringValue(params["prompt"]))
 	if parseAudioRuntimeConfig(model.RuntimeRule)["prompt_required"] != false {
-		prompt, _ := params["prompt"].(string)
 		if prompt == "" {
 			return errors.New("请填写文本内容")
 		}
 	}
+	modelName := strings.ToLower(strings.TrimSpace(model.NewAPIModel))
+	endpoint := strings.ToLower(strings.TrimSpace(model.NewAPIEndpoint))
+	lyrics := strings.TrimSpace(audioStringValue(params["lyrics"]))
+	musicPrompt := strings.TrimSpace(audioStringValue(params["music_prompt"]))
+	if strings.Contains(modelName, "fun-music") {
+		if prompt == "" && lyrics == "" {
+			return errors.New("音乐描述和歌词至少填写一项")
+		}
+	}
+	if strings.Contains(endpoint, "music_generation") && strings.HasPrefix(modelName, "music-2.6") {
+		instrumental := audioBoolValue(params["is_instrumental"])
+		optimizer := audioBoolValue(params["lyrics_optimizer"])
+		if instrumental && musicPrompt == "" {
+			return errors.New("纯音乐模式必须填写音乐描述")
+		}
+		if !instrumental && lyrics == "" && !optimizer {
+			return errors.New("非纯音乐模式必须填写歌词，或开启歌词优化")
+		}
+		if !instrumental && lyrics == "" && optimizer && musicPrompt == "" {
+			return errors.New("自动生成歌词时必须填写音乐描述")
+		}
+	}
 	return ValidateAudioParams(model, params)
+}
+
+func audioBoolValue(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true") || strings.TrimSpace(typed) == "1"
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	default:
+		return false
+	}
+}
+
+func audioStringValue(value interface{}) string {
+	text, _ := value.(string)
+	return text
 }
 
 func parseAudioRuntimeConfig(runtimeRule map[string]interface{}) map[string]interface{} {

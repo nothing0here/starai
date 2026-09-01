@@ -1709,6 +1709,7 @@ export default function ModelsPage() {
         prompt_hint: "请输入歌词，支持 [Verse]、[Chorus]、[Bridge]、[Outro] 等结构标签。纯音乐模式可留空。",
         secondary_prompt_hint: "音乐描述：风格、情绪、场景。例如：独立民谣, 忧郁, 内省, 咖啡馆",
         secondary_prompt_key: "music_prompt",
+        prompt_required: false,
         show_upload: false,
         upstream_include: ["model_version", "music_prompt", "output_format", "format", "sample_rate", "bitrate", "is_instrumental", "lyrics_optimizer", "aigc_watermark"],
         upstream_map: JSON.stringify(

@@ -1216,15 +1216,21 @@ func defaultAPIDocParameters(doc *APIDocDTO) []map[string]interface{} {
 			{"name": "reference_audios", "type": "string[]", "required": false, "description": "参考音频 URL 数组"},
 		})
 	case "audio":
-		inputRequired := !strings.Contains(strings.ToLower(doc.NewAPIModel), "fun-music")
+		audioRule, _ := doc.RuntimeRule["audio"].(map[string]interface{})
+		inputRequired := audioRule["prompt_required"] != false && !strings.Contains(strings.ToLower(doc.NewAPIModel), "fun-music")
+		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
+		mapping, _ := upstream["map"].(map[string]interface{})
+		if strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(mapping["prompt"]))), "lyrics") {
+			inputRequired = false
+		}
 		return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
 			{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
-			{"name": "input", "type": "string", "required": inputRequired, "description": "需要合成的文本或音乐提示词"},
+			{"name": "input", "type": "string", "required": inputRequired, "description": "TTS 文本或模型的主音乐输入；MiniMax Music-2.6 中作为歌词"},
 			{"name": "voice", "type": "string", "required": false, "description": "音色，以后台模型支持为准"},
 			{"name": "format", "type": "string", "required": false, "description": "输出格式，例如 mp3 / wav"},
 			{"name": "sample_rate", "type": "integer", "required": false, "description": "采样率，以模型支持范围为准"},
 			{"name": "instruction", "type": "string", "required": false, "description": "Qwen-Audio-TTS / CosyVoice 表达指令，支持中文或英文"},
-			{"name": "lyrics", "type": "string", "required": false, "description": "音乐生成歌词；Fun-Music 可与 input 二选一"},
+			{"name": "lyrics", "type": "string", "required": false, "description": "自定义歌词；Fun-Music 可与 input 二选一，配置为歌词主输入的音乐模板也会将其作为 input 的兼容别名"},
 		})
 	default:
 		return nil
@@ -1302,10 +1308,16 @@ func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 		if strings.Contains(strings.ToLower(doc.NewAPIModel), "fun-music") {
 			text = "夏日清新民谣，木吉他与口琴伴奏，轻快节奏"
 		}
-		return mergeAPIDocDefaults(doc, map[string]interface{}{
+		example := mergeAPIDocDefaults(doc, map[string]interface{}{
 			"model": doc.ModelCode,
 			"input": text,
 		})
+		audioRule, _ := doc.RuntimeRule["audio"].(map[string]interface{})
+		if audioRule["prompt_required"] == false && strings.HasPrefix(strings.ToLower(doc.NewAPIModel), "music-2.6") {
+			example["input"] = "[Verse]\n夜风轻轻掠过窗前\n[Chorus]\n让星光照亮明天"
+			example["music_prompt"] = "独立民谣，温暖，木吉他，中速"
+		}
+		return example
 	case "responses":
 		return map[string]interface{}{
 			"model": doc.ModelCode,

@@ -103,3 +103,20 @@ func TestStandardAPIDocContentSupportsFunMusicLyricsOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestStandardAPIDocContentExplainsMiniMaxMusicInputs(t *testing.T) {
+	doc := &APIDocDTO{
+		Slug: "minimax-music", ModelCode: "minimax-music", RequestMode: "audio", NewAPIModel: "music-2.6",
+		RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"prompt_required": false}},
+	}
+	content := standardAPIDocContent(doc, nil)
+	example := content["request_example"].(map[string]interface{})
+	if example["input"] == "" || example["music_prompt"] == "" {
+		t.Fatalf("MiniMax Music example must include valid lyrics and music description: %#v", example)
+	}
+	for _, parameter := range content["parameters"].([]map[string]interface{}) {
+		if parameter["name"] == "input" && parameter["required"] != false {
+			t.Fatalf("MiniMax Music input must follow the model's optional-prompt rule: %#v", parameter)
+		}
+	}
+}
