@@ -166,6 +166,7 @@ type videoRuntimeConfig struct {
 }
 
 type upstreamConfig struct {
+	Adapter string
 	Include []string
 	Map     map[string]string
 	Static  map[string]interface{}
@@ -259,6 +260,7 @@ func parseUpstreamConfig(runtimeRule map[string]interface{}) upstreamConfig {
 	if up == nil {
 		return cfg
 	}
+	cfg.Adapter = strings.TrimSpace(fmt.Sprint(up["adapter"]))
 	if arr, ok := up["include"].([]interface{}); ok {
 		for _, item := range arr {
 			if s, ok := item.(string); ok {
@@ -467,7 +469,72 @@ func validateVideoUpload(cfg videoRuntimeConfig, params map[string]interface{}) 
 		default:
 			return errors.New("不支持的 Seedance 2.0 素材组合")
 		}
+	case "aliyun_multimodal":
+		videoCount := urlFieldCount(params[cfg.ReferenceVideosKey])
+		audioCount := urlFieldCount(params[cfg.ReferenceAudiosKey])
+		if refCount > cfg.MaxReferenceImages || videoCount > cfg.MaxReferenceVideos || audioCount > cfg.MaxReferenceAudios {
+			return errors.New("参考素材数量超过 Wan 3.0 模型限制")
+		}
+		if cfg.MaxTotalImages > 0 && refCount+videoCount+audioCount > cfg.MaxTotalImages {
+			return errors.New("参考素材总数超过 Wan 3.0 模型限制")
+		}
+		mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params[cfg.ModeParam])))
+		switch mode {
+		case "", "text":
+			if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+				return errors.New("文生视频需要填写提示词")
+			}
+			if firstCount+lastCount+refCount+videoCount+audioCount > 0 {
+				return errors.New("文生视频模式不接收参考素材")
+			}
+		case "first_frame":
+			if firstCount != 1 || lastCount+refCount+videoCount+audioCount > 0 {
+				return errors.New("首帧模式仅支持上传 1 张首帧图片")
+			}
+		case "first_last":
+			if firstCount != 1 || lastCount != 1 || refCount+videoCount+audioCount > 0 {
+				return errors.New("首尾帧模式仅支持同时上传首帧和尾帧")
+			}
+		case "reference":
+			if refCount+videoCount+audioCount == 0 {
+				return errors.New("多模态参考模式至少需要 1 个参考素材")
+			}
+			if firstCount+lastCount > 0 {
+				return errors.New("多模态参考素材不能与首尾帧混用")
+			}
+		default:
+			return errors.New("不支持的 Wan 3.0 生成模式")
+		}
+	case "aliyun_happyhorse_text":
+		if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+			return errors.New("HappyHorse 文生视频需要填写提示词")
+		}
+		if firstCount+lastCount+refCount+urlFieldCount(params[cfg.ReferenceVideosKey])+urlFieldCount(params[cfg.ReferenceAudiosKey]) > 0 {
+			return errors.New("HappyHorse 文生视频不接收参考素材")
+		}
+	case "aliyun_happyhorse_first_frame":
+		if firstCount != 1 || lastCount+refCount+urlFieldCount(params[cfg.ReferenceVideosKey])+urlFieldCount(params[cfg.ReferenceAudiosKey]) > 0 {
+			return errors.New("HappyHorse 首帧生视频仅支持上传 1 张首帧图片")
+		}
+	case "aliyun_happyhorse_reference":
+		if refCount < 1 || refCount > 9 || firstCount+lastCount+urlFieldCount(params[cfg.ReferenceVideosKey])+urlFieldCount(params[cfg.ReferenceAudiosKey]) > 0 {
+			return errors.New("HappyHorse 参考生视频需要上传 1～9 张参考图")
+		}
+		if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+			return errors.New("HappyHorse 参考生视频需要填写提示词")
+		}
+	case "aliyun_happyhorse_edit":
+		videoCount := urlFieldCount(params[cfg.ReferenceVideosKey])
+		if videoCount != 1 || refCount > 5 || firstCount+lastCount+urlFieldCount(params[cfg.ReferenceAudiosKey]) > 0 {
+			return errors.New("HappyHorse 视频编辑需要 1 个待编辑视频，可选 0～5 张参考图")
+		}
+		if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+			return errors.New("HappyHorse 视频编辑需要填写编辑指令")
+		}
 	default: // single_ref
+		if refCount < cfg.MinReferenceImages {
+			return fmt.Errorf("至少需要 %d 张参考图", cfg.MinReferenceImages)
+		}
 		if refCount > cfg.MaxReferenceImages {
 			return errors.New("参考图数量超过模型限制")
 		}
@@ -519,7 +586,52 @@ func validateImageTaskParams(model *ModelFull, params map[string]interface{}) er
 			return errors.New("参考图数量超过模型限制")
 		}
 	}
+	if strings.EqualFold(parseUpstreamConfig(model.RuntimeRule).Adapter, "aliyun_qwen_image_v3") {
+		if strings.TrimSpace(fmt.Sprint(params["prompt"])) == "" {
+			return errors.New("Qwen Image 需要填写生成或编辑指令")
+		}
+		if referenceImageCount(params["reference_images"]) > 3 {
+			return errors.New("Qwen Image 最多支持 3 张参考图")
+		}
+		if raw, ok := params["count"]; ok {
+			count, valid := exactPositiveInt(raw)
+			if !valid || count > 6 {
+				return errors.New("Qwen Image 生成数量必须是 1～6 的整数")
+			}
+		} else if raw, ok := params["n"]; ok {
+			count, valid := exactPositiveInt(raw)
+			if !valid || count > 6 {
+				return errors.New("Qwen Image 生成数量必须是 1～6 的整数")
+			}
+		}
+		if raw, ok := params["size"]; ok && strings.TrimSpace(fmt.Sprint(raw)) != "" {
+			parts := strings.Split(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(fmt.Sprint(raw))), "x", "*"), "*")
+			if len(parts) != 2 {
+				return errors.New("Qwen Image 尺寸格式必须为 宽*高")
+			}
+			width, widthErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+			height, heightErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+			pixels := int64(width) * int64(height)
+			if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 || pixels < 512*512 || pixels > 2048*2048 || width > height*8 || height > width*8 {
+				return errors.New("Qwen Image 尺寸需满足总像素 512*512～2048*2048，且宽高比在 1:8～8:1")
+			}
+		}
+		if raw, ok := params["seed"]; ok {
+			seed, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(raw)), 64)
+			if err != nil || seed < 0 || seed > 2147483647 || seed != math.Trunc(seed) {
+				return errors.New("Qwen Image 随机种子必须是 0～2147483647 的整数")
+			}
+		}
+	}
 	return validateSchemaParams(model.InputSchema, params)
+}
+
+func exactPositiveInt(value interface{}) (int, bool) {
+	number, err := strconv.ParseFloat(strings.TrimSpace(fmt.Sprint(value)), 64)
+	if err != nil || number < 1 || number != math.Trunc(number) || number > math.MaxInt {
+		return 0, false
+	}
+	return int(number), true
 }
 
 func defaultUpstreamInclude(params map[string]interface{}) []string {

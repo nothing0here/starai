@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useI18n } from "@/i18n/I18nProvider";
-import { AudioLines, ChevronDown, Compass, FileAudio, Gauge, Grid3X3, Sparkles, Target } from "lucide-react";
+import { AudioLines, Compass, FileAudio, Gauge, Grid3X3, Sparkles, Target } from "lucide-react";
+import { MediaOptionMenu } from "../MediaOptionMenu";
 import {
   DEFAULT_AUDIO_COUNT_OPTIONS,
   enumLabel,
@@ -55,51 +56,10 @@ function OptionMenu({
   tone?: "white" | "yellow";
   children: (close: () => void) => ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  const btnRef = useRef<HTMLButtonElement | null>(null);
-  const [pos, setPos] = useState({ left: 0, bottom: 0 });
-  const openMenu = () => {
-    const rect = btnRef.current?.getBoundingClientRect();
-    if (rect) {
-      setPos({
-        left: Math.min(rect.left, window.innerWidth - 272),
-        bottom: window.innerHeight - rect.top + 8,
-      });
-    }
-    setOpen((v) => !v);
-  };
   return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        onClick={openMenu}
-        className={`h-8 px-2.5 rounded-xl border text-xs flex items-center gap-1.5 shadow-sm transition ${
-          tone === "yellow"
-            ? "bg-amber-100 border-amber-300 text-gray-900 dark:bg-amber-500/10 dark:border-amber-400/30 dark:text-amber-100"
-            : "bg-white border-gray-200 text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-200"
-        }`}
-      >
-        <span className="text-gray-500 dark:text-gray-400">{icon}</span>
-        <span>{activeLabel}</span>
-        <ChevronDown size={13} className={`text-gray-500 transition dark:text-gray-400 ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div className="fixed inset-0 z-[70]" onClick={() => setOpen(false)}>
-          <div
-            className="fixed w-[220px] max-w-[calc(100vw-1rem)] rounded-2xl bg-white border border-gray-200 shadow-2xl overflow-hidden max-h-[60vh] overflow-y-auto dark:bg-gray-900 dark:border-white/10"
-            style={{ left: pos.left, bottom: pos.bottom }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-3.5 py-2.5 border-b border-gray-100 dark:border-white/10">
-              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</div>
-              <div className="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">{subtitle}</div>
-            </div>
-            <div className="p-2">{children(() => setOpen(false))}</div>
-          </div>
-        </div>
-      )}
-    </>
+    <MediaOptionMenu icon={icon} activeLabel={activeLabel} title={title} subtitle={subtitle} tone={tone} compactOnMobile>
+      {children}
+    </MediaOptionMenu>
   );
 }
 
@@ -209,12 +169,14 @@ function renderFieldControl(
       <button
         type="button"
         onClick={() => onChange(key, !on)}
-        className={`h-8 px-2.5 rounded-xl border text-xs flex items-center gap-1.5 shadow-sm transition ${
+        aria-label={`${translate(prop.title || key)}: ${on ? translate("开启") : translate("关闭")}`}
+        title={`${translate(prop.title || key)}: ${on ? translate("开启") : translate("关闭")}`}
+        className={`flex h-8 shrink-0 items-center gap-1.5 rounded-xl border px-2.5 text-xs shadow-sm transition ${
           on ? "bg-primary/10 border-primary/30 text-gray-900 dark:bg-primary/15 dark:border-primary/30 dark:text-gray-100" : "bg-white border-gray-200 text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-200"
         }`}
       >
         <span className="text-gray-500 dark:text-gray-400">{iconFor(prop["x-icon"])}</span>
-        <span>
+        <span className="hidden sm:inline">
           {translate(prop.title || key)}：{on ? translate("开启") : translate("关闭")}
         </span>
       </button>

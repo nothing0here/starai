@@ -34,6 +34,16 @@ func TestCreativeAgentClockIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestCreativeAgentPlannerPromptUsesConfiguredBrandName(t *testing.T) {
+	prompt := creativeAgentPlannerPrompt(map[string]interface{}{"site_name": "  星河 AI  "})
+	if !strings.HasPrefix(prompt, "你是 星河 AI 的通用创作智能体") || strings.Contains(prompt, "你是 StarAI") {
+		t.Fatalf("unexpected branded prompt: %s", prompt)
+	}
+	if fallback := creativeAgentPlannerPrompt(nil); !strings.HasPrefix(fallback, "你是 StarAI 的通用创作智能体") {
+		t.Fatalf("unexpected fallback prompt: %s", fallback)
+	}
+}
+
 func TestCreativeSearchDecisionParsingAndFallback(t *testing.T) {
 	decision, ok := parseCreativeSearchDecision("```json\n{\"needs_search\":true,\"query\":\"TikTok trending videos August 2026\",\"topic\":\"news\",\"time_range\":\"week\",\"include_domains\":[\"tiktok.com\"]}\n```")
 	if !ok || !decision.NeedsSearch || decision.Topic != "news" || decision.TimeRange != "week" || len(decision.IncludeDomains) != 1 {

@@ -15,6 +15,7 @@ import { useI18n } from "@/i18n/I18nProvider";
 import { MediaMenuOption, MediaOptionMenu } from "../MediaOptionMenu";
 
 type Translate = ReturnType<typeof useI18n>["t"];
+type TranslateSource = ReturnType<typeof useI18n>["ts"];
 
 function iconFor(name?: string): ReactNode {
   switch (name) {
@@ -69,30 +70,23 @@ const FIELD_DESC_KEY: Record<string, string> = {
   priority: "video.priorityDesc",
 };
 
-function safeSchemaText(text: unknown, fallback: string) {
-  const value = typeof text === "string" ? text.trim() : "";
-  if (!value) return fallback;
-  if (/[\u4e00-\u9fff�]/.test(value)) return fallback;
-  return value;
-}
-
-function fieldTitle(t: Translate, key: string, prop: SchemaFieldMeta) {
+function fieldTitle(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta) {
   const i18nKey = FIELD_TITLE_KEY[key];
-  return i18nKey ? t(i18nKey) : safeSchemaText(prop.title, key);
+  return i18nKey ? t(i18nKey) : ts(typeof prop.title === "string" ? prop.title : key);
 }
 
-function fieldDesc(t: Translate, key: string, prop: SchemaFieldMeta) {
+function fieldDesc(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta) {
   const i18nKey = FIELD_DESC_KEY[key];
   const desc = (prop as SchemaFieldMeta & { description?: string }).description;
-  return i18nKey ? t(i18nKey) : safeSchemaText(desc || prop.title, key);
+  return i18nKey ? t(i18nKey) : ts(typeof (desc || prop.title) === "string" ? String(desc || prop.title) : key);
 }
 
-function optionLabel(t: Translate, key: string, prop: SchemaFieldMeta, value: unknown) {
+function optionLabel(t: Translate, ts: TranslateSource, key: string, prop: SchemaFieldMeta, value: unknown) {
   const raw = String(value ?? "");
   const lookup = `video.option.${key}.${raw}`;
   const translated = t(lookup);
   if (translated !== lookup) return translated;
-  return safeSchemaText(enumLabel(prop, value), raw);
+  return ts(enumLabel(prop, value) || raw);
 }
 
 function CountOptionMenu({
@@ -184,6 +178,7 @@ function renderFieldControl(
   value: unknown,
   onChange: (key: string, val: unknown) => void,
   t: Translate,
+  ts: TranslateSource,
   videoConfig?: VideoRuntimeConfig,
   countUnit?: string
 ) {
@@ -199,29 +194,31 @@ function renderFieldControl(
       <button
         type="button"
         onClick={() => onChange(key, !on)}
-        className={`flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs shadow-sm transition ${
+        aria-label={`${fieldTitle(t, ts, key, prop)}: ${on ? "ON" : "OFF"}`}
+        title={`${fieldTitle(t, ts, key, prop)}: ${on ? "ON" : "OFF"}`}
+        className={`flex h-8 shrink-0 items-center gap-1.5 rounded-xl border px-2.5 text-xs shadow-sm transition ${
           on
             ? "border-primary/30 bg-primary/10 text-gray-900 dark:border-primary/30 dark:bg-primary/15 dark:text-gray-100"
             : "border-gray-200 bg-white text-gray-700 dark:border-white/10 dark:bg-white/5 dark:text-gray-200"
         }`}
       >
         <span className="text-gray-500 dark:text-gray-400">{iconFor(prop["x-icon"])}</span>
-        <span>
-          {fieldTitle(t, key, prop)}: {on ? "ON" : "OFF"}
+        <span className="hidden sm:inline">
+          {fieldTitle(t, ts, key, prop)}: {on ? "ON" : "OFF"}
         </span>
       </button>
     );
   }
 
   const options = prop.enum || [];
-  const activeLabel = optionLabel(t, key, prop, value ?? prop.default ?? options[0]);
+  const activeLabel = optionLabel(t, ts, key, prop, value ?? prop.default ?? options[0]);
 
   return (
     <MediaOptionMenu
       icon={iconFor(prop["x-icon"])}
       activeLabel={String(activeLabel)}
-      title={fieldTitle(t, key, prop)}
-      subtitle={fieldDesc(t, key, prop)}
+      title={fieldTitle(t, ts, key, prop)}
+      subtitle={fieldDesc(t, ts, key, prop)}
       tone={prop["x-highlight"] ? "yellow" : "white"}
       compactOnMobile
     >
@@ -238,7 +235,7 @@ function renderFieldControl(
                   closeMenu();
                 }}
               >
-                {optionLabel(t, key, prop, opt)}
+                {optionLabel(t, ts, key, prop, opt)}
               </MediaMenuOption>
             );
           })}
@@ -261,11 +258,11 @@ export function VideoOptionToolbar({
   videoConfig?: VideoRuntimeConfig;
   countUnit?: string;
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => !isTopPlacementField(prop));
   if (entries.length === 0) return null;
-  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, videoConfig, countUnit)}</span>)}</>;
+  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}</>;
 }
 
 export function VideoTopControls({
@@ -281,7 +278,7 @@ export function VideoTopControls({
   videoConfig?: VideoRuntimeConfig;
   countUnit?: string;
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const set = (key: string, val: unknown) => onChange({ ...values, [key]: val });
   const entries = schemaFieldEntries(schema).filter(([, prop]) => isTopPlacementField(prop));
   const priorityIndex = entries.findIndex(([key]) => key === "priority");
@@ -290,5 +287,5 @@ export function VideoTopControls({
     [entries[priorityIndex], entries[audioIndex]] = [entries[audioIndex], entries[priorityIndex]];
   }
   if (entries.length === 0) return null;
-  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, videoConfig, countUnit)}</span>)}</>;
+  return <>{entries.map(([key, prop]) => <span key={key}>{renderFieldControl(key, prop, values[key], set, t, ts, videoConfig, countUnit)}</span>)}</>;
 }

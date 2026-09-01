@@ -47,7 +47,9 @@ export function MediaOptionMenu({
         ref={btnRef}
         type="button"
         onClick={openMenu}
-        className={`h-8 rounded-xl border text-xs flex items-center gap-1.5 shadow-sm transition ${compactOnMobile ? "px-2 sm:px-2.5" : "px-2.5"} ${
+        aria-label={`${title}: ${activeLabel || label || ""}`}
+        title={`${title}: ${activeLabel || label || ""}`}
+        className={`flex h-8 shrink-0 items-center gap-1.5 rounded-xl border text-xs shadow-sm transition ${compactOnMobile ? "px-2 sm:px-2.5" : "px-2.5"} ${
           tone === "yellow"
             ? "bg-amber-100 border-amber-300 text-gray-900 dark:bg-amber-500/10 dark:border-amber-400/30 dark:text-amber-100"
             : "bg-white border-gray-200 text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-200"
@@ -55,7 +57,7 @@ export function MediaOptionMenu({
       >
         <span className="text-gray-500 dark:text-gray-400">{icon}</span>
         <span className={compactOnMobile ? "hidden sm:inline" : ""}>{activeLabel || label}</span>
-        <ChevronDown size={13} className={`text-gray-500 transition dark:text-gray-400 ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={13} className={`text-gray-500 transition dark:text-gray-400 ${compactOnMobile ? "hidden sm:block" : ""} ${open ? "rotate-180" : ""}`} />
       </button>
       {open && typeof document !== "undefined"
         ? createPortal(

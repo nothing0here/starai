@@ -56,11 +56,17 @@ interface UpstreamModel {
 const REQUEST_MODES = ["chat_completions", "responses", "images", "video", "audio", "custom"];
 const PAGE_SIZE = 10;
 const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
+const QWEN_IMAGE_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x1536", "1536x2048", "2048x2048"] as const;
 type SeedanceVariant = "standard" | "fast" | "mini";
 const MINIMAX_H3_TEMPLATE_KEY = "minimax_h3_v2";
 const VEO_REFERENCE_TEMPLATE_KEY = "veo_reference_v1";
 const VEO_FRAME_PAIR_TEMPLATE_KEY = "veo_frame_pair_v1";
 const OMNI_REFERENCE_TEMPLATE_KEY = "omni_reference_v1";
+const ALIYUN_QWEN_IMAGE_TEMPLATE_KEY = "aliyun_qwen_image_v3";
+const ALIYUN_HAPPYHORSE_TEMPLATE_KEY = "aliyun_happyhorse";
+type HappyHorseProfile = "text" | "first_frame" | "reference" | "edit";
+const ALIYUN_WAN3_TEMPLATE_KEY = "aliyun_wan3_video";
+const ALIYUN_LEGACY_BASE_URL = "https://dashscope.aliyuncs.com";
 
 function canonicalTemplateVideoSize(value: unknown, fallback = "1280x720") {
   const raw = String(value ?? "").trim().toLowerCase().replace(/\s+/g, "");
@@ -430,6 +436,13 @@ const CHAT_ENDPOINT_BY_PROTOCOL: Record<string, string> = {
 
 const IMAGE_ENDPOINT_PRESETS = [
   {
+    key: ALIYUN_QWEN_IMAGE_TEMPLATE_KEY,
+    label: "阿里云百炼 · Qwen-Image 3.0 / Pro",
+    endpoint: "/api/v1/services/aigc/multimodal-generation/generation",
+    model: "qwen-image-3.0-pro",
+    description: "千问图片 3.0 原生同步接口，支持文生图与 1-3 张参考图编辑。",
+  },
+  {
     key: "openai_images",
     label: "OpenAI / NEW API 图片生成",
     endpoint: "/v1/images/generations",
@@ -670,7 +683,13 @@ export default function ModelsPage() {
       price_rule: JSON.stringify(m.price_rule ?? {}, null, 2),
       runtime_rule: JSON.stringify(m.runtime_rule ?? {}, null, 2),
     });
-    setAudioTemplateKey("");
+    if (m.new_api_endpoint === "/api/v1/services/audio/tts/SpeechSynthesizer") {
+      setAudioTemplateKey(m.new_api_model.startsWith("cosyvoice") ? "aliyun_cosyvoice" : "aliyun_qwen_audio_tts");
+    } else if (m.new_api_endpoint === "/api/v1/services/audio/music/generation") {
+      setAudioTemplateKey("aliyun_fun_music");
+    } else {
+      setAudioTemplateKey("");
+    }
     if ((m.runtime_rule as any)?.upstream?.adapter === "volcengine_seedance_2") {
       const variant = inferSeedanceVariant(m.new_api_model, m.runtime_rule);
       setVideoTemplateKey(getSeedanceVariantConfig(variant).templateKey);
@@ -682,6 +701,8 @@ export default function ModelsPage() {
       setVideoTemplateKey(VEO_FRAME_PAIR_TEMPLATE_KEY);
     } else if ((m.runtime_rule as any)?.upstream?.adapter === "omni_reference_v1") {
       setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
+    } else if ((m.runtime_rule as any)?.upstream?.adapter === "aliyun_video_generation") {
+      setVideoTemplateKey(m.new_api_model === "wan3.0-video" ? ALIYUN_WAN3_TEMPLATE_KEY : ALIYUN_HAPPYHORSE_TEMPLATE_KEY);
     } else {
       setVideoTemplateKey("");
     }
@@ -794,6 +815,11 @@ export default function ModelsPage() {
     return JSON.stringify({ ...extra, connection: { ...prev, ...patch } }, null, 2);
   };
 
+  const aliyunWorkspaceBaseURL = (extraText: string) => {
+    const current = getConnection(extraText).base_url.trim();
+    return current === ALIYUN_LEGACY_BASE_URL ? "" : current;
+  };
+
   const applyNvidiaIntegratePreset = (prev: FormState): FormState => {
     const runtime = safeParseJson(prev.runtime_rule, {}) as Record<string, any>;
     return {
@@ -892,6 +918,7 @@ export default function ModelsPage() {
       rr,
       max_reference_images: Math.max(0, Math.min(20, Number.isFinite(parsed) ? parsed : 4)),
       default_quality: normalizeImageQuality(image.default_quality),
+      default_size: String(image.default_size || "auto"),
     };
   };
 
@@ -914,6 +941,10 @@ export default function ModelsPage() {
     state.request_mode === "images" &&
     state.new_api_endpoint === "/v1/videos" &&
     state.new_api_model.startsWith("nano_banana");
+
+  const isAliyunQwenImageForm = (state: FormState = form) =>
+    state.category === "image" &&
+    safeParseJson(state.runtime_rule, {})?.upstream?.adapter === "aliyun_qwen_image_v3";
 
   const setImageRule = (
     runtimeRuleText: string,
@@ -967,6 +998,9 @@ export default function ModelsPage() {
 
   const applyImageEndpointPreset = (prev: FormState, presetKey: string): FormState => {
     const preset = IMAGE_ENDPOINT_PRESETS.find((x) => x.key === presetKey) || IMAGE_ENDPOINT_PRESETS[0];
+    if (preset.key === ALIYUN_QWEN_IMAGE_TEMPLATE_KEY) {
+      return applyAliyunQwenImageV3(prev);
+    }
     const isBanana = preset.key === "banana_async";
     const modelName = isBanana
       ? (BANANA_MODELS.includes(prev.new_api_model) ? prev.new_api_model : preset.model)
@@ -999,6 +1033,40 @@ export default function ModelsPage() {
     };
   };
 
+  const applyAliyunQwenImageV3 = (prev: FormState): FormState => ({
+    ...prev,
+    category: "image",
+    request_mode: "images",
+    new_api_model: ["qwen-image-3.0", "qwen-image-3.0-pro"].includes(prev.new_api_model)
+      ? prev.new_api_model
+      : "qwen-image-3.0-pro",
+    new_api_endpoint: "/api/v1/services/aigc/multimodal-generation/generation",
+    new_api_extra_params: setConnection(prev.new_api_extra_params, {
+      provider: "aliyun",
+      protocol: "custom_http",
+      base_url: aliyunWorkspaceBaseURL(prev.new_api_extra_params),
+      auth_type: "bearer",
+      api_key_header: "Authorization",
+      models_endpoint: "",
+    }),
+    input_schema: JSON.stringify({
+      type: "object",
+      properties: {
+        prompt_extend: { type: "boolean", title: "智能改写", default: true, "x-order": 1, "x-widget": "boolean_toggle", "x-icon": "sparkles", "x-highlight": true },
+        prompt_extend_mode: { type: "string", title: "改写模式", enum: ["direct", "agent"], enumLabels: { direct: "直接增强", agent: "智能体增强" }, default: "direct", "x-order": 2, "x-widget": "option_menu", "x-icon": "wand" },
+        enable_thinking: { type: "boolean", title: "思考模式", default: true, "x-order": 3, "x-widget": "boolean_toggle", "x-icon": "sparkles" },
+        watermark: { type: "boolean", title: "水印", default: false, "x-order": 4, "x-widget": "boolean_toggle", "x-icon": "target" },
+      },
+    }, null, 2),
+    default_params: JSON.stringify({ count: 1, size: "auto", prompt_extend: true, prompt_extend_mode: "direct", enable_thinking: true, watermark: false, max_reference_images: 3 }, null, 2),
+    runtime_rule: JSON.stringify({
+      image: { max_reference_images: 3, default_size: "auto", supported_sizes: QWEN_IMAGE_SIZES, count_options: [1, 2, 3, 4, 5, 6], count_max: 6 },
+      upstream: { adapter: "aliyun_qwen_image_v3", map: { prompt: "input.prompt" }, request_timeout_sec: 300 },
+      capabilities: { web_search: false, deep_think: false },
+    }, null, 2),
+    price_rule: JSON.stringify({ billing_type: "per_image", currency: "¥", unit_price: 0.01 }, null, 2),
+  });
+
   const VIDEO_PROFILES = [
     { value: "single_ref", label: "单参考图 (Sora 类)" },
     { value: "multi_ref", label: "多参考图 1~N (SD 类)" },
@@ -1008,6 +1076,11 @@ export default function ModelsPage() {
     { value: "omni_reference", label: "Omni 参考图 1~7 张 (文生 / 参考图)" },
     { value: "seedance_2", label: "Seedance 2.0 多模态组合" },
     { value: "minimax_h3", label: "MiniMax-H3 V2 多模态组合" },
+    { value: "aliyun_multimodal", label: "阿里云 Wan 3.0 多模态组合" },
+    { value: "aliyun_happyhorse_text", label: "HappyHorse 文生视频" },
+    { value: "aliyun_happyhorse_first_frame", label: "HappyHorse 首帧生视频" },
+    { value: "aliyun_happyhorse_reference", label: "HappyHorse 参考生视频" },
+    { value: "aliyun_happyhorse_edit", label: "HappyHorse 视频编辑" },
     { value: "none", label: "不上传图片" },
   ];
 
@@ -1026,6 +1099,7 @@ export default function ModelsPage() {
       ref_audio_max: Number(((video.reference_audios ?? {}) as Record<string, any>).max ?? 3),
       mode_param: String(video.mode_param || "generation_mode"),
       prompt_hint: video.prompt_hint || "",
+      prompt_required: video.prompt_required !== false,
       show_channel: video.show_channel === true,
       show_web_search: video.show_web_search === true,
       count_options: Array.isArray(video.count_options)
@@ -1093,7 +1167,7 @@ export default function ModelsPage() {
           max_total_images: next.max_total_images,
           count_toward_total: true,
           prompt_hint: next.prompt_hint,
-          prompt_required: true,
+          prompt_required: next.prompt_required,
           show_channel: next.show_channel,
           show_web_search: next.show_web_search,
           count_options: next.count_options?.length ? next.count_options : [1, 3, 5, 10, 30, 50],
@@ -1144,6 +1218,7 @@ export default function ModelsPage() {
       show_channel: audio.show_channel !== false,
       show_web_search: audio.show_web_search === true,
       show_upload: audio.show_upload === true,
+      prompt_required: audio.prompt_required !== false,
       count_options: Array.isArray(audio.count_options)
         ? audio.count_options.map((x: unknown) => Number(x)).filter((n: number) => Number.isFinite(n) && n >= 1)
         : [1, 3, 5, 10, 30, 50],
@@ -1180,7 +1255,7 @@ export default function ModelsPage() {
           prompt_hint: next.prompt_hint,
           secondary_prompt_hint: next.secondary_prompt_hint,
           secondary_prompt_key: next.secondary_prompt_key,
-          prompt_required: true,
+          prompt_required: next.prompt_required,
           billing_hint: next.billing_hint,
           show_channel: next.show_channel,
           show_web_search: next.show_web_search,
@@ -1757,6 +1832,84 @@ export default function ModelsPage() {
     price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
   });
 
+  const aliyunAudioConnection = (extra: string) => setConnection(extra, {
+    provider: "aliyun",
+    protocol: "custom_http",
+    base_url: aliyunWorkspaceBaseURL(extra),
+    auth_type: "bearer",
+    api_key_header: "Authorization",
+    models_endpoint: "",
+  });
+
+  const applyAliyunTTS = (prev: FormState, family: "qwen" | "cosyvoice"): FormState => {
+    const qwen = family === "qwen";
+    const voice = qwen ? "longanhuan_v3.6" : "longanyang";
+    const voices = qwen
+      ? ["longanfengyue", "longanyuanfei", "longanlingxi", "longanxiaoxin", "longanhuan_v3.6", "longjielidou_v3.6", "longpaopao_v3.6", "longhuohuo_v3.6", "longchuanshu_v3.6", "loongmary", "loongeva_v3.6", "loongjohn"]
+      : ["longanyang", "longanhuan_v3", "longanhuan", "longhuhu_v3", "longpaopao_v3", "longjielidou_v3", "longjiaxin_v3", "longanyue_v3", "longshange_v3", "loongabby_v3", "loongandy_v3"];
+    const voiceLabels = qwen
+      ? { longanfengyue: "龙安风悦", longanyuanfei: "龙安元妃", longanlingxi: "龙安灵希", longanxiaoxin: "龙安小昕", "longanhuan_v3.6": "龙安欢", "longjielidou_v3.6": "龙杰力豆", "longpaopao_v3.6": "龙泡泡", "longhuohuo_v3.6": "龙火火", "longchuanshu_v3.6": "龙川叔", loongmary: "Mary", "loongeva_v3.6": "Eva", loongjohn: "John" }
+      : { longanyang: "龙安洋", longanhuan_v3: "龙安欢 V3", longanhuan: "龙安欢", longhuhu_v3: "龙呼呼", longpaopao_v3: "龙泡泡", longjielidou_v3: "龙杰力豆", longjiaxin_v3: "龙嘉欣", longanyue_v3: "龙安粤", longshange_v3: "龙陕哥", loongabby_v3: "Abby", loongandy_v3: "Andy" };
+    return {
+      ...prev,
+      category: "audio",
+      request_mode: "audio",
+      new_api_model: qwen ? "qwen-audio-3.0-tts-flash" : "cosyvoice-v3-flash",
+      new_api_endpoint: "/api/v1/services/audio/tts/SpeechSynthesizer",
+      new_api_extra_params: aliyunAudioConnection(prev.new_api_extra_params),
+      runtime_rule: setAudioRule(clearModelCaps(prev.runtime_rule), {
+        input_layout: "single", billing_hint: "per_token", prompt_hint: "输入需要合成的文本，选择音色、格式和采样率",
+        show_channel: false, show_web_search: false, show_upload: false,
+        count_options: [1], count_allow_custom: false, count_max: 1,
+        upstream_include: ["voice", "format", "sample_rate", "instruction"],
+        upstream_map: JSON.stringify({ prompt: "input.text", voice: "input.voice", format: "input.format", sample_rate: "input.sample_rate", instruction: "input.instruction" }, null, 2),
+      }),
+      input_schema: JSON.stringify({
+        type: "object",
+        properties: {
+          voice: { type: "string", title: "音色", enum: voices, enumLabels: voiceLabels, default: voice, "x-order": 1, "x-widget": "option_menu", "x-icon": "voice", "x-placement": "top", "x-highlight": true },
+          format: { type: "string", title: "输出格式", enum: ["wav", "mp3", "pcm"], enumLabels: { wav: "WAV", mp3: "MP3", pcm: "PCM" }, default: "wav", "x-order": 2, "x-widget": "option_menu", "x-icon": "format" },
+          sample_rate: { type: "integer", title: "采样率", enum: [16000, 22050, 24000, 48000], enumLabels: { "16000": "16 kHz", "22050": "22.05 kHz", "24000": "24 kHz", "48000": "48 kHz" }, default: 24000, "x-order": 3, "x-widget": "option_menu", "x-icon": "audio" },
+          instruction: { type: "string", title: "表达指令", description: "可选：用中文或英文描述语速、情绪、方言或角色风格", "x-order": 4 },
+        },
+      }, null, 2),
+      default_params: JSON.stringify({ voice, format: "wav", sample_rate: 24000 }, null, 2),
+      price_rule: JSON.stringify({ billing_type: "per_token", currency: "¥", input_price_per_m: 2, output_price_per_m: 4 }, null, 2),
+    };
+  };
+
+  const applyAliyunFunMusic = (prev: FormState): FormState => ({
+    ...prev,
+    category: "audio",
+    request_mode: "audio",
+    new_api_model: "fun-music-v1",
+    new_api_endpoint: "/api/v1/services/audio/music/generation",
+    new_api_extra_params: aliyunAudioConnection(prev.new_api_extra_params),
+    runtime_rule: withAudioUpstreamPatch(
+      setAudioRule(clearModelCaps(prev.runtime_rule), {
+        input_layout: "dual", billing_hint: "estimated",
+        prompt_hint: "描述音乐风格、场景、情绪和乐器偏好",
+        secondary_prompt_hint: "可选：输入自定义歌词。填写后将优先按歌词生成",
+        secondary_prompt_key: "lyrics", show_channel: false, show_web_search: false, show_upload: false, prompt_required: false,
+        count_options: [1], count_allow_custom: false, count_max: 1,
+        upstream_include: ["lyrics", "gender", "is_instrumental", "format", "enable_aigc_watermark"],
+        upstream_map: JSON.stringify({ prompt: "input.prompt", lyrics: "input.lyrics", gender: "input.gender", is_instrumental: "input.is_instrumental", format: "input.format", enable_aigc_watermark: "input.enable_aigc_watermark" }, null, 2),
+      }),
+      { request_timeout_sec: 900 }
+    ),
+    input_schema: JSON.stringify({
+      type: "object",
+      properties: {
+        gender: { type: "string", title: "演唱声线", enum: ["female", "male"], enumLabels: { female: "女声", male: "男声" }, default: "female", "x-order": 1, "x-widget": "option_menu", "x-icon": "voice", "x-placement": "top", "x-highlight": true },
+        is_instrumental: { type: "boolean", title: "纯音乐", default: false, "x-order": 2, "x-widget": "boolean_toggle", "x-icon": "mode" },
+        format: { type: "string", title: "输出格式", enum: ["mp3", "wav"], enumLabels: { mp3: "MP3", wav: "WAV" }, default: "mp3", "x-order": 3, "x-widget": "option_menu", "x-icon": "format" },
+        enable_aigc_watermark: { type: "boolean", title: "AIGC 水印", default: false, "x-order": 4, "x-widget": "boolean_toggle", "x-icon": "audio" },
+      },
+    }, null, 2),
+    default_params: JSON.stringify({ gender: "female", is_instrumental: false, format: "mp3", enable_aigc_watermark: false }, null, 2),
+    price_rule: JSON.stringify({ billing_type: "per_request", currency: "¥", unit_price: 1 }, null, 2),
+  });
+
   const applyVideoStandard = (prev: FormState): FormState => ({
     ...prev,
     category: "video",
@@ -1798,6 +1951,87 @@ export default function ModelsPage() {
     ),
     default_params: JSON.stringify({ count: 1, duration: "4s", orientation: "portrait" }, null, 2),
     price_rule: JSON.stringify({ billing_type: "per_second", unit_price: 0.08 }, null, 2),
+  });
+
+  const aliyunVideoConnection = (extra: string) => setConnection(extra, {
+    provider: "aliyun",
+    protocol: "custom_http",
+    base_url: aliyunWorkspaceBaseURL(extra),
+    auth_type: "bearer",
+    api_key_header: "Authorization",
+    models_endpoint: "",
+    headers: { "X-DashScope-Async": "enable" },
+  });
+
+  const applyAliyunHappyHorse = (prev: FormState, profile: HappyHorseProfile): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    new_api_model: profile === "first_frame" ? "happyhorse-1.1-i2v" : profile === "reference" ? "happyhorse-1.1-r2v" : profile === "edit" ? "happyhorse-1.0-video-edit" : "happyhorse-1.1-t2v",
+    new_api_endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+    new_api_extra_params: aliyunVideoConnection(prev.new_api_extra_params),
+    input_schema: JSON.stringify({
+      type: "object",
+      properties: {
+        resolution: { type: "string", title: "分辨率", enum: profile === "edit" ? ["720P", "1080P"] : ["480P", "720P", "1080P"], default: "1080P", "x-order": 1, "x-widget": "option_menu", "x-icon": "4k", "x-highlight": true },
+        ...((profile === "text" || profile === "reference") ? { ratio: { type: "string", title: "画面比例", enum: ["16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9"], default: "16:9", "x-order": 2, "x-widget": "option_menu", "x-icon": "ratio" } } : {}),
+        ...(profile !== "edit" ? { duration: { type: "integer", title: "视频时长", enum: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], default: 5, "x-order": 3, "x-widget": "option_menu", "x-icon": "clock" } } : {}),
+        ...(profile === "edit" ? { audio_setting: { type: "string", title: "声音设置", enum: ["auto", "origin"], enumLabels: { auto: "自动", origin: "保留原声" }, default: "auto", "x-order": 3, "x-widget": "option_menu", "x-icon": "music" } } : {}),
+        watermark: { type: "boolean", title: "水印", default: true, "x-order": 4, "x-widget": "boolean_toggle", "x-icon": "target" },
+      },
+    }, null, 2),
+    default_params: JSON.stringify({ resolution: "1080P", ...((profile === "text" || profile === "reference") ? { ratio: "16:9" } : {}), ...(profile !== "edit" ? { duration: 5 } : { audio_setting: "auto" }), watermark: true }, null, 2),
+    runtime_rule: JSON.stringify({
+      video: {
+        upload_profile: `aliyun_happyhorse_${profile}`,
+        min_reference_images: profile === "reference" ? 1 : 0,
+        max_reference_images: profile === "first_frame" ? 1 : profile === "reference" ? 9 : profile === "edit" ? 5 : 0,
+        prompt_required: profile !== "first_frame",
+        prompt_hint: profile === "first_frame" ? "上传首帧图片，可补充描述人物动作、镜头运动和视频效果" : profile === "reference" ? "上传 1～9 张参考图，并在提示词中用 [Image 1] 指代" : profile === "edit" ? "上传一个待编辑视频，可选 0～5 张参考图，并描述编辑指令" : "描述画面内容、主体动作、镜头运动和视觉风格",
+        show_channel: false,
+        show_web_search: false,
+        count_options: [1], count_allow_custom: false, count_max: 1,
+        frames: { first: { key: "first_frame", label: "首帧", max: 1 } },
+        reference_images: { key: "reference_images", max: profile === "reference" ? 9 : profile === "edit" ? 5 : 0 },
+        reference_videos: { key: "reference_videos", max: profile === "edit" ? 1 : 0 },
+      },
+      upstream: { adapter: "aliyun_video_generation", poll_path: "/api/v1/tasks/{id}", poll_interval_sec: 15, poll_timeout_sec: 1800, request_timeout_sec: 120 },
+      capabilities: { web_search: false, deep_think: false },
+    }, null, 2),
+    price_rule: JSON.stringify({ billing_type: "per_second", currency: "¥", unit_price: 0.1 }, null, 2),
+  });
+
+  const applyAliyunWan3Video = (prev: FormState): FormState => ({
+    ...prev,
+    category: "video",
+    request_mode: "video",
+    new_api_model: "wan3.0-video",
+    new_api_endpoint: "/api/v1/services/aigc/video-generation/video-synthesis",
+    new_api_extra_params: aliyunVideoConnection(prev.new_api_extra_params),
+    input_schema: JSON.stringify({
+      type: "object",
+      properties: {
+        generation_mode: { type: "string", title: "生成模式", enum: ["text", "first_frame", "first_last", "reference"], enumLabels: { text: "文生视频", first_frame: "首帧生视频", first_last: "首尾帧", reference: "多模态参考" }, default: "text", "x-order": 1, "x-widget": "option_menu", "x-icon": "sparkles", "x-highlight": true },
+        resolution: { type: "string", title: "分辨率", enum: ["480P", "720P", "1080P"], default: "1080P", "x-order": 2, "x-widget": "option_menu", "x-icon": "4k" },
+        ratio: { type: "string", title: "画面比例", enum: ["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16"], enumLabels: { adaptive: "自适应", "16:9": "16:9", "4:3": "4:3", "1:1": "1:1", "3:4": "3:4", "9:16": "9:16" }, default: "adaptive", "x-order": 3, "x-widget": "option_menu", "x-icon": "ratio" },
+        duration: { type: "integer", title: "视频时长", enum: [-1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30], enumLabels: { "-1": "智能时长" }, default: -1, "x-order": 4, "x-widget": "option_menu", "x-icon": "clock" },
+        audio: { type: "boolean", title: "生成音频", default: true, "x-order": 5, "x-widget": "boolean_toggle", "x-icon": "music" },
+        prompt_extend: { type: "boolean", title: "智能改写", default: true, "x-order": 6, "x-widget": "boolean_toggle", "x-icon": "wand" },
+      },
+    }, null, 2),
+    default_params: JSON.stringify({ generation_mode: "text", resolution: "1080P", ratio: "adaptive", duration: -1, audio: true, prompt_extend: true }, null, 2),
+    runtime_rule: JSON.stringify({
+      video: {
+        upload_profile: "aliyun_multimodal", min_reference_images: 0, max_reference_images: 10, max_total_images: 20, prompt_required: true,
+        prompt_hint: "描述目标视频，可结合首尾帧或图片、视频、音频参考素材",
+        show_channel: false, show_web_search: false, count_options: [1], count_allow_custom: false, count_max: 1,
+        frames: { first: { key: "first_frame", label: "首帧", max: 1 }, last: { key: "last_frame", label: "尾帧", max: 1 } },
+        reference_images: { key: "reference_images", max: 10 }, reference_videos: { key: "reference_videos", max: 5 }, reference_audios: { key: "reference_audios", max: 5 }, mode_param: "generation_mode",
+      },
+      upstream: { adapter: "aliyun_video_generation", poll_path: "/api/v1/tasks/{id}", poll_interval_sec: 15, poll_timeout_sec: 1800, request_timeout_sec: 120 },
+      capabilities: { web_search: false, deep_think: false },
+    }, null, 2),
+    price_rule: JSON.stringify({ billing_type: "per_second", currency: "¥", unit_price: 0.1 }, null, 2),
   });
 
   const applyVeoReferenceV1 = (prev: FormState): FormState => ({
@@ -2459,6 +2693,7 @@ export default function ModelsPage() {
     const effectiveEndpoint = form.new_api_endpoint.trim();
     const isSeedance2 =
       form.category === "video" &&
+      parsedRuntimeRule?.upstream?.adapter !== "aliyun_video_generation" &&
       (parsedRuntimeRule?.upstream?.adapter === "volcengine_seedance_2" ||
         parsedRuntimeRule?.video?.upload_profile === "seedance_2");
     if (isSeedance2) {
@@ -2824,6 +3059,10 @@ export default function ModelsPage() {
       setErr("模型接入配置的 Base URL 为必填");
       return;
     }
+    if (!isMultiCollabForm && connection.provider === "aliyun" && !/^https:\/\/[^/{}]+\.maas\.aliyuncs\.com\/?$/i.test(connection.base_url.trim())) {
+      setErr("阿里云百炼模型必须填写带 WorkspaceId 的地域 Endpoint，例如 https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com");
+      return;
+    }
     if (!isMultiCollabForm && connection.auth_type !== "none" && !connection.api_key.trim()) {
       setErr("模型接入配置的 API Key 为必填");
       return;
@@ -2857,11 +3096,18 @@ export default function ModelsPage() {
         form.category === "image"
           ? {
               ...(runtimeRule as Record<string, unknown>),
-              image: {
-                ...(((runtimeRule as Record<string, any>)?.image ?? {}) as Record<string, unknown>),
-                max_reference_images: getImageRule(form.runtime_rule).max_reference_images,
-                default_quality: getImageRule(form.runtime_rule).default_quality,
-              },
+              image: isAliyunQwenImageForm()
+                ? {
+                    ...(((runtimeRule as Record<string, any>)?.image ?? {}) as Record<string, unknown>),
+                    max_reference_images: getImageRule(form.runtime_rule).max_reference_images,
+                    default_size: getImageRule(form.runtime_rule).default_size,
+                    default_quality: undefined,
+                  }
+                : {
+                    ...(((runtimeRule as Record<string, any>)?.image ?? {}) as Record<string, unknown>),
+                    max_reference_images: getImageRule(form.runtime_rule).max_reference_images,
+                    default_quality: getImageRule(form.runtime_rule).default_quality,
+                  },
               capabilities: {
                 ...(((runtimeRule as Record<string, any>)?.capabilities ?? {}) as Record<string, unknown>),
                 web_search: false,
@@ -3399,11 +3645,16 @@ export default function ModelsPage() {
                 "Base URL（必选）",
                 <input
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                  placeholder="例如：https://api.openai.com 或 https://xxx/v1 前缀"
+                  placeholder={getConnection(form.new_api_extra_params).provider === "aliyun" ? "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com" : "例如：https://api.openai.com 或 https://xxx/v1 前缀"}
                   value={getConnection(form.new_api_extra_params).base_url}
                   required
                   onChange={(e) => setForm((prev) => ({ ...prev, new_api_extra_params: setConnection(prev.new_api_extra_params, { base_url: e.target.value }) }))}
                 />
+              )}
+              {getConnection(form.new_api_extra_params).provider === "aliyun" && (
+                <div className="-mt-2 text-[11px] leading-5 text-amber-700">
+                  请填写与模型和 API Key 同地域的阿里云百炼 Workspace Endpoint，并将示例中的 WorkspaceId 替换为真实业务空间 ID。
+                </div>
               )}
               {field(
                 "API Key（必选）",
@@ -3757,7 +4008,7 @@ export default function ModelsPage() {
               <div className="space-y-2">
                 <select
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                  value={isBananaImageForm() ? "banana_async" : form.new_api_endpoint === "/v1/images/generations" ? "openai_images" : "custom"}
+                  value={isAliyunQwenImageForm() ? ALIYUN_QWEN_IMAGE_TEMPLATE_KEY : isBananaImageForm() ? "banana_async" : form.new_api_endpoint === "/v1/images/generations" ? "openai_images" : "custom"}
                   onChange={(e) => {
                     if (e.target.value === "custom") return;
                     setForm((prev) => applyImageEndpointPreset(prev, e.target.value));
@@ -3841,7 +4092,7 @@ export default function ModelsPage() {
                   <label className="text-xs text-gray-500">接口类型</label>
                   <select
                     className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                    value={isBananaImageForm() ? "banana_async" : "openai_images"}
+                    value={isAliyunQwenImageForm() ? ALIYUN_QWEN_IMAGE_TEMPLATE_KEY : isBananaImageForm() ? "banana_async" : "openai_images"}
                     onChange={(e) => setForm((prev) => applyImageEndpointPreset(prev, e.target.value))}
                   >
                     {IMAGE_ENDPOINT_PRESETS.map((preset) => (
@@ -3851,7 +4102,16 @@ export default function ModelsPage() {
                 </div>
                 <div>
                   <label className="text-xs text-gray-500">上游模型</label>
-                  {isBananaImageForm() ? (
+                  {isAliyunQwenImageForm() ? (
+                    <select
+                      className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
+                      value={form.new_api_model}
+                      onChange={(e) => setForm((prev) => ({ ...prev, new_api_model: e.target.value }))}
+                    >
+                      <option value="qwen-image-3.0-pro">qwen-image-3.0-pro</option>
+                      <option value="qwen-image-3.0">qwen-image-3.0</option>
+                    </select>
+                  ) : isBananaImageForm() ? (
                     <select
                       className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
                       value={form.new_api_model}
@@ -3905,23 +4165,25 @@ export default function ModelsPage() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-gray-500">默认质量</label>
+                  <label className="text-xs text-gray-500">{isAliyunQwenImageForm() ? "默认输出尺寸" : "默认质量"}</label>
                   <select
                     className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                    value={getImageRule(form.runtime_rule).default_quality}
+                    value={isAliyunQwenImageForm() ? getImageRule(form.runtime_rule).default_size : getImageRule(form.runtime_rule).default_quality}
                     onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }),
-                        default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2),
-                      }))
+                      setForm((prev) => {
+                        if (isAliyunQwenImageForm(prev)) {
+                          const rr = safeParseJson(prev.runtime_rule, {});
+                          return { ...prev, runtime_rule: JSON.stringify({ ...rr, image: { ...(rr.image || {}), default_size: e.target.value } }, null, 2), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), size: e.target.value }, null, 2) };
+                        }
+                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2) };
+                      })
                     }
                   >
-                    {IMAGE_QUALITY_TIERS.map((tier) => (
-                      <option key={tier} value={tier}>{tier}</option>
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : IMAGE_QUALITY_TIERS).map((tier) => (
+                      <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>
-                  <div className="text-[11px] text-gray-400 mt-1">前台工作台图片质量工具栏会默认选中该值。</div>
+                  <div className="text-[11px] text-gray-400 mt-1">{isAliyunQwenImageForm() ? "比例与分辨率合并为官方 size 参数；自动推荐时不向上游发送 size。" : "前台工作台图片质量工具栏会默认选中该值。"}</div>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500">每张扣费</label>
@@ -3981,23 +4243,25 @@ export default function ModelsPage() {
                   <div className="text-[11px] text-gray-400 mt-1">前台图片输入区会按该数量限制参考图上传。</div>
                 </div>
                 <div className="mt-4 max-w-xs">
-                  <label className="text-xs text-gray-500">默认质量</label>
+                  <label className="text-xs text-gray-500">{isAliyunQwenImageForm() ? "默认输出尺寸" : "默认质量"}</label>
                   <select
                     className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                    value={getImageRule(form.runtime_rule).default_quality}
+                    value={isAliyunQwenImageForm() ? getImageRule(form.runtime_rule).default_size : getImageRule(form.runtime_rule).default_quality}
                     onChange={(e) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }),
-                        default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2),
-                      }))
+                      setForm((prev) => {
+                        if (isAliyunQwenImageForm(prev)) {
+                          const rr = safeParseJson(prev.runtime_rule, {});
+                          return { ...prev, runtime_rule: JSON.stringify({ ...rr, image: { ...(rr.image || {}), default_size: e.target.value } }, null, 2), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), size: e.target.value }, null, 2) };
+                        }
+                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2) };
+                      })
                     }
                   >
-                    {IMAGE_QUALITY_TIERS.map((tier) => (
-                      <option key={tier} value={tier}>{tier}</option>
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : IMAGE_QUALITY_TIERS).map((tier) => (
+                      <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>
-                  <div className="text-[11px] text-gray-400 mt-1">也可直接在高级 JSON 里配置 runtime_rule.image.default_quality。</div>
+                  <div className="text-[11px] text-gray-400 mt-1">{isAliyunQwenImageForm() ? "官方允许 512×512 到 2048×2048 范围内的 size，预设均在有效范围内。" : "也可直接在高级 JSON 里配置 runtime_rule.image.default_quality。"}</div>
                 </div>
               </div>
             ) : form.category === "video" ? (
@@ -4025,6 +4289,10 @@ export default function ModelsPage() {
                           setForm((prev) => applyVeoFramePairV1(prev));
                         } else if (value === OMNI_REFERENCE_TEMPLATE_KEY) {
                           setForm((prev) => applyOmniReferenceV1(prev));
+                        } else if (value === ALIYUN_HAPPYHORSE_TEMPLATE_KEY) {
+                          setForm((prev) => applyAliyunHappyHorse(prev, "text"));
+                        } else if (value === ALIYUN_WAN3_TEMPLATE_KEY) {
+                          setForm((prev) => applyAliyunWan3Video(prev));
                         }
                       }}
                     >
@@ -4036,12 +4304,16 @@ export default function ModelsPage() {
                       <option value={SEEDANCE_VARIANTS.fast.templateKey}>火山方舟 · Doubao Seedance 2.0 Fast</option>
                       <option value={SEEDANCE_VARIANTS.mini.templateKey}>火山方舟 · Doubao Seedance 2.0 Mini</option>
                       <option value={MINIMAX_H3_TEMPLATE_KEY}>MiniMax 官方 · MiniMax-H3 V2</option>
+                      <option value={ALIYUN_HAPPYHORSE_TEMPLATE_KEY}>阿里云百炼 · HappyHorse 全场景</option>
+                      <option value={ALIYUN_WAN3_TEMPLATE_KEY}>阿里云百炼 · Wan 3.0 全能视频</option>
                     </select>
                     {(getSeedanceVariantByTemplateKey(videoTemplateKey) ||
                       videoTemplateKey === MINIMAX_H3_TEMPLATE_KEY ||
                       videoTemplateKey === VEO_FRAME_PAIR_TEMPLATE_KEY ||
                       videoTemplateKey === VEO_REFERENCE_TEMPLATE_KEY ||
-                      videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) && (
+                      videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY ||
+                      videoTemplateKey === ALIYUN_HAPPYHORSE_TEMPLATE_KEY ||
+                      videoTemplateKey === ALIYUN_WAN3_TEMPLATE_KEY) && (
                       <button
                         type="button"
                         className="shrink-0 rounded-lg border border-cyan-200 bg-white px-3 py-2 text-xs font-medium text-cyan-700 hover:bg-cyan-50"
@@ -4057,6 +4329,11 @@ export default function ModelsPage() {
                             setForm((prev) => applyVeoFramePairV1(prev));
                           } else if (videoTemplateKey === OMNI_REFERENCE_TEMPLATE_KEY) {
                             setForm((prev) => applyOmniReferenceV1(prev));
+                          } else if (videoTemplateKey === ALIYUN_HAPPYHORSE_TEMPLATE_KEY) {
+                            const profile = String(getVideoRule(form.runtime_rule).upload_profile).replace("aliyun_happyhorse_", "") as HappyHorseProfile;
+                            setForm((prev) => applyAliyunHappyHorse(prev, ["text", "first_frame", "reference", "edit"].includes(profile) ? profile : "text"));
+                          } else if (videoTemplateKey === ALIYUN_WAN3_TEMPLATE_KEY) {
+                            setForm((prev) => applyAliyunWan3Video(prev));
                           }
                         }}
                       >
@@ -4203,6 +4480,12 @@ export default function ModelsPage() {
                         if (profile === "omni_reference") {
                           setVideoTemplateKey(OMNI_REFERENCE_TEMPLATE_KEY);
                           setForm((prev) => applyOmniReferenceV1(prev));
+                          return;
+                        }
+                        if (profile.startsWith("aliyun_happyhorse_")) {
+                          const happyHorseProfile = profile.replace("aliyun_happyhorse_", "") as HappyHorseProfile;
+                          setVideoTemplateKey(ALIYUN_HAPPYHORSE_TEMPLATE_KEY);
+                          setForm((prev) => applyAliyunHappyHorse(prev, happyHorseProfile));
                           return;
                         }
                         setForm((prev) => ({
@@ -4465,6 +4748,12 @@ export default function ModelsPage() {
                             return applyAudioMinimaxOfficialMusicStandard(prev);
                           case "openai_audio_music":
                             return applyAudioMusicSpeechStandard(prev);
+                          case "aliyun_qwen_audio_tts":
+                            return applyAliyunTTS(prev, "qwen");
+                          case "aliyun_cosyvoice":
+                            return applyAliyunTTS(prev, "cosyvoice");
+                          case "aliyun_fun_music":
+                            return applyAliyunFunMusic(prev);
                           default:
                             return prev;
                         }
@@ -4477,9 +4766,12 @@ export default function ModelsPage() {
                     <option value="minimax_official_speech">MiniMax 官方 Speech 2.8 HD（api.minimaxi.com/v1/t2a_v2）</option>
                     <option value="minimax_official_tts">MiniMax / 海螺旧版兼容网关（/v1/audio/speech）</option>
                     <option value="openai_audio_speech">第三方 OpenAI 兼容 Speech（/v1/audio/speech，input/voice/metadata）</option>
+                    <option value="aliyun_qwen_audio_tts">阿里云百炼 · Qwen-Audio-TTS</option>
+                    <option value="aliyun_cosyvoice">阿里云百炼 · CosyVoice</option>
                     <option disabled>双文本框（音乐生成）</option>
                     <option value="minimax_official_music">MiniMax 官方 Music-2.6（/v1/music_generation）</option>
                     <option value="openai_audio_music">第三方 OpenAI 兼容 Music（/v1/audio/speech，metadata.lyrics）</option>
+                    <option value="aliyun_fun_music">阿里云百炼 · Fun-Music</option>
                   </select>
                   <div className="text-[11px] text-gray-400 mt-1">
                     模板会覆盖 endpoint、input_schema、default_params、runtime_rule；连接密钥仍在 new_api_extra_params.connection 中单独配置。

@@ -47,7 +47,7 @@ import { AudioOptionToolbar, AudioTopControls } from "./audio/AudioOptionToolbar
 import { AudioUploadButton } from "./audio/AudioUploadButton";
 import { VideoUploadArea } from "./video/VideoUploadArea";
 import { VideoOptionToolbar, VideoTopControls } from "./video/VideoOptionToolbar";
-import { ImageGenerationToolbar, buildImageGenerationParams, normalizeTier } from "./ImageGenerationToolbar";
+import { ImageGenerationToolbar, buildImageGenerationParams, normalizeTier, type ImageSizeTier } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
 
 interface Message {
@@ -874,6 +874,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     () => (isAudio ? singleResultAudioSchema(model.input_schema) : sizeBasedVideoSchema(model.input_schema, model.runtime_rule, model.default_params)),
     [isAudio, model.input_schema, model.runtime_rule, model.default_params]
   );
+  const imageOptionSchema = useMemo(() => {
+    if (!isImage) return {};
+    const source = (workbenchInputSchema || {}) as Record<string, any>;
+    const properties = { ...schemaProperties(source) };
+    for (const key of ["count", "n", "aspect_ratio", "image_size", "size", "quality", "max_reference_images"]) delete properties[key];
+    return { ...source, properties };
+  }, [isImage, workbenchInputSchema]);
   const hasSchemaFields = Object.keys(schemaProperties(workbenchInputSchema)).length > 0;
   const tag = CATEGORY_TAG[model.category] || { label: model.category, labelKey: `modelCategory.${model.category}`, className: "bg-gray-100 text-gray-600" };
   const modelName = td(`model.${model.code}.name`, model.display_name);
@@ -891,10 +898,21 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       rawMaxRefImages === undefined || rawMaxRefImages === null || rawMaxRefImages === "" ? 4 : Number(rawMaxRefImages) || 0
     )
   );
+  const imageRuntime = ((model.runtime_rule as any)?.image || {}) as Record<string, unknown>;
+  const isAliyunQwenImage = isImage && String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase() === "aliyun_qwen_image_v3";
+  const imageCountOptions = Array.isArray(imageRuntime.count_options)
+    ? imageRuntime.count_options.map(Number).filter((value) => Number.isFinite(value) && value > 0)
+    : undefined;
+  const imageCountMax = Math.max(1, Number(imageRuntime.count_max || 50));
+  const imageSizeTiers = Array.isArray(imageRuntime.supported_size_tiers)
+    ? imageRuntime.supported_size_tiers.filter((value): value is ImageSizeTier => ["1K", "2K", "4K"].includes(String(value)))
+    : undefined;
   const videoConfig = parseVideoRuntime(model.runtime_rule);
   const audioConfig = parseAudioRuntime(model.runtime_rule);
   const isSeedance2 = isVideo && videoConfig.upload_profile === "seedance_2";
   const isMiniMaxH3 = isVideo && videoConfig.upload_profile === "minimax_h3";
+  const isAliyunMultimodal = isVideo && videoConfig.upload_profile === "aliyun_multimodal";
+  const isAliyunHappyHorse = isVideo && String(videoConfig.upload_profile || "").startsWith("aliyun_happyhorse_");
   const isVeoReference = isVideo && videoConfig.upload_profile === "veo_reference";
   const videoAdapter = String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase();
   const veoIdentity = `${model.code} ${model.display_name}`.toLowerCase();
@@ -919,8 +937,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       }
     : videoConfig;
   const isOmniReference = isVideo && videoConfig.upload_profile === "omni_reference";
-  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference;
-  const videoMaterialMode = String(params[videoConfig.mode_param || "generation_mode"] || "text");
+  const isEnhancedVideoMaterial = isSeedance2 || isMiniMaxH3 || isAliyunMultimodal || isAliyunHappyHorse || isVeoReference || isOmniReference;
+  const fixedHappyHorseMode = videoConfig.upload_profile === "aliyun_happyhorse_first_frame"
+    ? "first_frame"
+    : videoConfig.upload_profile === "aliyun_happyhorse_reference" || videoConfig.upload_profile === "aliyun_happyhorse_edit"
+      ? "reference"
+      : "text";
+  const videoMaterialMode = String(isAliyunHappyHorse ? fixedHappyHorseMode : params[videoConfig.mode_param || "generation_mode"] || "text");
   const veoFirstFrameAssets = useMemo(
     () => (videoMedia.first_frame ? [videoMedia.first_frame] : []),
     [videoMedia.first_frame]
@@ -1009,6 +1032,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
         ? {
             ...params,
             ...buildImageGenerationParams({ count: imageCount, ratio: imageRatio, imageSize }),
+            ...(isAliyunQwenImage ? { aspect_ratio: undefined, image_size: undefined, size: params.size === "auto" ? undefined : params.size } : {}),
             ...languageParams,
             ...(refImages.length ? { reference_images: refImages.map((x) => x.url) } : {}),
             ...selectedAssets,
@@ -1048,6 +1072,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     isVideo,
     isImage,
     isAudio,
+    isAliyunQwenImage,
     model.runtime_rule,
     imageCount,
     imageRatio,
@@ -1665,7 +1690,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       return;
     }
     if (!isVideo && !isAudio && !prompt.trim()) return;
-    if (isMiniMaxH3) {
+    if (isVideo && videoMedia.reference_images.length < (videoConfig.min_reference_images || 0)) {
+      alert(t("canvas.node.referenceVisualRequired"));
+      return;
+    }
+    if (isMiniMaxH3 || isAliyunMultimodal || isAliyunHappyHorse) {
       if (videoMaterialMode === "first_frame" && !videoMedia.first_frame?.url) {
         alert(t("canvas.node.firstFrameRequired"));
         return;
@@ -1681,11 +1710,16 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       if (
         videoMaterialMode === "reference" &&
         videoMedia.reference_images.length === 0 &&
-        videoMedia.reference_videos.length === 0
+        videoMedia.reference_videos.length === 0 &&
+        videoMedia.reference_audios.length === 0
       ) {
         alert(t("canvas.node.referenceVisualRequired"));
         return;
       }
+    }
+    if (videoConfig.upload_profile === "aliyun_happyhorse_edit" && videoMedia.reference_videos.length !== 1) {
+      alert(ts("视频编辑需要上传一个待编辑视频"));
+      return;
     }
     if (isVeoFramePair && !videoMedia.first_frame?.url) {
       alert(t("canvas.node.firstFrameRequired"));
@@ -1709,6 +1743,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
       const imageParams = isImage
         ? {
             ...buildImageGenerationParams({ count: imageCount, ratio: imageRatio, imageSize }),
+            ...(isAliyunQwenImage ? { aspect_ratio: undefined, image_size: undefined, size: params.size === "auto" ? undefined : params.size } : {}),
             ...buildLanguageParams(selectedLanguage),
             user_prompt: prompt,
             ...(bottom.role_prompt ? { role_prompt: bottom.role_prompt } : {}),
@@ -2423,6 +2458,48 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                               />
                             ) : null}
                           </>
+                        ) : (isAliyunMultimodal || isAliyunHappyHorse) ? (
+                          <>
+                            {(videoMaterialMode === "first_frame" || videoMaterialMode === "first_last") && (
+                              <ChatTopTools
+                                value={bottom}
+                                onChange={setBottom}
+                                showUpload={false}
+                                showRole={false}
+                                referencePickMode
+                                referenceImages={veoFirstFrameAssets}
+                                onReferenceImagesChange={(images) => setVideoMedia((prev) => ({ ...prev, first_frame: images[0] || null }))}
+                                maxReferenceImages={1}
+                                assetLibraryLabel={`${t("video.firstFrame")} · ${t("asset.library")}`}
+                              />
+                            )}
+                            {videoMaterialMode === "first_last" && (
+                              <ChatTopTools
+                                value={bottom}
+                                onChange={setBottom}
+                                showUpload={false}
+                                showRole={false}
+                                referencePickMode
+                                referenceImages={veoLastFrameAssets}
+                                onReferenceImagesChange={(images) => setVideoMedia((prev) => ({ ...prev, last_frame: images[0] || null }))}
+                                maxReferenceImages={1}
+                                assetLibraryLabel={`${t("video.lastFrame")} · ${t("asset.library")}`}
+                              />
+                            )}
+                            {videoMaterialMode === "reference" && (
+                              <ChatTopTools
+                                value={bottom}
+                                onChange={setBottom}
+                                showUpload={false}
+                                showRole={false}
+                                referencePickMode
+                                referenceImages={videoMedia.reference_images}
+                                onReferenceImagesChange={(images) => setVideoMedia((prev) => ({ ...prev, reference_images: images }))}
+                                maxReferenceImages={videoConfig.reference_images?.max ?? maxVideoAssetRefs}
+                                assetLibraryLabel={`${t("video.referenceImage")} · ${t("asset.library")}`}
+                              />
+                            )}
+                          </>
                         ) : (
                           <ChatTopTools
                             value={bottom}
@@ -2624,7 +2701,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                 className={
                   isMultiCollab
                     ? "w-full min-w-0 scroll-x-only sm:flex-1 sm:overflow-visible"
-                    : "flex flex-1 items-center gap-1.5 sm:gap-2 flex-wrap min-w-0"
+                    : "scroll-x-only flex flex-1 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto sm:flex-wrap sm:gap-2 sm:overflow-visible"
                 }
               >
                 {isMultiCollab && <BottomBar value={bottom} onChange={setBottom} showWebSearch={false} showTimeout={false} />}
@@ -2668,7 +2745,13 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       onRatioChange={setImageRatio}
                       imageSize={imageSize}
                       onImageSizeChange={setImageSize}
+                      exactSize={isAliyunQwenImage ? String(params.size || "auto") : undefined}
+                      onExactSizeChange={isAliyunQwenImage ? (value) => setParams({ ...params, size: value }) : undefined}
+                      countOptions={imageCountOptions}
+                      countMax={imageCountMax}
+                      sizeTiers={imageSizeTiers}
                     />
+                    <VideoOptionToolbar schema={imageOptionSchema} values={params} onChange={setParams} />
                     <GenerationLanguageMenu languages={generationLanguages} value={languageCode} onChange={setLanguageCode} />
                   </>
                 )}

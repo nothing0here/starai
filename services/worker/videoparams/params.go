@@ -86,10 +86,127 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "omni_reference_v1") {
 		out = buildOmniReferencePayload(out, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "aliyun_qwen_image_v3") {
+		out = buildAliyunQwenImagePayload(modelName, params)
+	}
+	if strings.EqualFold(upCfg.Adapter, "aliyun_video_generation") {
+		out = buildAliyunVideoPayload(modelName, params)
+	}
+	modelLower := strings.ToLower(modelName)
+	if instruction, ok := params["instruction"]; ok && (strings.Contains(modelLower, "qwen-audio") || strings.Contains(modelLower, "cosyvoice")) && !omitAutoValue(instruction) {
+		setPayloadValue(out, "input.instruction", instruction)
+	}
 	if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" {
 		out["_video_upload_profile"] = uploadProfile
 	}
 	return SanitizeUpstreamPayload(out, "")
+}
+
+func buildAliyunQwenImagePayload(model string, params map[string]interface{}) map[string]interface{} {
+	content := make([]interface{}, 0, 4)
+	for _, image := range mediaURLList(params["reference_images"]) {
+		content = append(content, map[string]interface{}{"image": image})
+	}
+	content = append(content, map[string]interface{}{"text": strings.TrimSpace(fmt.Sprint(params["prompt"]))})
+	parameters := map[string]interface{}{}
+	for _, key := range []string{"prompt_extend", "prompt_extend_mode", "enable_thinking", "negative_prompt", "seed", "watermark"} {
+		if value, ok := params[key]; ok && !omitAutoValue(value) {
+			parameters[key] = value
+		}
+	}
+	// Qwen Image reference-image editing only supports direct prompt extension.
+	if len(content) > 1 && parameters["prompt_extend_mode"] == "agent" {
+		parameters["prompt_extend_mode"] = "direct"
+	}
+	if count := intValue(firstNonNil(params["n"], params["count"])); count > 0 {
+		parameters["n"] = count
+	}
+	if size := strings.TrimSpace(fmt.Sprint(params["size"])); size != "" && size != "<nil>" && !strings.EqualFold(size, "auto") {
+		parameters["size"] = strings.ReplaceAll(strings.ToLower(size), "x", "*")
+	}
+	return map[string]interface{}{
+		"model": model,
+		"input": map[string]interface{}{"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": content},
+		}},
+		"parameters": parameters,
+	}
+}
+
+func buildAliyunVideoPayload(model string, params map[string]interface{}) map[string]interface{} {
+	modelLower := strings.ToLower(model)
+	input := map[string]interface{}{}
+	if prompt := strings.TrimSpace(fmt.Sprint(params["prompt"])); prompt != "" && prompt != "<nil>" {
+		input["prompt"] = prompt
+	}
+	media := make([]interface{}, 0, 12)
+	add := func(kind string, raw interface{}, max int) {
+		items := mediaURLList(raw)
+		if max > 0 && len(items) > max {
+			items = items[:max]
+		}
+		for _, item := range items {
+			media = append(media, map[string]interface{}{"type": kind, "url": item})
+		}
+	}
+	add("first_frame", params["first_frame"], 1)
+	add("last_frame", params["last_frame"], 1)
+	if strings.Contains(modelLower, "happyhorse") && strings.Contains(modelLower, "i2v") {
+		if len(media) == 0 {
+			add("first_frame", params["reference_images"], 1)
+		}
+	} else {
+		maxImages := 10
+		if strings.Contains(modelLower, "happyhorse") && strings.Contains(modelLower, "r2v") {
+			maxImages = 9
+		}
+		if strings.Contains(modelLower, "happyhorse") && strings.Contains(modelLower, "video-edit") {
+			maxImages = 5
+		}
+		add("reference_image", params["reference_images"], maxImages)
+	}
+	if strings.Contains(modelLower, "happyhorse") && strings.Contains(modelLower, "video-edit") {
+		add("video", params["reference_videos"], 1)
+	} else {
+		add("reference_video", params["reference_videos"], 5)
+	}
+	add("reference_audio", params["reference_audios"], 5)
+	if len(media) > 0 {
+		input["media"] = media
+	}
+	parameters := map[string]interface{}{}
+	for _, key := range []string{"resolution", "ratio", "duration", "prompt_extend", "audio", "audio_setting", "watermark", "seed"} {
+		if value, ok := params[key]; ok && !omitAutoValue(value) {
+			parameters[key] = value
+		}
+	}
+	return map[string]interface{}{"model": model, "input": input, "parameters": parameters}
+}
+
+func firstNonNil(values ...interface{}) interface{} {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func intValue(value interface{}) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		n, _ := typed.Int64()
+		return int(n)
+	default:
+		n, _ := strconv.Atoi(strings.TrimSpace(fmt.Sprint(value)))
+		return n
+	}
 }
 
 // SanitizeUpstreamPayload removes platform-only fields and normalizes common video API shapes.

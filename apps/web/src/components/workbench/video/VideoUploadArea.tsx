@@ -333,8 +333,9 @@ export function VideoUploadArea({
     );
   }
 
-  if (profile === "minimax_h3") {
-    const activeMode = mode || "text";
+  if (profile === "minimax_h3" || profile === "aliyun_multimodal" || profile.startsWith("aliyun_happyhorse_")) {
+    const profileMode = profile === "aliyun_happyhorse_first_frame" ? "first_frame" : profile === "aliyun_happyhorse_reference" || profile === "aliyun_happyhorse_edit" ? "reference" : "text";
+    const activeMode = mode || profileMode;
     if (activeMode === "text") return null;
     if (activeMode === "first_frame" || activeMode === "last_frame" || activeMode === "first_last") {
       const showFirst = activeMode === "first_frame" || activeMode === "first_last";
@@ -361,6 +362,18 @@ export function VideoUploadArea({
             />
           )}
         </div>
+      );
+    }
+    if (profile === "aliyun_happyhorse_reference") {
+      return (
+        <ReferenceImageStack
+          images={media.reference_images}
+          max={config.reference_images?.max ?? 9}
+          uploading={uploading}
+          onUpload={(files) => uploadMany(files, config.reference_images?.max ?? 9)}
+          onRemove={removeRef}
+          compact
+        />
       );
     }
     return (
@@ -397,8 +410,8 @@ export function VideoUploadArea({
             />
           )}
         </div>
-        <ArrowRight size={13} className="shrink-0 text-gray-300" />
-        <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
+        {profile !== "aliyun_happyhorse_edit" && <ArrowRight size={13} className="shrink-0 text-gray-300" />}
+        {profile !== "aliyun_happyhorse_edit" && <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-1.5">
           {media.reference_audios.map((item, index) => (
             <FilledFileCard
               key={item.url}
@@ -420,7 +433,7 @@ export function VideoUploadArea({
               }
             />
           )}
-        </div>
+        </div>}
       </div>
     );
   }

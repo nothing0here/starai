@@ -15,6 +15,78 @@ import (
 	"github.com/starai/worker/internal/storage"
 )
 
+func TestParseQwenImageChoicesResponse(t *testing.T) {
+	items, taskID := parseUpstreamMedia([]byte(`{"output":{"choices":[{"message":{"role":"assistant","content":[{"image":"https://example.com/qwen.png"}]}}]},"request_id":"req-1"}`))
+	if taskID != "req-1" || len(items) != 1 || items[0].URL != "https://example.com/qwen.png" {
+		t.Fatalf("items=%#v taskID=%q", items, taskID)
+	}
+}
+
+func TestNormalizePayloadMediaEmbedsAliyunNestedImages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0, 'I', 'H', 'D', 'R'})
+	}))
+	defer server.Close()
+	payload := map[string]interface{}{"input": map[string]interface{}{
+		"media":    []interface{}{map[string]interface{}{"type": "first_frame", "url": server.URL + "/first.png"}},
+		"messages": []interface{}{map[string]interface{}{"content": []interface{}{map[string]interface{}{"image": server.URL + "/ref.png"}}}},
+	}}
+	if err := normalizePayloadMedia(context.Background(), payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	input := payload["input"].(map[string]interface{})
+	mediaURL := input["media"].([]interface{})[0].(map[string]interface{})["url"].(string)
+	messageURL := input["messages"].([]interface{})[0].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["image"].(string)
+	if !strings.HasPrefix(mediaURL, "data:image/png;base64,") || !strings.HasPrefix(messageURL, "data:image/png;base64,") {
+		t.Fatalf("nested images were not embedded: media=%q message=%q", mediaURL, messageURL)
+	}
+}
+
+func TestNormalizePayloadMediaRejectsPrivateAliyunVideo(t *testing.T) {
+	payload := map[string]interface{}{"input": map[string]interface{}{"media": []interface{}{
+		map[string]interface{}{"type": "reference_video", "url": "http://localhost:9000/assets/ref.mp4"},
+	}}}
+	if err := normalizePayloadMedia(context.Background(), payload, ""); err == nil || !strings.Contains(err.Error(), "MINIO_PUBLIC_URL") {
+		t.Fatalf("expected actionable private video error, got %v", err)
+	}
+}
+
+func TestAliyunWorkspaceEndpointValidation(t *testing.T) {
+	if !requiresAliyunWorkspaceEndpoint("qwen-image-3.0-pro") || !requiresAliyunWorkspaceEndpoint("wan3.0-video") || requiresAliyunWorkspaceEndpoint("gpt-image-1") {
+		t.Fatal("unexpected Aliyun workspace model detection")
+	}
+	if !isAliyunWorkspaceEndpoint("https://ws-123.cn-beijing.maas.aliyuncs.com") {
+		t.Fatal("valid workspace endpoint rejected")
+	}
+	for _, endpoint := range []string{"https://dashscope.aliyuncs.com", "http://ws-123.cn-beijing.maas.aliyuncs.com", "https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com"} {
+		if isAliyunWorkspaceEndpoint(endpoint) {
+			t.Fatalf("invalid workspace endpoint accepted: %s", endpoint)
+		}
+	}
+}
+
+func TestResolveImageGenerationInputPreservesExplicitSize(t *testing.T) {
+	input := map[string]interface{}{"size": "1536x1024", "aspect_ratio": "auto"}
+	resolveImageGenerationInput(input, nil, "/v1/images/generations", "gpt-image")
+	if input["size"] != "1536x1024" || input["resolved_size"] != "1536x1024" {
+		t.Fatalf("explicit API size was overwritten: %#v", input)
+	}
+}
+
+func TestApplyOpenAIImageOptionsKeepsThirdPartyParameters(t *testing.T) {
+	out := map[string]interface{}{}
+	applyOpenAIImageOptions(out, map[string]interface{}{
+		"quality": "hd", "style": "natural", "negative_prompt": "blur", "wait": true,
+	})
+	if out["quality"] != "hd" || out["style"] != "natural" || out["negative_prompt"] != "blur" {
+		t.Fatalf("third-party image options were lost: %#v", out)
+	}
+	if _, leaked := out["wait"]; leaked {
+		t.Fatalf("platform control leaked upstream: %#v", out)
+	}
+}
+
 func TestOmniReferenceUsesManagedAssetBytes(t *testing.T) {
 	store, err := storage.NewLocal(t.TempDir(), "http://127.0.0.1:1/uploads-local")
 	if err != nil {
@@ -335,6 +407,27 @@ func TestParseUpstreamMediaReadsRawMP3Audio(t *testing.T) {
 	}
 	if string(data[:3]) != "ID3" {
 		t.Fatalf("decoded head = %q", string(data[:3]))
+	}
+}
+
+func TestParseUpstreamMediaReadsAliyunNestedAudioURL(t *testing.T) {
+	body := []byte(`{"output":{"audio":{"data":"","expires_at":1774936147,"id":"audio_1","url":"https://example.com/result.mp3"},"finish_reason":"stop"},"request_id":"req_1"}`)
+
+	items, upstreamID := parseUpstreamMedia(body)
+	if upstreamID != "req_1" {
+		t.Fatalf("upstreamID = %q, want req_1", upstreamID)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.com/result.mp3" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
+func TestSameOriginURLProtectsAuthorizationHeader(t *testing.T) {
+	if !sameOriginURL("https://dashscope.aliyuncs.com/api/v1/tasks/1", "https://dashscope.aliyuncs.com/api/v1") {
+		t.Fatal("same DashScope origin should be authenticated")
+	}
+	if sameOriginURL("https://dashscope-result.oss-cn-beijing.aliyuncs.com/result.mp3?signature=x", "https://dashscope.aliyuncs.com/api/v1") {
+		t.Fatal("signed OSS result URL must not receive the upstream authorization header")
 	}
 }
 

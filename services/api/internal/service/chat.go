@@ -61,7 +61,9 @@ func (s *ChatService) CreateConversation(ctx context.Context, userID int64, mode
 
 func (s *ChatService) ListConversations(ctx context.Context, userID int64, modelCode string) ([]ConversationDTO, error) {
 	args := []interface{}{userID}
-	where := "c.user_id=$1"
+	// Abandoned requests can create a conversation before the upstream model
+	// answers. Keep those empty rows out of history: there is nothing to restore.
+	where := "c.user_id=$1 AND EXISTS (SELECT 1 FROM conversation_messages cm WHERE cm.conversation_id=c.id)"
 	if modelCode != "" {
 		args = append(args, modelCode)
 		where += fmt.Sprintf(" AND m.code=$%d", len(args))
@@ -893,5 +895,16 @@ func (s *ChatService) AppendConversationMessage(ctx context.Context, userID int6
 
 func (s *ChatService) DeleteConversation(ctx context.Context, userID int64, publicID string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM conversations WHERE public_id=$1 AND user_id=$2`, publicID, userID)
+	return err
+}
+
+// DeleteConversationIfEmpty removes an abandoned conversation without risking
+// a conversation that already contains user-visible history.
+func (s *ChatService) DeleteConversationIfEmpty(ctx context.Context, userID int64, publicID string) error {
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM conversations c
+		WHERE c.public_id=$1 AND c.user_id=$2
+		  AND NOT EXISTS (SELECT 1 FROM conversation_messages cm WHERE cm.conversation_id=c.id)`,
+		publicID, userID)
 	return err
 }

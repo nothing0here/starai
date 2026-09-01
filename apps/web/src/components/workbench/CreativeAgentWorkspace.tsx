@@ -121,6 +121,12 @@ function isMusicModel(model: Model) {
   return audio.input_layout === "dual" || /(music|suno|音乐|歌曲)/i.test(`${model.code} ${model.display_name || ""} ${(model.tags || []).join(" ")}`);
 }
 
+function activeAgentChatModel(chats: Model[], agent: AgentConfig) {
+  const enabled = (chats || []).filter((item) => item.is_enabled !== false && item.category === "chat" && item.code !== "multi_collab_chat" && !/多模型协作|multi.?collab/i.test(`${item.code} ${item.display_name || ""}`));
+  const configured = agent.runtime_config?.analysis_model_code;
+  return enabled.find((item) => item.code === configured)?.code || enabled.find((item) => item.code === "chat_demo_v1")?.code || enabled[0]?.code || "";
+}
+
 function generationLabel(type: string) {
   return type === "video" ? "视频" : type === "speech" ? "语音" : type === "music" ? "歌曲音乐" : "图片";
 }
@@ -272,7 +278,6 @@ export function CreativeAgentWorkspace({
     Promise.all([api<Model[]>("/api/models?category=chat"), api<Model[]>("/api/models?category=image"), api<Model[]>("/api/models?category=video"), api<Model[]>("/api/models?category=audio"), api<AgentConfig>("/api/agents/general_creative_agent"), api<User>("/api/me").catch(() => null), api<{ web_search_enabled?: boolean; web_search_unit_price?: number }>("/api/system-configs/public").catch((): { web_search_enabled?: boolean; web_search_unit_price?: number } => ({}))])
       .then(([chats, images, videos, audios, agent, currentUser, publicConfig]) => {
         const enabled = (items: Model[]) => (items || []).filter((item) => item.is_enabled !== false);
-        const nextChats = enabled(chats).filter((item) => item.category === "chat" && item.code !== "multi_collab_chat" && !/多模型协作|multi.?collab/i.test(`${item.code} ${item.display_name || ""}`));
         const nextImages = enabled(images);
         const nextVideos = enabled(videos);
         const nextAudios = enabled(audios);
@@ -283,7 +288,7 @@ export function CreativeAgentWorkspace({
         setSpeechModels(nextSpeech);
         setMusicModels(nextMusic);
         const config = agent.runtime_config || {};
-        setChatModelCode(nextChats.find((item) => item.code === config.analysis_model_code)?.code || nextChats.find((item) => item.code === "chat_demo_v1")?.code || nextChats[0]?.code || "");
+        setChatModelCode(activeAgentChatModel(chats, agent));
         const defaultImage = nextImages.find((item) => item.code === config.image_model_code)?.code || nextImages[0]?.code || "";
         const defaultVideo = nextVideos.find((item) => item.code === config.video_model_code)?.code || nextVideos[0]?.code || "";
         setImageModelCode(defaultImage);
@@ -507,7 +512,13 @@ export function CreativeAgentWorkspace({
     setHistoryOpen(false);
     setError("");
     try {
-      const conversation = await api<{ messages?: Array<{ role: string; content: string }> }>(`/api/chat/conversations/${publicID}`);
+      const [conversation, currentChatModel] = await Promise.all([
+        api<{ messages?: Array<{ role: string; content: string }> }>(`/api/chat/conversations/${publicID}`),
+        Promise.all([api<Model[]>("/api/models?category=chat"), api<AgentConfig>("/api/agents/general_creative_agent")])
+          .then(([chats, agent]) => activeAgentChatModel(chats, agent))
+          .catch(() => null),
+      ]);
+      if (currentChatModel !== null) setChatModelCode(currentChatModel);
       const restored: Message[] = [];
       const assetTargets: Array<{ messageIndex: number; assetIds: string[] }> = [];
       const taskTargets: Array<{ messageIndex: number; userMessageIndex: number; taskNo: string }> = [];

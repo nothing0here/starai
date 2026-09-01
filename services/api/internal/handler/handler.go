@@ -2220,10 +2220,21 @@ func (h *Handler) CreateTask(c *gin.Context) {
 	util.Created(c, task)
 }
 
-const creativeAgentPlannerPrompt = `你是 StarAI 的通用创作智能体。根据用户消息和已提供的素材，判断用户是想普通聊天、生成图片、生成视频、文本转语音还是生成歌曲音乐。
+const creativeAgentPlannerPromptTemplate = `你是 %s 的通用创作智能体。根据用户消息和已提供的素材，判断用户是想普通聊天、生成图片、生成视频、文本转语音还是生成歌曲音乐。
 只输出一个 JSON 对象，不要 Markdown，不要解释 JSON 以外的内容：
 {"intent":"chat|image|video|speech|music|clarify","reply":"给用户看的简短中文回复","prompt":"如果需要生成，整理后的完整生成内容，否则为空","params":{},"needs_confirm":true}
 规则：明确要出图时 intent=image，明确要做视频时 intent=video，朗读、配音或文本转语音时 intent=speech，写歌、生成歌曲或纯音乐时 intent=music；信息不足时 intent=clarify 并在 reply 中只追问最必要的问题；普通问题使用 chat。speech 的 prompt 必须是最终需要朗读的正文。music 的 prompt 应为完整歌词，纯音乐则为音乐描述并设置 params.is_instrumental=true；同时用 params.music_prompt 填写曲风、情绪和场景描述。params 只填写用户明确要求的 aspect_ratio、size、duration、count、music_prompt、is_instrumental 等，不要填写模型编码，不要编造素材 URL。系统提供的当前时间是唯一可信时间，不得用网页摘要猜测当前时间。`
+
+func creativeAgentPlannerPrompt(configValues map[string]interface{}) string {
+	brandName := strings.Join(strings.Fields(strings.TrimSpace(stringAny(configValues["site_name"]))), " ")
+	if brandName == "" {
+		brandName = "StarAI"
+	}
+	if chars := []rune(brandName); len(chars) > 80 {
+		brandName = string(chars[:80])
+	}
+	return fmt.Sprintf(creativeAgentPlannerPromptTemplate, brandName)
+}
 
 const creativeAgentSearchDecisionPrompt = `你是联网检索路由器。结合上下文判断最后一条用户消息是否必须查询互联网才能可靠回答。
 只输出 JSON：{"needs_search":true,"query":"独立、精确、可直接搜索的检索词","topic":"general|news|finance","time_range":"|day|week|month|year","include_domains":[]}
@@ -2318,6 +2329,7 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 		return
 	}
 	conversationID := strings.TrimSpace(req.ConversationID)
+	createdConversationID := ""
 	if conversationID == "" {
 		title := "Agent 通用智能体"
 		for i := len(req.Messages) - 1; i >= 0; i-- {
@@ -2332,7 +2344,15 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 			return
 		}
 		conversationID = conversation.PublicID
+		createdConversationID = conversation.PublicID
 	}
+	// The planner needs a conversation id for billing and streaming, but a
+	// failed upstream call must not leave an unopenable item in user history.
+	defer func() {
+		if createdConversationID != "" {
+			_ = h.chat.DeleteConversationIfEmpty(context.Background(), c.GetInt64("user_id"), createdConversationID)
+		}
+	}()
 	latestUserMessage := normalizedMessages[len(normalizedMessages)-1].Content
 	if directClock, ok := creativeAgentClockForQuestion(latestUserMessage, clock); req.PreferredType == "" && ok {
 		reply := creativeAgentClockReply(directClock)
@@ -2362,7 +2382,7 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 		})
 		return
 	}
-	plannerPrompt := creativeAgentPlannerPrompt
+	plannerPrompt := creativeAgentPlannerPrompt(configValues)
 	plannerPrompt += "\n" + creativeAgentClockContext(clock)
 	if req.PreferredType != "" {
 		plannerPrompt += "\n用户已在自定义模式指定生成类型为 " + req.PreferredType + "，intent 必须使用该类型。"
@@ -3794,7 +3814,8 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 	if prompt == "" && promptField != "prompt" {
 		prompt = strings.TrimSpace(stringAny(body["prompt"]))
 	}
-	if prompt == "" {
+	lyricsOnlyAudio := requestMode == "audio" && strings.TrimSpace(stringAny(body["lyrics"])) != ""
+	if prompt == "" && !lyricsOnlyAudio && requestMode != "video" {
 		if promptField == "input" {
 			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "input 不能为空")
 		} else {
@@ -3810,22 +3831,7 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 		openAPIError(c, http.StatusBadRequest, "model_not_found", "模型不存在或未启用，请检查 model 是否为后台模型编码或接入模型名")
 		return
 	}
-	params := map[string]interface{}{}
-	for k, v := range body {
-		if k == "model" || k == promptField {
-			continue
-		}
-		params[k] = v
-	}
-	if n, ok := params["n"]; ok {
-		params["count"] = n
-	}
-	if image, ok := params["image"]; ok {
-		params["reference_images"] = normalizeOpenAPIStringList(image)
-	}
-	if images, ok := params["images"]; ok {
-		params["reference_images"] = normalizeOpenAPIStringList(images)
-	}
+	params := normalizeOpenAPIMediaParams(body, model, requestMode, promptField)
 	if requestMode == "audio" {
 		params["input"] = prompt
 	}
@@ -3877,6 +3883,179 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 		// Async mode: return task_no for polling
 		c.JSON(http.StatusOK, openAPITaskResponse(task))
 	}
+}
+
+func normalizeOpenAPIMediaParams(body map[string]interface{}, model *service.ModelFull, requestMode, promptField string) map[string]interface{} {
+	params := map[string]interface{}{}
+	for key, value := range body {
+		switch key {
+		case "model", promptField, "wait", "response_format":
+			continue
+		}
+		params[key] = value
+	}
+	if n, ok := params["n"]; ok {
+		params["count"] = n
+		delete(params, "n")
+	}
+	if duration, ok := params["duration_seconds"]; ok {
+		if _, exists := params["duration"]; !exists {
+			params["duration"] = duration
+		}
+		delete(params, "duration_seconds")
+	}
+	for _, key := range []string{"reference_images", "reference_videos", "reference_audios"} {
+		if value, ok := params[key]; ok {
+			params[key] = normalizeOpenAPIStringList(value)
+		}
+	}
+	for singular, plural := range map[string]string{
+		"reference_image": "reference_images", "reference_video": "reference_videos", "reference_audio": "reference_audios",
+	} {
+		if value, ok := params[singular]; ok {
+			if _, exists := params[plural]; !exists {
+				params[plural] = normalizeOpenAPIStringList(value)
+			}
+			delete(params, singular)
+		}
+	}
+	for alias, canonical := range map[string]string{"first_frame_image": "first_frame", "last_frame_image": "last_frame"} {
+		if value, ok := params[alias]; ok {
+			if _, exists := params[canonical]; !exists {
+				params[canonical] = firstOpenAPIString(value)
+			}
+			delete(params, alias)
+		}
+	}
+	for _, key := range []string{"first_frame", "last_frame"} {
+		if value, ok := params[key]; ok {
+			params[key] = firstOpenAPIString(value)
+		}
+	}
+
+	videoRule, _ := model.RuntimeRule["video"].(map[string]interface{})
+	profile := strings.ToLower(strings.TrimSpace(stringAny(videoRule["upload_profile"])))
+	imageValues := []string{}
+	for _, key := range []string{"images", "image_url", "image"} {
+		if values := normalizeOpenAPIStringList(params[key]); len(values) > 0 {
+			imageValues = values
+			break
+		}
+	}
+	if len(imageValues) > 0 {
+		frameProfile := profile == "frame_pair" || profile == "veo_frame_pair" || profile == "aliyun_happyhorse_first_frame"
+		mode := strings.ToLower(strings.TrimSpace(stringAny(params["generation_mode"])))
+		if frameProfile || mode == "first_frame" || mode == "first_last" {
+			if strings.TrimSpace(stringAny(params["first_frame"])) == "" {
+				params["first_frame"] = imageValues[0]
+			}
+			if len(imageValues) > 1 && strings.TrimSpace(stringAny(params["last_frame"])) == "" {
+				params["last_frame"] = imageValues[1]
+			}
+		} else if _, exists := params["reference_images"]; !exists {
+			params["reference_images"] = imageValues
+		}
+	}
+	delete(params, "image")
+	delete(params, "images")
+	delete(params, "image_url")
+
+	if requestMode == "video" {
+		modeKey := strings.TrimSpace(stringAny(videoRule["mode_param"]))
+		if modeKey == "" {
+			modeKey = "generation_mode"
+		}
+		if mode, ok := params["mode"]; ok {
+			if _, exists := params[modeKey]; !exists {
+				params[modeKey] = mode
+			}
+			delete(params, "mode")
+		}
+		if _, explicitMode := params[modeKey]; !explicitMode {
+			first := strings.TrimSpace(stringAny(params["first_frame"])) != ""
+			last := strings.TrimSpace(stringAny(params["last_frame"])) != ""
+			images := len(normalizeOpenAPIStringList(params["reference_images"])) > 0
+			videos := len(normalizeOpenAPIStringList(params["reference_videos"])) > 0
+			audios := len(normalizeOpenAPIStringList(params["reference_audios"])) > 0
+			switch profile {
+			case "seedance_2":
+				params[modeKey] = inferredSeedanceMode(first, last, images, videos, audios)
+			case "minimax_h3", "aliyun_multimodal":
+				if first && last {
+					params[modeKey] = "first_last"
+				} else if first {
+					params[modeKey] = "first_frame"
+				} else if last && profile == "minimax_h3" {
+					params[modeKey] = "last_frame"
+				} else if images || videos || audios {
+					params[modeKey] = "reference"
+				}
+			case "veo_reference", "omni_reference":
+				if images {
+					params[modeKey] = "reference"
+				}
+			}
+		}
+		if _, exists := params["ratio"]; !exists && (profile == "seedance_2" || profile == "minimax_h3" || profile == "aliyun_multimodal") {
+			if ratio, ok := params["aspect_ratio"]; ok {
+				params["ratio"] = ratio
+				delete(params, "aspect_ratio")
+			}
+		}
+		if profile == "seedance_2" {
+			if audio, ok := params["audio"]; ok {
+				if _, exists := params["generate_audio"]; !exists {
+					params["generate_audio"] = audio
+				}
+				delete(params, "audio")
+			}
+		}
+	}
+	if requestMode == "audio" {
+		properties, _ := model.InputSchema["properties"].(map[string]interface{})
+		_, expectsVoiceID := properties["voice_id"]
+		_, expectsVoice := properties["voice"]
+		if voice, ok := params["voice"]; ok && expectsVoiceID && !expectsVoice {
+			if _, exists := params["voice_id"]; !exists {
+				params["voice_id"] = voice
+			}
+			delete(params, "voice")
+		}
+	}
+	return params
+}
+
+func inferredSeedanceMode(first, last, images, videos, audios bool) string {
+	if first && last {
+		return "first_last"
+	}
+	if first {
+		return "first_frame"
+	}
+	switch {
+	case images && videos && audios:
+		return "image_video_audio"
+	case images && videos:
+		return "image_video"
+	case images && audios:
+		return "image_audio"
+	case videos && audios:
+		return "video_audio"
+	case images:
+		return "image"
+	case videos:
+		return "video"
+	default:
+		return "text"
+	}
+}
+
+func firstOpenAPIString(value interface{}) string {
+	items := normalizeOpenAPIStringList(value)
+	if len(items) > 0 {
+		return items[0]
+	}
+	return ""
 }
 
 func openAPITaskResponse(task *service.TaskDTO) map[string]interface{} {

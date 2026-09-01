@@ -260,14 +260,25 @@ func (s *ModelService) ResolveTaskModel(ctx context.Context, identifier string, 
 	if len(allowed) > 0 {
 		i := 2
 		placeholders := []string{}
+		categoryPlaceholders := []string{}
 		for mode := range allowed {
 			args = append(args, mode)
 			placeholders = append(placeholders, fmt.Sprintf("$%d", i))
 			i++
+			category := map[string]string{"images": "image", "video": "video", "audio": "audio"}[mode]
+			if category != "" {
+				args = append(args, category)
+				categoryPlaceholders = append(categoryPlaceholders, fmt.Sprintf("$%d", i))
+				i++
+			}
 		}
-		modeSQL = " AND request_mode IN (" + strings.Join(placeholders, ",") + ")"
+		modeSQL = " AND (request_mode IN (" + strings.Join(placeholders, ",") + ")"
+		if len(categoryPlaceholders) > 0 {
+			modeSQL += " OR (request_mode='custom' AND category IN (" + strings.Join(categoryPlaceholders, ",") + "))"
+		}
+		modeSQL += ")"
 	} else {
-		modeSQL = " AND request_mode IN ('images','video','audio')"
+		modeSQL = " AND (request_mode IN ('images','video','audio') OR (request_mode='custom' AND category IN ('image','video','audio')))"
 	}
 	err := s.db.QueryRow(ctx, `
 		SELECT id, code, display_name, new_api_model, new_api_endpoint, request_mode, category,
@@ -655,28 +666,31 @@ type AdminModelDTO struct {
 }
 
 type APIDocDTO struct {
-	ID           int64                  `json:"id"`
-	ModelID      int64                  `json:"model_id"`
-	ModelCode    string                 `json:"model_code"`
-	ModelName    string                 `json:"model_name"`
-	ModelIconURL *string                `json:"model_icon_url,omitempty"`
-	ModelDesc    string                 `json:"model_description"`
-	Category     string                 `json:"category"`
-	RequestMode  string                 `json:"request_mode"`
-	NewAPIModel  string                 `json:"new_api_model"`
-	Slug         string                 `json:"slug"`
-	Title        string                 `json:"title"`
-	Summary      string                 `json:"summary"`
-	Protocol     string                 `json:"protocol"`
-	BaseURL      string                 `json:"base_url"`
-	Endpoint     string                 `json:"endpoint"`
-	AuthHeader   string                 `json:"auth_header"`
-	SDK          string                 `json:"sdk"`
-	Content      map[string]interface{} `json:"content"`
-	IsPublished  bool                   `json:"is_published"`
-	SortOrder    int                    `json:"sort_order"`
-	CreatedAt    string                 `json:"created_at"`
-	UpdatedAt    string                 `json:"updated_at"`
+	ID            int64                  `json:"id"`
+	ModelID       int64                  `json:"model_id"`
+	ModelCode     string                 `json:"model_code"`
+	ModelName     string                 `json:"model_name"`
+	ModelIconURL  *string                `json:"model_icon_url,omitempty"`
+	ModelDesc     string                 `json:"model_description"`
+	Category      string                 `json:"category"`
+	RequestMode   string                 `json:"request_mode"`
+	NewAPIModel   string                 `json:"new_api_model"`
+	Slug          string                 `json:"slug"`
+	Title         string                 `json:"title"`
+	Summary       string                 `json:"summary"`
+	Protocol      string                 `json:"protocol"`
+	BaseURL       string                 `json:"base_url"`
+	Endpoint      string                 `json:"endpoint"`
+	AuthHeader    string                 `json:"auth_header"`
+	SDK           string                 `json:"sdk"`
+	Content       map[string]interface{} `json:"content"`
+	IsPublished   bool                   `json:"is_published"`
+	SortOrder     int                    `json:"sort_order"`
+	CreatedAt     string                 `json:"created_at"`
+	UpdatedAt     string                 `json:"updated_at"`
+	InputSchema   map[string]interface{} `json:"-"`
+	DefaultParams map[string]interface{} `json:"-"`
+	RuntimeRule   map[string]interface{} `json:"-"`
 }
 
 type APIDocInput struct {
@@ -736,7 +750,8 @@ func (s *ModelService) ListAPIDocs(ctx context.Context, includeUnpublished bool)
 	q := `
 		SELECT d.id, d.model_id, d.slug, d.title, COALESCE(d.summary,''), d.protocol, d.base_url, d.endpoint,
 		       d.auth_header, COALESCE(d.sdk,''), d.content, d.is_published, d.sort_order, d.created_at, d.updated_at,
-		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,'')
+		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,''),
+		       m.input_schema, m.default_params, m.runtime_rule
 		FROM api_docs d JOIN models m ON m.id=d.model_id`
 	if !includeUnpublished {
 		q += ` WHERE d.is_published=true AND m.is_enabled=true`
@@ -762,7 +777,8 @@ func (s *ModelService) GetAPIDoc(ctx context.Context, slug string, publicOnly bo
 	q := `
 		SELECT d.id, d.model_id, d.slug, d.title, COALESCE(d.summary,''), d.protocol, d.base_url, d.endpoint,
 		       d.auth_header, COALESCE(d.sdk,''), d.content, d.is_published, d.sort_order, d.created_at, d.updated_at,
-		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,'')
+		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,''),
+		       m.input_schema, m.default_params, m.runtime_rule
 		FROM api_docs d JOIN models m ON m.id=d.model_id
 		WHERE d.slug=$1`
 	if publicOnly {
@@ -825,7 +841,8 @@ func (s *ModelService) GetAPIDocByID(ctx context.Context, id int64) (*APIDocDTO,
 	return scanAPIDocRow(s.db.QueryRow(ctx, `
 		SELECT d.id, d.model_id, d.slug, d.title, COALESCE(d.summary,''), d.protocol, d.base_url, d.endpoint,
 		       d.auth_header, COALESCE(d.sdk,''), d.content, d.is_published, d.sort_order, d.created_at, d.updated_at,
-		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,'')
+		       m.code, m.display_name, m.category, m.request_mode, m.new_api_model, m.icon_url, COALESCE(m.description,''),
+		       m.input_schema, m.default_params, m.runtime_rule
 		FROM api_docs d JOIN models m ON m.id=d.model_id WHERE d.id=$1`, id))
 }
 
@@ -928,11 +945,11 @@ func apiDocOperationID(requestMode string) string {
 func defaultAPIDocProtocol(requestMode string) string {
 	switch requestMode {
 	case "images":
-		return "openai-compatible-image"
+		return "async-image-task"
 	case "video":
-		return "new-api-compatible-video"
+		return "async-video-task"
 	case "audio":
-		return "openai-compatible-audio"
+		return "async-audio-task"
 	case "custom":
 		return "custom-compatible"
 	default:
@@ -960,15 +977,18 @@ func defaultAPIDocEndpoint(requestMode, upstreamEndpoint string) string {
 
 func scanAPIDoc(rows pgx.Rows) (*APIDocDTO, error) {
 	var item APIDocDTO
-	var content []byte
+	var content, inputSchema, defaultParams, runtimeRule []byte
 	var created, updated time.Time
 	if err := rows.Scan(&item.ID, &item.ModelID, &item.Slug, &item.Title, &item.Summary, &item.Protocol,
 		&item.BaseURL, &item.Endpoint, &item.AuthHeader, &item.SDK, &content, &item.IsPublished, &item.SortOrder,
 		&created, &updated, &item.ModelCode, &item.ModelName, &item.Category, &item.RequestMode,
-		&item.NewAPIModel, &item.ModelIconURL, &item.ModelDesc); err != nil {
+		&item.NewAPIModel, &item.ModelIconURL, &item.ModelDesc, &inputSchema, &defaultParams, &runtimeRule); err != nil {
 		return nil, err
 	}
 	json.Unmarshal(content, &item.Content)
+	json.Unmarshal(inputSchema, &item.InputSchema)
+	json.Unmarshal(defaultParams, &item.DefaultParams)
+	json.Unmarshal(runtimeRule, &item.RuntimeRule)
 	item.Content = standardAPIDocContent(&item, item.Content)
 	item.CreatedAt = parseTime(created)
 	item.UpdatedAt = parseTime(updated)
@@ -977,15 +997,18 @@ func scanAPIDoc(rows pgx.Rows) (*APIDocDTO, error) {
 
 func scanAPIDocRow(row pgx.Row) (*APIDocDTO, error) {
 	var item APIDocDTO
-	var content []byte
+	var content, inputSchema, defaultParams, runtimeRule []byte
 	var created, updated time.Time
 	if err := row.Scan(&item.ID, &item.ModelID, &item.Slug, &item.Title, &item.Summary, &item.Protocol,
 		&item.BaseURL, &item.Endpoint, &item.AuthHeader, &item.SDK, &content, &item.IsPublished, &item.SortOrder,
 		&created, &updated, &item.ModelCode, &item.ModelName, &item.Category, &item.RequestMode,
-		&item.NewAPIModel, &item.ModelIconURL, &item.ModelDesc); err != nil {
+		&item.NewAPIModel, &item.ModelIconURL, &item.ModelDesc, &inputSchema, &defaultParams, &runtimeRule); err != nil {
 		return nil, err
 	}
 	json.Unmarshal(content, &item.Content)
+	json.Unmarshal(inputSchema, &item.InputSchema)
+	json.Unmarshal(defaultParams, &item.DefaultParams)
+	json.Unmarshal(runtimeRule, &item.RuntimeRule)
 	item.Content = standardAPIDocContent(&item, item.Content)
 	item.CreatedAt = parseTime(created)
 	item.UpdatedAt = parseTime(updated)
@@ -1155,67 +1178,134 @@ func standardAPIDocError(code, message string) map[string]interface{} {
 func defaultAPIDocParameters(doc *APIDocDTO) []map[string]interface{} {
 	switch doc.RequestMode {
 	case "images":
-		return []map[string]interface{}{
+		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "aliyun_qwen_image_v3") {
+			return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
+				{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
+				{"name": "prompt", "type": "string", "required": true, "description": "生成或编辑指令"},
+				{"name": "n", "type": "integer", "required": false, "description": "生成数量，Qwen Image 3.0 支持 1～6"},
+				{"name": "size", "type": "string", "required": false, "description": "宽*高；省略则由模型自动推荐，范围 512*512～2048*2048"},
+				{"name": "reference_images", "type": "string[]", "required": false, "description": "1～3 张参考图；传入后自动切换为图像编辑，兼容 image / images / image_url / reference_image"},
+			})
+		}
+		return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
 			{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
 			{"name": "prompt", "type": "string", "required": true, "description": "图片生成提示词"},
 			{"name": "n", "type": "integer", "required": false, "description": "生成数量，默认 1"},
 			{"name": "aspect_ratio", "type": "string", "required": false, "description": "比例，例如 1:1、16:9、9:16、4:3、3:4"},
 			{"name": "image_size", "type": "string", "required": false, "description": "清晰度档位，例如 1K、2K、4K"},
 			{"name": "size", "type": "string", "required": false, "description": "实际像素尺寸，例如 1024x1024、3840x2160"},
-			{"name": "image", "type": "string|string[]", "required": false, "description": "参考图 URL，支持单张或数组"},
-		}
+			{"name": "image", "type": "string|string[]", "required": false, "description": "参考图 URL，支持单张或数组；images / image_url / reference_image 为兼容别名"},
+		})
 	case "video":
-		return []map[string]interface{}{
+		videoRule, _ := doc.RuntimeRule["video"].(map[string]interface{})
+		promptRequired := videoRule["prompt_required"] != false
+		return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
 			{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
-			{"name": "prompt", "type": "string", "required": true, "description": "视频生成提示词"},
+			{"name": "prompt", "type": "string", "required": promptRequired, "description": "视频生成提示词；是否必填由当前模板形态决定"},
 			{"name": "count", "type": "integer", "required": false, "description": "生成数量，默认 1"},
-			{"name": "duration", "type": "string|number", "required": false, "description": "视频时长，以后台模型支持为准，例如 12s"},
+			{"name": "duration", "type": "integer", "required": false, "description": "视频时长，以具体模型参数范围为准"},
+			{"name": "duration_seconds", "type": "integer", "required": false, "description": "duration 的兼容别名"},
 			{"name": "orientation", "type": "string", "required": false, "description": "画面方向，例如 portrait / landscape"},
 			{"name": "aspect_ratio", "type": "string", "required": false, "description": "画面比例，例如 9:16、16:9"},
-			{"name": "image", "type": "string|string[]", "required": false, "description": "图生视频参考图 URL"},
-		}
+			{"name": "image", "type": "string|string[]", "required": false, "description": "兼容素材别名：首帧模板映射到 first_frame，参考图模板映射到 reference_images"},
+			{"name": "first_frame", "type": "string", "required": false, "description": "首帧图片 URL；first_frame_image 为兼容别名"},
+			{"name": "last_frame", "type": "string", "required": false, "description": "尾帧图片 URL；last_frame_image 为兼容别名"},
+			{"name": "reference_images", "type": "string[]", "required": false, "description": "参考图片 URL 数组"},
+			{"name": "reference_videos", "type": "string[]", "required": false, "description": "参考视频 URL 数组"},
+			{"name": "reference_audios", "type": "string[]", "required": false, "description": "参考音频 URL 数组"},
+		})
 	case "audio":
-		return []map[string]interface{}{
+		inputRequired := !strings.Contains(strings.ToLower(doc.NewAPIModel), "fun-music")
+		return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
 			{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
-			{"name": "input", "type": "string", "required": true, "description": "需要合成的文本"},
+			{"name": "input", "type": "string", "required": inputRequired, "description": "需要合成的文本或音乐提示词"},
 			{"name": "voice", "type": "string", "required": false, "description": "音色，以后台模型支持为准"},
 			{"name": "format", "type": "string", "required": false, "description": "输出格式，例如 mp3 / wav"},
-		}
+			{"name": "sample_rate", "type": "integer", "required": false, "description": "采样率，以模型支持范围为准"},
+			{"name": "instruction", "type": "string", "required": false, "description": "Qwen-Audio-TTS / CosyVoice 表达指令，支持中文或英文"},
+			{"name": "lyrics", "type": "string", "required": false, "description": "音乐生成歌词；Fun-Music 可与 input 二选一"},
+		})
 	default:
 		return nil
 	}
 }
 
+func appendSchemaAPIDocParameters(doc *APIDocDTO, items []map[string]interface{}) []map[string]interface{} {
+	seen := map[string]bool{}
+	for _, item := range items {
+		seen[fmt.Sprint(item["name"])] = true
+	}
+	properties, _ := doc.InputSchema["properties"].(map[string]interface{})
+	for name, raw := range properties {
+		if seen[name] {
+			continue
+		}
+		property, _ := raw.(map[string]interface{})
+		item := map[string]interface{}{
+			"name": name, "type": fmt.Sprint(property["type"]), "required": false,
+			"description": strings.TrimSpace(fmt.Sprint(property["title"])),
+		}
+		if values, ok := property["enum"].([]interface{}); ok && len(values) > 0 {
+			item["enum"] = values
+		}
+		items = append(items, item)
+	}
+	return items
+}
+
 func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 	switch doc.RequestMode {
 	case "images":
-		return map[string]interface{}{
+		example := mergeAPIDocDefaults(doc, map[string]interface{}{
 			"model":        doc.ModelCode,
 			"prompt":       "为莫来石产品生成电商商品主图，白底，高级质感，真实摄影风格",
 			"n":            1,
 			"aspect_ratio": "1:1",
 			"image_size":   "1K",
 			"size":         "1024x1024",
-			"quality":      "standard",
-			"image":        []string{"https://example.com/reference.png"},
+		})
+		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "aliyun_qwen_image_v3") {
+			delete(example, "aspect_ratio")
+			delete(example, "image_size")
+			if strings.EqualFold(strings.TrimSpace(fmt.Sprint(example["size"])), "auto") {
+				delete(example, "size")
+			}
 		}
+		return example
 	case "video":
-		return map[string]interface{}{
-			"model":        doc.ModelCode,
-			"prompt":       "生成一段商品展示短视频，突出产品质感、卖点和镜头推进",
-			"duration":     "12s",
-			"orientation":  "portrait",
-			"aspect_ratio": "9:16",
-			"count":        1,
-			"image":        []string{"https://example.com/reference.png"},
+		example := mergeAPIDocDefaults(doc, map[string]interface{}{
+			"model":    doc.ModelCode,
+			"prompt":   "生成一段商品展示短视频，突出产品质感、卖点和镜头推进",
+			"duration": 5,
+			"count":    1,
+		})
+		videoRule, _ := doc.RuntimeRule["video"].(map[string]interface{})
+		switch strings.TrimSpace(fmt.Sprint(videoRule["upload_profile"])) {
+		case "veo_frame_pair":
+			example["first_frame"] = "https://your-public-url.example/first-frame.png"
+		case "aliyun_happyhorse_first_frame":
+			example["first_frame"] = "https://your-public-url.example/first-frame.png"
+		case "aliyun_happyhorse_reference":
+			example["reference_images"] = []string{"https://your-public-url.example/reference.png"}
+		case "aliyun_happyhorse_edit":
+			example["reference_videos"] = []string{"https://your-public-url.example/input.mp4"}
+		case "single_ref":
+			if intFromAny(videoRule["min_reference_images"], 0) > 0 {
+				example["image"] = "https://your-public-url.example/first-frame.png"
+			}
 		}
+		return example
 	case "audio":
-		return map[string]interface{}{
-			"model":  doc.ModelCode,
-			"input":  "欢迎使用 StarAI 开放平台。",
-			"voice":  "alloy",
-			"format": "mp3",
+		text := "欢迎使用 StarAI 开放平台。"
+		if strings.Contains(strings.ToLower(doc.NewAPIModel), "fun-music") {
+			text = "夏日清新民谣，木吉他与口琴伴奏，轻快节奏"
 		}
+		return mergeAPIDocDefaults(doc, map[string]interface{}{
+			"model": doc.ModelCode,
+			"input": text,
+		})
 	case "responses":
 		return map[string]interface{}{
 			"model": doc.ModelCode,
@@ -1230,6 +1320,20 @@ func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 			"stream": false,
 		}
 	}
+}
+
+func mergeAPIDocDefaults(doc *APIDocDTO, example map[string]interface{}) map[string]interface{} {
+	for key, value := range doc.DefaultParams {
+		if key == "max_reference_images" || strings.HasPrefix(key, "_") {
+			continue
+		}
+		if key == "count" {
+			example["n"] = value
+			continue
+		}
+		example[key] = value
+	}
+	return example
 }
 
 func defaultAPIDocResponseExample(doc *APIDocDTO) map[string]interface{} {
@@ -1348,6 +1452,9 @@ func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*Mod
 	if err := s.SyncPrimaryModelRoute(ctx, id, input); err != nil {
 		return nil, err
 	}
+	if err := s.ensureDefaultAPIDoc(ctx, id, input); err != nil {
+		log.Printf("create default API doc for model %s failed: %v", input.Code, err)
+	}
 	return s.GetByID(ctx, id)
 }
 
@@ -1398,7 +1505,20 @@ func (s *ModelService) Update(ctx context.Context, id int64, input CreateModelIn
 	if err := s.SyncPrimaryModelRoute(ctx, id, input); err != nil {
 		return nil, err
 	}
+	if err := s.ensureDefaultAPIDoc(ctx, id, input); err != nil {
+		log.Printf("ensure default API doc for model %s failed: %v", input.Code, err)
+	}
 	return s.GetByID(ctx, id)
+}
+
+func (s *ModelService) ensureDefaultAPIDoc(ctx context.Context, modelID int64, input CreateModelInput) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO api_docs (model_id, slug, title, summary, protocol, endpoint, sdk, content, is_published, sort_order)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'{"auto_generated":true}'::jsonb,true,$8)
+		ON CONFLICT (model_id) DO NOTHING`,
+		modelID, input.Code, input.DisplayName, input.Description, defaultAPIDocProtocol(input.RequestMode),
+		defaultAPIDocEndpoint(input.RequestMode, input.NewAPIEndpoint), "curl", input.SortOrder)
+	return err
 }
 
 func (s *ModelService) SetEnabled(ctx context.Context, id int64, enabled bool) (*ModelDTO, error) {

@@ -63,3 +63,43 @@ func TestStandardAPIDocResponsesUseNativeErrorShape(t *testing.T) {
 		t.Fatalf("expected native error body, got %#v", body)
 	}
 }
+
+func TestStandardAPIDocContentUsesModelMediaDefaults(t *testing.T) {
+	doc := &APIDocDTO{
+		Slug: "qwen-tts", ModelCode: "qwen-tts", RequestMode: "audio", NewAPIModel: "qwen-audio-3.0-tts-flash",
+		DefaultParams: map[string]interface{}{"voice": "longanhuan_v3.6", "format": "wav", "sample_rate": float64(24000)},
+		InputSchema: map[string]interface{}{"properties": map[string]interface{}{
+			"voice": map[string]interface{}{"type": "string", "title": "音色", "enum": []interface{}{"longanhuan_v3.6"}},
+		}},
+	}
+	content := standardAPIDocContent(doc, nil)
+	example := content["request_example"].(map[string]interface{})
+	if example["voice"] != "longanhuan_v3.6" || example["sample_rate"] != float64(24000) {
+		t.Fatalf("request_example = %#v", example)
+	}
+	foundInstruction := false
+	for _, parameter := range content["parameters"].([]map[string]interface{}) {
+		foundInstruction = foundInstruction || parameter["name"] == "instruction"
+	}
+	if !foundInstruction {
+		t.Fatal("Qwen Audio API documentation must expose instruction")
+	}
+}
+
+func TestStandardAPIDocContentSupportsFunMusicLyricsOnly(t *testing.T) {
+	doc := &APIDocDTO{
+		Slug: "fun-music", ModelCode: "fun-music", RequestMode: "audio", NewAPIModel: "fun-music-v1",
+		DefaultParams: map[string]interface{}{"format": "mp3", "lyrics": "晚风吹过海面"},
+	}
+	content := standardAPIDocContent(doc, nil)
+	example := content["request_example"].(map[string]interface{})
+	if example["lyrics"] != "晚风吹过海面" {
+		t.Fatalf("request_example = %#v", example)
+	}
+	parameters := content["parameters"].([]map[string]interface{})
+	for _, parameter := range parameters {
+		if parameter["name"] == "input" && parameter["required"] != false {
+			t.Fatalf("Fun-Music input must be optional when lyrics is supplied: %#v", parameter)
+		}
+	}
+}

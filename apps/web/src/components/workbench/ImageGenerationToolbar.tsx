@@ -33,7 +33,18 @@ export type ImageAspectRatio = keyof typeof IMAGE_RATIO_SIZE_TABLE;
 
 export const ALL_RATIOS = Object.keys(IMAGE_RATIO_SIZE_TABLE) as ImageAspectRatio[];
 export const COMMON_RATIOS: ImageAspectRatio[] = ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2"];
-const COUNT_OPTIONS = [1, 2, 3, 4];
+export const QWEN_IMAGE_SIZE_OPTIONS = [
+  { value: "auto", label: "Auto" },
+  { value: "1024x1024", label: "1:1 · 1024×1024" },
+  { value: "1536x1024", label: "3:2 · 1536×1024" },
+  { value: "1024x1536", label: "2:3 · 1024×1536" },
+  { value: "1792x1024", label: "16:9 · 1792×1024" },
+  { value: "1024x1792", label: "9:16 · 1024×1792" },
+  { value: "2048x1536", label: "4:3 · 2048×1536" },
+  { value: "1536x2048", label: "3:4 · 1536×2048" },
+  { value: "2048x2048", label: "1:1 · 2048×2048" },
+] as const;
+const DEFAULT_COUNT_OPTIONS = [1, 2, 3, 4];
 
 export function normalizeRatio(value?: string): ImageAspectRatio {
   return ALL_RATIOS.includes(value as ImageAspectRatio) ? (value as ImageAspectRatio) : "1:1";
@@ -70,6 +81,12 @@ export function ImageGenerationToolbar({
   onRatioChange,
   imageSize,
   onImageSizeChange,
+  exactSize,
+  onExactSizeChange,
+  countOptions = DEFAULT_COUNT_OPTIONS,
+  countMax = 50,
+  ratios = ALL_RATIOS,
+  sizeTiers = IMAGE_SIZE_TIERS,
 }: {
   count: number;
   onCountChange: (value: number) => void;
@@ -77,13 +94,21 @@ export function ImageGenerationToolbar({
   onRatioChange: (value: string) => void;
   imageSize: string;
   onImageSizeChange: (value: string) => void;
+  exactSize?: string;
+  onExactSizeChange?: (value: string) => void;
+  countOptions?: number[];
+  countMax?: number;
+  ratios?: ImageAspectRatio[];
+  sizeTiers?: ImageSizeTier[];
 }) {
-  const { t } = useI18n();
+  const { t, ts } = useI18n();
   const [customDraft, setCustomDraft] = useState(String(count || 1));
   const activeRatio = normalizeRatio(ratio);
   const activeTier = normalizeTier(imageSize);
-  const completeRatios = useMemo(() => ALL_RATIOS.filter((item) => !COMMON_RATIOS.includes(item)), []);
+  const commonRatios = useMemo(() => COMMON_RATIOS.filter((item) => ratios.includes(item)), [ratios]);
+  const completeRatios = useMemo(() => ratios.filter((item) => !COMMON_RATIOS.includes(item)), [ratios]);
   const imageUnit = t("unit.image");
+  const qwenSize = exactSize || "auto";
 
   return (
     <>
@@ -97,7 +122,7 @@ export function ImageGenerationToolbar({
       >
         {(close) => (
           <div className="space-y-2">
-            {COUNT_OPTIONS.map((n) => (
+            {countOptions.map((n) => (
               <MediaMenuOption
                 key={n}
                 selected={count === n}
@@ -117,7 +142,7 @@ export function ImageGenerationToolbar({
                   value={customDraft}
                   type="number"
                   min={1}
-                  max={50}
+                  max={countMax}
                   onChange={(e) => setCustomDraft(e.target.value)}
                   className="h-10 flex-1 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-900 focus:border-primary focus:outline-none dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 dark:[color-scheme:dark]"
                 />
@@ -125,7 +150,7 @@ export function ImageGenerationToolbar({
                   type="button"
                   className="h-10 rounded-xl border border-gray-900 bg-white px-4 text-sm font-semibold text-gray-900 dark:border-primary/30 dark:bg-primary/10 dark:text-gray-100"
                   onClick={() => {
-                    const n = Math.min(50, Math.max(1, parseInt(customDraft, 10) || 1));
+                    const n = Math.min(countMax, Math.max(1, parseInt(customDraft, 10) || 1));
                     onCountChange(n);
                     setCustomDraft(String(n));
                     close();
@@ -139,7 +164,26 @@ export function ImageGenerationToolbar({
         )}
       </MediaOptionMenu>
 
-      <MediaOptionMenu
+      {onExactSizeChange ? (
+        <MediaOptionMenu
+          icon={<FileText size={16} />}
+          activeLabel={QWEN_IMAGE_SIZE_OPTIONS.find((item) => item.value === qwenSize)?.label || qwenSize}
+          title={ts("输出尺寸")}
+          subtitle={t("imageToolbar.qualityDesc")}
+          compactOnMobile
+        >
+          {(close) => (
+            <div className="space-y-2">
+              {QWEN_IMAGE_SIZE_OPTIONS.map((item) => (
+                <MediaMenuOption key={item.value} selected={qwenSize === item.value} onClick={() => { onExactSizeChange(item.value); close(); }}>
+                  {item.value === "auto" ? ts("自动推荐") : item.label}
+                </MediaMenuOption>
+              ))}
+            </div>
+          )}
+        </MediaOptionMenu>
+      ) : <>
+        <MediaOptionMenu
         icon={<FileText size={16} />}
         activeLabel={activeRatio}
         title={t("imageToolbar.ratio")}
@@ -149,7 +193,7 @@ export function ImageGenerationToolbar({
         {(close) => (
           <div className="space-y-2">
             <div className="px-1 text-[11px] font-semibold text-gray-400">{t("imageToolbar.commonRatios")}</div>
-            {COMMON_RATIOS.map((item) => (
+            {commonRatios.map((item) => (
               <MediaMenuOption
                 key={item}
                 selected={activeRatio === item}
@@ -176,9 +220,9 @@ export function ImageGenerationToolbar({
             ))}
           </div>
         )}
-      </MediaOptionMenu>
+        </MediaOptionMenu>
 
-      <MediaOptionMenu
+        <MediaOptionMenu
         icon={<Settings size={16} />}
         activeLabel={activeTier}
         title={t("imageToolbar.quality")}
@@ -187,7 +231,7 @@ export function ImageGenerationToolbar({
       >
         {(close) => (
           <div className="space-y-2">
-            {IMAGE_SIZE_TIERS.map((tier) => (
+            {sizeTiers.map((tier) => (
               <MediaMenuOption
                 key={tier}
                 selected={activeTier === tier}
@@ -201,7 +245,8 @@ export function ImageGenerationToolbar({
             ))}
           </div>
         )}
-      </MediaOptionMenu>
+        </MediaOptionMenu>
+      </>}
     </>
   );
 }

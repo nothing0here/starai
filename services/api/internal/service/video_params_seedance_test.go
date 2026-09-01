@@ -107,6 +107,73 @@ func TestValidateVideoParamsPreservesProviderDurationEnumType(t *testing.T) {
 	}
 }
 
+func TestValidateAliyunMultimodalRejectsMixedFrameAndReferenceModes(t *testing.T) {
+	model := &ModelFull{ModelDTO: ModelDTO{
+		InputSchema: map[string]interface{}{"properties": map[string]interface{}{
+			"generation_mode": map[string]interface{}{"enum": []interface{}{"text", "first_frame", "first_last", "reference"}},
+		}},
+	}, RuntimeRule: map[string]interface{}{"video": map[string]interface{}{
+		"upload_profile": "aliyun_multimodal", "mode_param": "generation_mode",
+		"max_reference_images": float64(10), "max_total_images": float64(20),
+		"reference_images": map[string]interface{}{"key": "reference_images", "max": float64(10)},
+		"reference_videos": map[string]interface{}{"key": "reference_videos", "max": float64(5)},
+		"reference_audios": map[string]interface{}{"key": "reference_audios", "max": float64(5)},
+	}}}
+	params := map[string]interface{}{
+		"generation_mode": "reference", "prompt": "参考素材",
+		"first_frame":      "https://example.com/first.png",
+		"reference_images": []interface{}{"https://example.com/ref.png"},
+	}
+	if err := ValidateVideoParams(model, params); err == nil {
+		t.Fatal("expected mixed first-frame and reference media to be rejected")
+	}
+}
+
+func TestValidateHappyHorseProfiles(t *testing.T) {
+	baseVideo := map[string]interface{}{
+		"reference_images": map[string]interface{}{"key": "reference_images", "max": float64(9)},
+		"reference_videos": map[string]interface{}{"key": "reference_videos", "max": float64(1)},
+	}
+	modelFor := func(profile string) *ModelFull {
+		video := map[string]interface{}{}
+		for key, value := range baseVideo {
+			video[key] = value
+		}
+		video["upload_profile"] = profile
+		return &ModelFull{RuntimeRule: map[string]interface{}{"video": video}}
+	}
+	if err := ValidateVideoParams(modelFor("aliyun_happyhorse_first_frame"), map[string]interface{}{"first_frame": "https://example.com/first.png"}); err != nil {
+		t.Fatalf("valid first-frame request rejected: %v", err)
+	}
+	if err := ValidateVideoParams(modelFor("aliyun_happyhorse_reference"), map[string]interface{}{"prompt": "[Image 1] starts walking", "reference_images": []interface{}{"https://example.com/ref.png"}}); err != nil {
+		t.Fatalf("valid reference request rejected: %v", err)
+	}
+	if err := ValidateVideoParams(modelFor("aliyun_happyhorse_edit"), map[string]interface{}{"prompt": "change the coat", "reference_videos": []interface{}{"https://example.com/input.mp4"}}); err != nil {
+		t.Fatalf("valid edit request rejected: %v", err)
+	}
+	if err := ValidateVideoParams(modelFor("aliyun_happyhorse_edit"), map[string]interface{}{"prompt": "change the coat"}); err == nil {
+		t.Fatal("video edit without an input video must be rejected")
+	}
+}
+
+func TestValidateAliyunQwenImageOfficialLimits(t *testing.T) {
+	model := &ModelFull{RuntimeRule: map[string]interface{}{"upstream": map[string]interface{}{"adapter": "aliyun_qwen_image_v3"}}}
+	valid := map[string]interface{}{"prompt": "生成海报", "count": float64(6), "size": "1024*2048"}
+	if err := validateImageTaskParams(model, valid); err != nil {
+		t.Fatalf("valid Qwen Image request rejected: %v", err)
+	}
+	for name, params := range map[string]map[string]interface{}{
+		"count": {"prompt": "生成海报", "count": float64(7)},
+		"size":  {"prompt": "生成海报", "size": "4096*4096"},
+		"ratio": {"prompt": "生成海报", "size": "4096*256"},
+		"seed":  {"prompt": "生成海报", "seed": float64(2147483648)},
+	} {
+		if err := validateImageTaskParams(model, params); err == nil {
+			t.Fatalf("%s outside official limits must be rejected", name)
+		}
+	}
+}
+
 func TestNormalizeAgentVideoParamsFallsBackToModelDuration(t *testing.T) {
 	model := &ModelFull{ModelDTO: ModelDTO{
 		InputSchema: map[string]interface{}{
@@ -242,5 +309,18 @@ func TestValidateVeoFramePairRejectsReferenceImages(t *testing.T) {
 	err = validateVideoUpload(cfg, map[string]interface{}{})
 	if err == nil || !strings.Contains(err.Error(), "首帧") {
 		t.Fatalf("error = %v, want required first frame", err)
+	}
+}
+
+func TestValidateSingleReferenceRequiresConfiguredImage(t *testing.T) {
+	cfg := videoRuntimeConfig{
+		UploadProfile:      "single_ref",
+		MinReferenceImages: 1,
+		MaxReferenceImages: 1,
+		ReferenceImagesKey: "reference_images",
+	}
+	err := validateVideoUpload(cfg, map[string]interface{}{"prompt": "让画面动起来"})
+	if err == nil || !strings.Contains(err.Error(), "至少需要 1 张") {
+		t.Fatalf("error = %v, want required reference image", err)
 	}
 }

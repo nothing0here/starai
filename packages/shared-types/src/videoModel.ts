@@ -9,6 +9,11 @@ export type VideoUploadProfile =
   | "omni_reference"
   | "seedance_2"
   | "minimax_h3"
+  | "aliyun_multimodal"
+  | "aliyun_happyhorse_text"
+  | "aliyun_happyhorse_first_frame"
+  | "aliyun_happyhorse_reference"
+  | "aliyun_happyhorse_edit"
   | "none";
 
 export interface VideoFrameSlotConfig {

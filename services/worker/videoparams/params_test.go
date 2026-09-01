@@ -32,6 +32,87 @@ func TestBuildUpstreamPayloadPreservesConfiguredVideoDurations(t *testing.T) {
 	}
 }
 
+func TestBuildAliyunQwenImagePayload(t *testing.T) {
+	got := BuildUpstreamVideoPayload("qwen", "qwen-image-3.0-pro", map[string]interface{}{
+		"upstream": map[string]interface{}{"adapter": "aliyun_qwen_image_v3", "map": map[string]interface{}{"prompt": "input.prompt"}},
+	}, nil, map[string]interface{}{
+		"prompt": "一只猫", "reference_images": []interface{}{"https://example.com/cat.png"},
+		"count": 2, "size": "2048x2048", "prompt_extend": true, "prompt_extend_mode": "agent",
+	})
+	input := got["input"].(map[string]interface{})
+	messages := input["messages"].([]interface{})
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	if len(content) != 2 || content[0].(map[string]interface{})["image"] != "https://example.com/cat.png" {
+		t.Fatalf("content = %#v", content)
+	}
+	parameters := got["parameters"].(map[string]interface{})
+	if parameters["size"] != "2048*2048" || parameters["n"] != 2 || parameters["prompt_extend"] != true {
+		t.Fatalf("parameters = %#v", parameters)
+	}
+	if parameters["prompt_extend_mode"] != "direct" {
+		t.Fatalf("prompt_extend_mode = %#v, want direct for reference-image input", parameters["prompt_extend_mode"])
+	}
+}
+
+func TestBuildAliyunQwenImageOmitsAutoSize(t *testing.T) {
+	got := BuildUpstreamVideoPayload("qwen", "qwen-image-3.0", map[string]interface{}{
+		"upstream": map[string]interface{}{"adapter": "aliyun_qwen_image_v3"},
+	}, nil, map[string]interface{}{"prompt": "一只猫", "size": "auto"})
+	if _, exists := got["parameters"].(map[string]interface{})["size"]; exists {
+		t.Fatalf("Qwen auto size must be omitted upstream: %#v", got)
+	}
+}
+
+func TestBuildAliyunTTSPayloadIncludesInstruction(t *testing.T) {
+	got := BuildUpstreamVideoPayload("qwen-tts", "qwen-audio-3.0-tts-flash", map[string]interface{}{
+		"upstream": map[string]interface{}{
+			"include": []interface{}{"voice", "format", "sample_rate"},
+			"map": map[string]interface{}{
+				"prompt": "input.text", "voice": "input.voice", "format": "input.format",
+				"sample_rate": "input.sample_rate",
+			},
+		},
+	}, nil, map[string]interface{}{
+		"prompt": "你好", "voice": "longanhuan_v3.6", "format": "wav",
+		"sample_rate": 24000, "instruction": "温柔、稍慢地朗读",
+	})
+	input, ok := got["input"].(map[string]interface{})
+	if !ok || input["text"] != "你好" || input["instruction"] != "温柔、稍慢地朗读" {
+		t.Fatalf("unexpected Aliyun TTS input: %#v", got)
+	}
+}
+
+func TestBuildAliyunVideoPayload(t *testing.T) {
+	got := BuildUpstreamVideoPayload("wan3", "wan3.0-video", map[string]interface{}{
+		"upstream": map[string]interface{}{"adapter": "aliyun_video_generation"},
+	}, nil, map[string]interface{}{
+		"prompt": "运镜", "first_frame": "https://example.com/first.png",
+		"reference_audios": []interface{}{"https://example.com/music.mp3"},
+		"resolution":       "720P", "ratio": "16:9", "duration": 10,
+	})
+	input := got["input"].(map[string]interface{})
+	media := input["media"].([]interface{})
+	if len(media) != 2 || media[0].(map[string]interface{})["type"] != "first_frame" || media[1].(map[string]interface{})["type"] != "reference_audio" {
+		t.Fatalf("media = %#v", media)
+	}
+	parameters := got["parameters"].(map[string]interface{})
+	if parameters["resolution"] != "720P" || intValue(parameters["duration"]) != 10 {
+		t.Fatalf("parameters = %#v", parameters)
+	}
+}
+
+func TestBuildAliyunHappyHorseI2VUsesFirstFrame(t *testing.T) {
+	got := BuildUpstreamVideoPayload("happyhorse", "happyhorse-1.1-i2v", map[string]interface{}{
+		"upstream": map[string]interface{}{"adapter": "aliyun_video_generation"},
+	}, nil, map[string]interface{}{
+		"reference_images": []interface{}{"https://example.com/first.png"},
+	})
+	media := got["input"].(map[string]interface{})["media"].([]interface{})
+	if len(media) != 1 || media[0].(map[string]interface{})["type"] != "first_frame" {
+		t.Fatalf("media = %#v, want one first_frame", media)
+	}
+}
+
 func TestSanitizeUpstreamPayloadUsesImagesForVeo(t *testing.T) {
 	payload := map[string]interface{}{
 		"model":            "veo_3_1-fast-fl",
@@ -624,5 +705,25 @@ func TestMiniMaxH3DurationSurvivesWorkerJSONRoundTrip(t *testing.T) {
 	}
 	if _, exists := finalPayload["_preserve_video_params"]; exists {
 		t.Fatalf("internal preservation marker leaked upstream: %#v", finalPayload)
+	}
+}
+
+func TestBuildAliyunHappyHorseVideoEditPayload(t *testing.T) {
+	got := BuildUpstreamVideoPayload(
+		"happyhorse-edit", "happyhorse-1.0-video-edit",
+		map[string]interface{}{"upstream": map[string]interface{}{"adapter": "aliyun_video_generation"}}, nil,
+		map[string]interface{}{
+			"prompt": "replace the coat", "reference_videos": []interface{}{"https://cdn.example/input.mp4"},
+			"reference_images": []interface{}{"https://cdn.example/coat.png"}, "resolution": "720P", "audio_setting": "origin",
+		},
+	)
+	input := got["input"].(map[string]interface{})
+	media := input["media"].([]interface{})
+	if len(media) != 2 || media[0].(map[string]interface{})["type"] != "reference_image" || media[1].(map[string]interface{})["type"] != "video" {
+		t.Fatalf("unexpected edit media: %#v", media)
+	}
+	parameters := got["parameters"].(map[string]interface{})
+	if parameters["audio_setting"] != "origin" {
+		t.Fatalf("audio_setting missing: %#v", parameters)
 	}
 }

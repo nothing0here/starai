@@ -454,6 +454,11 @@ routeLoop:
 		if audioURL == "" {
 			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成完成但未返回可用音频地址")
 		}
+		if stored, err := persistGeneratedMedia(ctx, conn, audioURL, p.TaskNo, "audio", "audio", 250<<20); err != nil {
+			log.Printf("Task %s persist audio failed, keeping upstream URL: %v", p.TaskNo, err)
+		} else if stored != "" {
+			audioURL = stored
+		}
 		thumbnail = audioURL
 		output, _ = json.Marshal(map[string]interface{}{"audio_url": audioURL, "upstream_task_id": upstreamID})
 		meta, _ = json.Marshal(map[string]interface{}{"audio_url": audioURL})
@@ -896,6 +901,9 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		route.Connection.Headers["Idempotency-Key"] = p.TaskNo
 	}
 	result := workerGenerationAttemptResult{Route: route, RuntimeRule: route.RuntimeRule, Connection: route.Connection, Endpoint: route.Endpoint, UpstreamModel: route.UpstreamModel, GenerationCount: 1}
+	if requiresAliyunWorkspaceEndpoint(route.UpstreamModel) && !isAliyunWorkspaceEndpoint(route.Connection.BaseURL) {
+		return result, errors.New("阿里云百炼模型线路必须配置与模型和 API Key 同地域、带 WorkspaceId 的 HTTPS Endpoint")
+	}
 	extraParams := mergeWorkerMaps(route.ExtraParams, map[string]interface{}{})
 	// The credential-bearing connection block is rebuilt from the resolved route
 	// so downstream builders always see the effective base_url/api_key. Carry
@@ -959,6 +967,7 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			if value, ok := p.Input["aspect_ratio"]; ok {
 				imageBody["aspect_ratio"] = value
 			}
+			applyOpenAIImageOptions(imageBody, p.Input)
 			if refs, ok := p.Input["reference_images"]; ok {
 				if isTencentImage {
 					imageBody["images"] = normalizeReferenceImages(ctx, refs)
@@ -979,7 +988,9 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	if isVideo {
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
-	normalizePayloadMedia(ctx, payload, endpoint)
+	if err := normalizePayloadMedia(ctx, payload, endpoint); err != nil {
+		return result, err
+	}
 	if isVideo {
 		if err := validateOmniReferencePayload(payload); err != nil {
 			return result, err
@@ -999,6 +1010,28 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		result.ResponseBody, result.StatusCode, err = doJSONRequestWithLimit(ctx, route.Connection, "POST", joinBaseEndpoint(route.Connection.BaseURL, resolveModelEndpoint(endpoint, upstreamModel)), body, timeout, 96<<20)
 	}
 	return result, err
+}
+
+func applyOpenAIImageOptions(out, input map[string]interface{}) {
+	for _, key := range []string{"quality", "style", "background", "output_format", "moderation", "seed", "negative_prompt", "watermark"} {
+		if value, ok := input[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			out[key] = value
+		}
+	}
+}
+
+func requiresAliyunWorkspaceEndpoint(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(model, "qwen-image-3.0") || strings.HasPrefix(model, "wan3.0-video") ||
+		strings.HasPrefix(model, "happyhorse-") || strings.HasPrefix(model, "qwen-audio-3.0-tts-") ||
+		strings.HasPrefix(model, "cosyvoice-v3") || strings.HasPrefix(model, "fun-music-")
+}
+
+func isAliyunWorkspaceEndpoint(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && parsed.Scheme == "https" && (parsed.Path == "" || parsed.Path == "/") && parsed.RawQuery == "" &&
+		strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".maas.aliyuncs.com") &&
+		!strings.ContainsAny(parsed.Hostname(), "{}")
 }
 
 func isTencentTokenHubImageAPI(baseURL string) bool {
@@ -1508,6 +1541,15 @@ var standardImageSizes = map[string]map[string]string{
 }
 
 func resolveImageGenerationInput(input map[string]interface{}, runtimeRule map[string]interface{}, endpoint, model string) {
+	explicitSize := strings.TrimSpace(fmt.Sprint(input["size"]))
+	ratioInput := strings.TrimSpace(fmt.Sprint(input["aspect_ratio"]))
+	tierInput := strings.TrimSpace(fmt.Sprint(input["image_size"]))
+	if explicitSize != "" && explicitSize != "<nil>" && !strings.EqualFold(explicitSize, "auto") &&
+		(ratioInput == "" || ratioInput == "<nil>" || strings.EqualFold(ratioInput, "auto")) &&
+		(tierInput == "" || tierInput == "<nil>" || strings.EqualFold(tierInput, "auto")) {
+		input["resolved_size"] = explicitSize
+		return
+	}
 	ratio := normalizeImageRatio(fmt.Sprint(input["aspect_ratio"]))
 	supported := supportedImageRatios(runtimeRule, endpoint, model)
 	if len(supported) > 0 && !stringInSlice(ratio, supported) {
@@ -1802,13 +1844,13 @@ func normalizeReferenceImage(ctx context.Context, src string) string {
 		defer resp.Body.Close()
 		if resp.StatusCode < 400 {
 			contentType = resp.Header.Get("Content-Type")
-			data, err = io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+			data, err = io.ReadAll(io.LimitReader(resp.Body, (20<<20)+1))
 			if len(data) > 0 && !strings.HasPrefix(contentType, "image/") {
 				contentType = http.DetectContentType(data)
 			}
 		}
 	}
-	if err != nil || len(data) == 0 || len(data) > 10<<20 || !strings.HasPrefix(contentType, "image/") {
+	if err != nil || len(data) == 0 || len(data) > 20<<20 || !strings.HasPrefix(contentType, "image/") {
 		if objectStore == nil {
 			return src
 		}
@@ -1816,7 +1858,7 @@ func normalizeReferenceImage(ctx context.Context, src string) string {
 		if objectKey == "" {
 			return src
 		}
-		data, err = objectStore.ReadAll(ctx, objectKey, 10<<20)
+		data, err = objectStore.ReadAll(ctx, objectKey, 20<<20)
 		if err != nil || len(data) == 0 {
 			return src
 		}
@@ -1868,7 +1910,7 @@ type pollConfig struct {
 	Timeout  time.Duration
 }
 
-func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, endpoint string) {
+func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, endpoint string) error {
 	if content, ok := payload["content"].([]interface{}); ok {
 		for _, raw := range content {
 			item, _ := raw.(map[string]interface{})
@@ -1910,6 +1952,54 @@ func normalizePayloadMedia(ctx context.Context, payload map[string]interface{}, 
 		}
 		payload[key] = normalized
 	}
+	if input, ok := payload["input"].(map[string]interface{}); ok {
+		if media, ok := input["media"].([]interface{}); ok {
+			for _, raw := range media {
+				item, _ := raw.(map[string]interface{})
+				if item == nil {
+					continue
+				}
+				kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(item["type"])))
+				src := strings.TrimSpace(fmt.Sprint(item["url"]))
+				if src == "" || src == "<nil>" {
+					continue
+				}
+				switch kind {
+				case "first_frame", "last_frame", "reference_image":
+					normalized := normalizeReferenceImage(ctx, src)
+					if !strings.HasPrefix(normalized, "data:image/") && isPrivateMediaURL(normalized) {
+						return errors.New("阿里云参考图片读取失败：请检查对象存储配置或将素材地址改为公网 HTTPS URL")
+					}
+					item["url"] = normalized
+				case "video", "reference_video", "reference_audio":
+					if isPrivateMediaURL(src) {
+						mediaName := "音频"
+						if kind == "video" || kind == "reference_video" {
+							mediaName = "视频"
+						}
+						return fmt.Errorf("阿里云无法下载本地%s素材：请将对象存储公网地址（MINIO_PUBLIC_URL）配置为可被阿里云访问的 HTTPS 域名", mediaName)
+					}
+				}
+			}
+		}
+		if messages, ok := input["messages"].([]interface{}); ok {
+			for _, rawMessage := range messages {
+				message, _ := rawMessage.(map[string]interface{})
+				content, _ := message["content"].([]interface{})
+				for _, rawItem := range content {
+					item, _ := rawItem.(map[string]interface{})
+					if src, ok := item["image"].(string); ok {
+						normalized := normalizeReferenceImage(ctx, src)
+						if !strings.HasPrefix(normalized, "data:image/") && isPrivateMediaURL(normalized) {
+							return errors.New("阿里云参考图片读取失败：请检查对象存储配置或将素材地址改为公网 HTTPS URL")
+						}
+						item["image"] = normalized
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func collapseMediaToString(v interface{}) string {
@@ -2206,7 +2296,7 @@ func unwrapUpstreamBody(raw map[string]interface{}) map[string]interface{} {
 
 func extractMediaItems(raw map[string]interface{}) []mediaItem {
 	raw = unwrapUpstreamBody(raw)
-	for _, listKey := range []string{"data", "images", "videos", "audios", "results", "files"} {
+	for _, listKey := range []string{"data", "images", "videos", "audios", "results", "files", "choices"} {
 		data, ok := raw[listKey].([]interface{})
 		if !ok {
 			continue
@@ -2274,7 +2364,7 @@ func mediaItemFromMap(m map[string]interface{}) (mediaItem, bool) {
 	if b64 := firstString(m, encodedMediaKeys()...); b64 != "" && looksLikeEncodedMedia(b64) {
 		return mediaItem{B64JSON: b64, MimeType: firstString(m, "mime_type", "mime", "content_type", "format", "audio_format")}, true
 	}
-	for _, key := range []string{"data", "result", "output", "content", "audio_result", "images", "videos", "audios", "results", "files"} {
+	for _, key := range []string{"data", "result", "output", "message", "content", "audio", "audio_result", "images", "videos", "audios", "results", "files", "choices"} {
 		if it, ok := mediaItemFromValue(m[key], m); ok {
 			return it, true
 		}
@@ -2305,7 +2395,7 @@ func mediaItemFromValue(v interface{}, parent map[string]interface{}) (mediaItem
 }
 
 func mediaURLKeys() []string {
-	return []string{"url", "uri", "src", "media_url", "output_url", "video_url", "result_url", "image_url", "audio_url", "audio", "audio_file", "download_url", "file_url", "content_url"}
+	return []string{"url", "uri", "src", "media_url", "output_url", "video_url", "result_url", "image_url", "image", "audio_url", "audio", "audio_file", "download_url", "file_url", "content_url"}
 }
 
 func encodedMediaKeys() []string {
@@ -2452,16 +2542,17 @@ func shouldMirrorMediaURL(raw string, conn connectionConfig) bool {
 	if strings.HasPrefix(raw, "data:") || !isHTTPURL(raw) {
 		return false
 	}
-	u, err := url.Parse(raw)
+	// 同源地址（含 /v1/videos/{id}/content）需带鉴权下载后转存；公网 CDN 直链跳过转存
+	return sameOriginURL(raw, conn.BaseURL)
+}
+
+func sameOriginURL(raw, baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return false
 	}
-	base, err := url.Parse(conn.BaseURL)
-	if err != nil || base.Host == "" {
-		return false
-	}
-	// 同源地址（含 /v1/videos/{id}/content）需带鉴权下载后转存；公网 CDN 直链跳过转存
-	return strings.EqualFold(u.Host, base.Host)
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && u.Host != "" && base.Host != "" && strings.EqualFold(u.Host, base.Host)
 }
 
 func isManagedMediaURL(raw string) bool {
@@ -2650,7 +2741,10 @@ func downloadAuthenticatedMedia(ctx context.Context, conn connectionConfig, medi
 		if err != nil {
 			return nil, "", err
 		}
-		applyConnectionHeaders(req, conn)
+		// Never forward an upstream API key to a provider's result CDN.
+		if sameOriginURL(mediaURL, conn.BaseURL) {
+			applyConnectionHeaders(req, conn)
+		}
 		resp, err = client.Do(req)
 		if err != nil {
 			if attempt < maxAttempts {

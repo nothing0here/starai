@@ -336,8 +336,8 @@ function operationCatalog(docs: APIDoc[], translate: (source: string) => string)
     {
       id: "createSpeech",
       group: "audio",
-      title: tr("生成语音"),
-      description: tr("将输入文本转换为语音音频，并返回异步任务信息。"),
+      title: tr("生成音频"),
+      description: tr("生成语音或音乐，并返回异步任务信息。"),
       method: "POST",
       path: "/v1/audio/speech",
       requestMode: "audio",
@@ -738,7 +738,7 @@ export default function ApiDocsPage() {
 
           {errors.length > 0 && <section className="mb-5 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/10 dark:bg-[#101827]"><h2 className="mb-3 font-semibold text-gray-900 dark:text-gray-100">{ts("错误码")}</h2><div className="overflow-hidden rounded-xl border border-gray-200 dark:border-white/10"><table className="w-full text-left text-sm"><thead className="bg-gray-50 text-xs text-gray-600 dark:bg-white/5 dark:text-gray-400"><tr><th className="px-4 py-3">{ts("HTTP 状态")}</th><th className="px-4 py-3">{ts("错误标识")}</th><th className="px-4 py-3">{ts("说明")}</th></tr></thead><tbody className="divide-y divide-gray-100 dark:divide-white/10">{errors.map((item: any, index: number) => <tr key={String(item.code || "error") + index}><td className="px-4 py-3 font-mono text-xs text-gray-800 dark:text-gray-200">{item.status || "-"}</td><td className="px-4 py-3 font-mono text-xs text-red-600 dark:text-red-300">{item.code || "-"}</td><td className="px-4 py-3 text-xs text-gray-700 dark:text-gray-300">{item.description ? translateDocText(item.description) : "-"}</td></tr>)}</tbody></table></div></section>}
 
-          {(activeVariant.requestMode === "images" || activeVariant.requestMode === "video" || activeVariant.requestMode === "audio") && <section className="rounded-2xl border border-blue-200 bg-blue-50/80 p-5 text-sm text-gray-700 dark:border-blue-400/20 dark:bg-blue-500/10 dark:text-gray-300"><h2 className="mb-2 font-semibold text-gray-900 dark:text-gray-100">{ts("异步任务流程")}</h2><p>{ts("生成接口返回任务状态后，请使用")} <code className="rounded bg-white px-1.5 py-0.5 text-xs dark:bg-white/10">/v1/tasks/&#123;task_no&#125;</code> {ts("查询结果；进度事件使用")} <code className="rounded bg-white px-1.5 py-0.5 text-xs dark:bg-white/10">/v1/tasks/&#123;task_no&#125;/events</code>。</p></section>}
+          {(activeVariant.requestMode === "images" || activeVariant.requestMode === "video" || activeVariant.requestMode === "audio") && <section className="rounded-2xl border border-blue-200 bg-blue-50/80 p-5 text-sm text-gray-700 dark:border-blue-400/20 dark:bg-blue-500/10 dark:text-gray-300"><h2 className="mb-2 font-semibold text-gray-900 dark:text-gray-100">{ts("异步任务流程")}</h2><p>{ts("生成接口返回任务状态后，请使用")} <code className="rounded bg-white px-1.5 py-0.5 text-xs dark:bg-white/10">/v1/tasks/&#123;task_no&#125;</code> {ts("查询结果；进度事件使用")} <code className="rounded bg-white px-1.5 py-0.5 text-xs dark:bg-white/10">/v1/tasks/&#123;task_no&#125;/events</code>。{ts("当模型轮询预算超过 10 分钟时，即使传入 wait=true 也会返回异步任务。参考视频和参考音频必须使用上游服务可访问的公网 URL。")}</p></section>}
         </div>
       </main>
     </div>
