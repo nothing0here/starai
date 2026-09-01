@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,6 +217,35 @@ func TestPlatformAsyncTaskResponseUsesPollURL(t *testing.T) {
 	}
 }
 
+func TestPollUpstreamTaskSupportsPostBodyAndNumericSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/aiart/query" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["job_id"] != "job-123" {
+			t.Fatalf("body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"5","data":[{"url":"https://example.com/result.png"}]}`))
+	}))
+	defer server.Close()
+
+	items, _, _, err := pollUpstreamTask(context.Background(), nil, connectionConfig{BaseURL: server.URL, AuthType: "none"}, pollConfig{
+		Path: "/v1/aiart/query", Method: http.MethodPost, Body: map[string]interface{}{"job_id": "{id}"},
+		Interval: time.Millisecond, Timeout: time.Second,
+	}, "job-123", "local-task-post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.com/result.png" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
 func TestUpstreamPollPathRejectsForeignAbsoluteURL(t *testing.T) {
 	body := []byte(`{"task_no":"task-1","poll_url":"https://attacker.example/tasks/task-1"}`)
 	if got := upstreamPollPath(body, "https://api.example.com"); got != "" {
@@ -238,6 +268,40 @@ func TestApplyRequestTransformUsesEffectiveConnection(t *testing.T) {
 	}
 	if payload["num_images"] != float64(2) {
 		t.Fatalf("num_images was not applied: %#v", payload)
+	}
+}
+
+func TestBuildMappedImagePayloadSupportsNestedNativeAPIFields(t *testing.T) {
+	runtimeRule := map[string]interface{}{
+		"upstream": map[string]interface{}{
+			"include": []interface{}{"size", "count", "reference_images"},
+			"map": map[string]interface{}{
+				"model":            "model",
+				"prompt":           "input.prompt",
+				"size":             "parameters.size",
+				"count":            "parameters.n",
+				"reference_images": "input.img_url",
+			},
+		},
+	}
+	payload := buildMappedImagePayload(context.Background(), "fallback", "wanx-v1", runtimeRule, map[string]interface{}{}, map[string]interface{}{
+		"prompt": "a cat", "size": "1024*1024", "count": float64(2),
+		"reference_images": []interface{}{"data:image/png;base64,AA=="},
+	})
+	input, ok := payload["input"].(map[string]interface{})
+	if !ok || input["prompt"] != "a cat" {
+		t.Fatalf("input = %#v", payload["input"])
+	}
+	refs, ok := input["img_url"].([]interface{})
+	if !ok || len(refs) != 1 || refs[0] != "data:image/png;base64,AA==" {
+		t.Fatalf("img_url = %#v", input["img_url"])
+	}
+	parameters, ok := payload["parameters"].(map[string]interface{})
+	if !ok || parameters["size"] != "1024*1024" || parameters["n"] != float64(2) {
+		t.Fatalf("parameters = %#v", payload["parameters"])
+	}
+	if payload["model"] != "wanx-v1" {
+		t.Fatalf("model = %#v", payload["model"])
 	}
 }
 
@@ -278,6 +342,19 @@ func TestJoinBaseEndpointNormalizesMissingSlash(t *testing.T) {
 	got := joinBaseEndpoint("https://api.minimaxi.com/", "v1/music_generation")
 	if got != "https://api.minimaxi.com/v1/music_generation" {
 		t.Fatalf("url = %q", got)
+	}
+}
+
+func TestJoinBaseEndpointDoesNotDuplicateVersionPrefix(t *testing.T) {
+	for _, test := range []struct{ baseURL, endpoint, want string }{
+		{"https://tokenhub.tencentmaas.com/v1", "/v1/images/generations", "https://tokenhub.tencentmaas.com/v1/images/generations"},
+		{"https://dashscope.aliyuncs.com/api/v1", "/api/v1/services/aigc/video-generation/video-synthesis", "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis"},
+		{"https://example.com/v1beta", "/v1beta/models/test:generateContent", "https://example.com/v1beta/models/test:generateContent"},
+		{"https://example.com/v1/images/generations", "/v1/images/generations", "https://example.com/v1/images/generations"},
+	} {
+		if got := joinBaseEndpoint(test.baseURL, test.endpoint); got != test.want {
+			t.Fatalf("joinBaseEndpoint(%q, %q) = %q, want %q", test.baseURL, test.endpoint, got, test.want)
+		}
 	}
 }
 

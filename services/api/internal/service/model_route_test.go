@@ -35,6 +35,22 @@ func TestNormalizeModelRouteDefaults(t *testing.T) {
 	if input.BaseURL != "https://example.com" {
 		t.Fatalf("base URL = %q", input.BaseURL)
 	}
+	if input.Endpoint != "" {
+		t.Fatalf("blank route endpoint was replaced with %q", input.Endpoint)
+	}
+}
+
+func TestNormalizeModelRoutePreservesCustomMediaEndpoint(t *testing.T) {
+	input := ModelRouteInput{
+		RouteName: "Primary", UpstreamModel: "wan-v1", BaseURL: "https://example.com",
+		Endpoint: "api/v1/services/aigc/video-generation/video-synthesis",
+	}
+	if err := normalizeModelRouteInput(&input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Endpoint != "/api/v1/services/aigc/video-generation/video-synthesis" {
+		t.Fatalf("endpoint = %q", input.Endpoint)
+	}
 }
 
 func TestNormalizeLegacyOpenAIProtocol(t *testing.T) {

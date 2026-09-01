@@ -416,6 +416,12 @@ const ENDPOINT_BY_MODE: Record<string, string> = {
   audio: "/v1/audio/speech",
   custom: "",
 };
+
+const endpointAfterRequestModeChange = (currentEndpoint: string, currentMode: string, nextMode: string) => {
+  const endpoint = currentEndpoint.trim();
+  const currentDefault = ENDPOINT_BY_MODE[currentMode] || "";
+  return !endpoint || endpoint === currentDefault ? (ENDPOINT_BY_MODE[nextMode] || endpoint) : currentEndpoint;
+};
 const CHAT_ENDPOINT_BY_PROTOCOL: Record<string, string> = {
   openai_compatible: "/v1/chat/completions",
   claude: "/v1/messages",
@@ -2450,7 +2456,7 @@ export default function ModelsPage() {
         return;
       }
     }
-    let effectiveVideoEndpoint = form.new_api_endpoint;
+    const effectiveEndpoint = form.new_api_endpoint.trim();
     const isSeedance2 =
       form.category === "video" &&
       (parsedRuntimeRule?.upstream?.adapter === "volcengine_seedance_2" ||
@@ -2630,7 +2636,6 @@ export default function ModelsPage() {
         request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
       };
       runtimeRule = parsedRuntimeRule;
-      effectiveVideoEndpoint = "/v1/videos";
     }
     const isVeoFramePair =
       form.category === "video" &&
@@ -2708,7 +2713,6 @@ export default function ModelsPage() {
         request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
       };
       runtimeRule = parsedRuntimeRule;
-      effectiveVideoEndpoint = "/v1/videos";
     }
     const isOmniReference =
       form.category === "video" &&
@@ -2796,7 +2800,6 @@ export default function ModelsPage() {
         request_timeout_sec: Number(currentUpstream.request_timeout_sec || 120),
       };
       runtimeRule = parsedRuntimeRule;
-      effectiveVideoEndpoint = "/v1/videos";
     }
     if (isSeedance2 || isMiniMaxH3 || isVeoReference || isOmniReference) {
       const modeParam = String(parsedRuntimeRule?.video?.mode_param || "generation_mode");
@@ -2834,7 +2837,7 @@ export default function ModelsPage() {
       display_name: form.display_name,
       icon_url: form.icon_url,
       new_api_model: isMultiCollabForm ? form.code || "multi_collab" : form.new_api_model,
-      new_api_endpoint: isMultiCollabForm ? "" : effectiveVideoEndpoint,
+      new_api_endpoint: isMultiCollabForm ? "" : effectiveEndpoint,
       request_mode: isMultiCollabForm ? "chat_completions" : form.request_mode,
       category: form.category,
       description: form.description,
@@ -3706,16 +3709,11 @@ export default function ModelsPage() {
                 setForm((prev) => {
                   setAudioTemplateKey("");
                   setVideoTemplateKey("");
-                  const next = {
+                  return {
                     ...prev,
                     request_mode: e.target.value,
-                    new_api_endpoint: ENDPOINT_BY_MODE[e.target.value] ?? prev.new_api_endpoint,
+                    new_api_endpoint: endpointAfterRequestModeChange(prev.new_api_endpoint, prev.request_mode, e.target.value),
                   };
-                  return e.target.value === "images"
-                    ? applyImageStandard(next)
-                    : e.target.value === "video"
-                      ? applyVideoStandard(next)
-                      : next;
                 })
               }
             >

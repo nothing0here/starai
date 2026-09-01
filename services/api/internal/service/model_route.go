@@ -117,9 +117,6 @@ func normalizeModelRouteInput(in *ModelRouteInput) error {
 	if in.APIKeyHeader == "" {
 		in.APIKeyHeader = "Authorization"
 	}
-	if in.Endpoint == "" {
-		in.Endpoint = "/v1/chat/completions"
-	}
 	if in.Weight < 0 {
 		return errors.New("线路权重不能为负数")
 	}

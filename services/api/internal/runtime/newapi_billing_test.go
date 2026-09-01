@@ -147,6 +147,48 @@ func TestTestModelConnectionSendsValidChatProbeWhenModelListUnavailable(t *testi
 	}
 }
 
+func TestTestModelConnectionPreservesCustomMediaEndpoint(t *testing.T) {
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"task_id":"task-1"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token", 5, 5)
+	result := client.TestModelConnection(context.Background(), "/api/v1/services/aigc/video-generation/video-synthesis", "video", "wan-v1", nil)
+	if !result.OK || path != "/api/v1/services/aigc/video-generation/video-synthesis" {
+		t.Fatalf("path=%q result=%#v", path, result)
+	}
+}
+
+func TestJoinEndpointDoesNotDuplicateProviderPathPrefix(t *testing.T) {
+	for _, test := range []struct{ baseURL, endpoint, want string }{
+		{"https://tokenhub.tencentmaas.com/v1", "/v1/images/generations", "https://tokenhub.tencentmaas.com/v1/images/generations"},
+		{"https://dashscope.aliyuncs.com/api/v1", "/api/v1/services/aigc/video-generation/video-synthesis", "https://dashscope.aliyuncs.com/api/v1/services/aigc/video-generation/video-synthesis"},
+	} {
+		if got := joinEndpoint(test.baseURL, test.endpoint); got != test.want {
+			t.Fatalf("joinEndpoint(%q, %q) = %q, want %q", test.baseURL, test.endpoint, got, test.want)
+		}
+	}
+}
+
+func TestTestModelConnectionUsesCanonicalBlankVideoEndpoint(t *testing.T) {
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token", 5, 5)
+	result := client.TestModelConnection(context.Background(), "", "video", "video-model", nil)
+	if !result.OK || path != "/v1/video/generations" {
+		t.Fatalf("path=%q result=%#v", path, result)
+	}
+}
+
 func TestChatCompletionStreamRequestsUsage(t *testing.T) {
 	var request map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -941,10 +941,16 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			body, _ = json.Marshal(buildGeminiNativeImagePayload(ctx, upstreamModel, p.ModelCode, prompt, p.Input))
 		} else if isVideoImageAPI(endpoint, upstreamModel) {
 			body, _ = json.Marshal(buildVideoImagePayload(ctx, route.RuntimeRule, endpoint, upstreamModel, p.ModelCode, prompt, p.Input))
+		} else if hasMappedMediaPayload(route.RuntimeRule) {
+			body, _ = json.Marshal(buildMappedImagePayload(ctx, p.ModelCode, upstreamModel, route.RuntimeRule, extraParams, p.Input))
 		} else {
 			size, _ := p.Input["size"].(string)
 			if size == "" {
 				size = "1024x1024"
+			}
+			isTencentImage := isTencentTokenHubImageAPI(route.Connection.BaseURL)
+			if isTencentImage {
+				size = strings.ReplaceAll(size, "x", ":")
 			}
 			imageBody := map[string]interface{}{"model": upstreamModel, "prompt": prompt, "n": result.GenerationCount, "size": size}
 			if imageBody["model"] == "" {
@@ -954,7 +960,11 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 				imageBody["aspect_ratio"] = value
 			}
 			if refs, ok := p.Input["reference_images"]; ok {
-				imageBody["image"] = normalizeReferenceImages(ctx, refs)
+				if isTencentImage {
+					imageBody["images"] = normalizeReferenceImages(ctx, refs)
+				} else {
+					imageBody["image"] = normalizeReferenceImages(ctx, refs)
+				}
 			}
 			body, _ = json.Marshal(imageBody)
 		}
@@ -989,6 +999,29 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 		result.ResponseBody, result.StatusCode, err = doJSONRequestWithLimit(ctx, route.Connection, "POST", joinBaseEndpoint(route.Connection.BaseURL, resolveModelEndpoint(endpoint, upstreamModel)), body, timeout, 96<<20)
 	}
 	return result, err
+}
+
+func isTencentTokenHubImageAPI(baseURL string) bool {
+	baseURL = strings.ToLower(strings.TrimSpace(baseURL))
+	return strings.Contains(baseURL, "tokenhub.tencentmaas.com") || strings.Contains(baseURL, "api.cloudai.tencent.com")
+}
+
+// hasMappedMediaPayload opts image requests into the same dotted-key mapping
+// already used by video/audio. This supports native media APIs whose request
+// body is nested (for example input.prompt and parameters.size) without adding
+// a provider-specific code path for every upstream.
+func hasMappedMediaPayload(runtimeRule map[string]interface{}) bool {
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	mapping, _ := upstream["map"].(map[string]interface{})
+	return len(mapping) > 0
+}
+
+func buildMappedImagePayload(ctx context.Context, modelCode, upstreamModel string, runtimeRule, extraParams, input map[string]interface{}) map[string]interface{} {
+	params := mergeWorkerMaps(input, map[string]interface{}{})
+	if refs, ok := params["reference_images"]; ok {
+		params["reference_images"] = normalizeReferenceImages(ctx, refs)
+	}
+	return videoparams.BuildUpstreamVideoPayload(modelCode, upstreamModel, runtimeRule, extraParams, params)
 }
 
 // applyRequestTransform overlays connection.request_transform onto an outgoing
@@ -1131,6 +1164,18 @@ func joinBaseEndpoint(baseURL, endpoint string) string {
 	}
 	if !strings.HasPrefix(endpoint, "/") {
 		endpoint = "/" + endpoint
+	}
+	if strings.HasSuffix(baseURL, endpoint) {
+		return baseURL
+	}
+	for _, prefix := range []string{"/compatible-mode/v1", "/api/v1", "/v1beta", "/v1"} {
+		if strings.HasSuffix(baseURL, prefix) && (endpoint == prefix || strings.HasPrefix(endpoint, prefix+"/")) {
+			endpoint = strings.TrimPrefix(endpoint, prefix)
+			if endpoint == "" {
+				return baseURL
+			}
+			break
+		}
 	}
 	return baseURL + endpoint
 }
@@ -1817,6 +1862,8 @@ type mediaItem struct {
 
 type pollConfig struct {
 	Path     string
+	Method   string
+	Body     map[string]interface{}
 	Interval time.Duration
 	Timeout  time.Duration
 }
@@ -2739,6 +2786,7 @@ func scalarString(m map[string]interface{}, keys ...string) string {
 func parsePollConfig(runtimeRule map[string]interface{}, createEndpoint string) pollConfig {
 	cfg := pollConfig{
 		Path:     strings.TrimRight(createEndpoint, "/") + "/{id}",
+		Method:   http.MethodGet,
 		Interval: 5 * time.Second,
 		Timeout:  defaultPollTimeout,
 	}
@@ -2748,6 +2796,12 @@ func parsePollConfig(runtimeRule map[string]interface{}, createEndpoint string) 
 	}
 	if s, ok := up["poll_path"].(string); ok && strings.TrimSpace(s) != "" {
 		cfg.Path = strings.TrimSpace(s)
+	}
+	if method := strings.ToUpper(strings.TrimSpace(stringAny(up["poll_method"]))); method == http.MethodGet || method == http.MethodPost {
+		cfg.Method = method
+	}
+	if body, ok := up["poll_body"].(map[string]interface{}); ok {
+		cfg.Body = body
 	}
 	if strings.Contains(createEndpoint, "/v1/videos") && strings.Contains(cfg.Path, "/v1/video/generations") {
 		cfg.Path = "/v1/videos/{id}"
@@ -2790,11 +2844,11 @@ func recordTaskProgress(ctx context.Context, pool *pgxpool.Pool, taskNo, status,
 	progress := parseProgressPercent(progressRaw)
 	if progress < 0 {
 		switch strings.ToLower(strings.TrimSpace(status)) {
-		case "queued", "pending", "not_start":
+		case "queued", "pending", "not_start", "1":
 			progress = 3
-		case "in_progress", "processing", "running":
+		case "in_progress", "processing", "running", "2", "3", "4":
 			progress = 25
-		case "succeeded", "success", "completed", "done", "finished":
+		case "succeeded", "success", "completed", "done", "finished", "5":
 			progress = 100
 		default:
 			progress = 0
@@ -2825,6 +2879,10 @@ func parseProgressPercent(raw string) int {
 func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, int, int, error) {
 	escapedID := url.PathEscape(upstreamID)
 	pollURL := joinBaseEndpoint(conn.BaseURL, strings.Replace(cfg.Path, "{id}", escapedID, 1))
+	pollMethod := strings.ToUpper(strings.TrimSpace(cfg.Method))
+	if pollMethod == "" {
+		pollMethod = http.MethodGet
+	}
 	deadline := time.Now().Add(cfg.Timeout)
 	var lastStatus string
 	var consecutiveErrors int
@@ -2833,7 +2891,13 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
-		body, statusCode, err := doJSONRequest(ctx, conn, "GET", pollURL, nil, 60*time.Second)
+		var requestBody []byte
+		if len(cfg.Body) > 0 {
+			requestBody, _ = json.Marshal(cfg.Body)
+			encodedID, _ := json.Marshal(upstreamID)
+			requestBody = bytes.ReplaceAll(requestBody, []byte(`"{id}"`), encodedID)
+		}
+		body, statusCode, err := doJSONRequest(ctx, conn, pollMethod, pollURL, requestBody, 60*time.Second)
 		if err != nil {
 			consecutiveErrors++
 			if attempt == 1 || attempt%6 == 0 {
@@ -2871,7 +2935,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			lastStatus = status
 		}
 		switch status {
-		case "failed", "error", "cancelled", "canceled", "failure", "expired":
+		case "failed", "error", "cancelled", "canceled", "failure", "expired", "6":
 			msg := firstString(raw, "error_message", "message", "error")
 			if errorDetail, ok := raw["error"].(map[string]interface{}); ok {
 				if detail := firstString(errorDetail, "message", "code"); detail != "" {
@@ -2890,7 +2954,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 				msg = "上游任务失败"
 			}
 			return nil, 0, 0, fmt.Errorf("%s", humanizeUpstreamFailure(msg))
-		case "succeeded", "success", "completed", "done", "finished":
+		case "succeeded", "success", "completed", "done", "finished", "5":
 			if failMsg := upstreamContentFailure(raw); failMsg != "" {
 				return nil, 0, 0, fmt.Errorf("%s", failMsg)
 			}

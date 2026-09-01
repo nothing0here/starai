@@ -395,7 +395,7 @@ func joinEndpoint(baseURL, endpoint string) string {
 	}
 	// Allow Base URL to include the protocol prefix (/v1 or /v1beta) without
 	// producing the common /v1/v1/... or /v1beta/v1beta/... duplicate path.
-	for _, prefix := range []string{"/v1", "/v1beta"} {
+	for _, prefix := range []string{"/compatible-mode/v1", "/api/v1", "/v1beta", "/v1"} {
 		if strings.HasSuffix(baseURL, prefix) && (endpoint == prefix || strings.HasPrefix(endpoint, prefix+"/")) {
 			endpoint = strings.TrimPrefix(endpoint, prefix)
 			if endpoint == "" {
@@ -504,7 +504,7 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 		case "images":
 			endpoint = "/v1/images/generations"
 		case "video":
-			endpoint = "/v1/videos"
+			endpoint = "/v1/video/generations"
 		case "audio":
 			endpoint = "/v1/audio/speech"
 		default:
