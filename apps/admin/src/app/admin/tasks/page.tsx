@@ -7,6 +7,7 @@ import { AdminPagination } from "@/components/AdminPagination";
 
 const STATUSES = ["pending", "running", "succeeded", "failed", "cancelled"];
 const PAGE_SIZE = 20;
+const timeFmt = (value?: string) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 
 function collectURLs(v: unknown): string[] {
   if (v == null) return [];
@@ -216,6 +217,7 @@ export default function TasksPage() {
             <tr>
               <th className="text-left px-4 py-3">任务号</th>
               <th className="text-left px-4 py-3">类型</th>
+              <th className="text-left px-4 py-3">时间</th>
               <th className="text-left px-4 py-3">状态</th>
               <th className="text-left px-4 py-3">预估/实际</th>
               <th className="text-left px-4 py-3">错误</th>
@@ -234,6 +236,10 @@ export default function TasksPage() {
                   )}
                 </td>
                 <td className="px-4 py-3">{t.type}</td>
+                <td className="px-4 py-3 whitespace-nowrap">
+                  <div className="text-xs text-gray-700">{timeFmt(t.created_at)}</div>
+                  <div className="text-[11px] text-gray-400 mt-0.5">{timeFmt(t.finished_at)}</div>
+                </td>
                 <td className="px-4 py-3">
                   <span className={
                     t.status === "succeeded" ? "text-green-600" :
