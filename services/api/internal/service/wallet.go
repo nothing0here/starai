@@ -55,6 +55,7 @@ type TransactionItem struct {
 	RefType      *string `json:"ref_type,omitempty"`
 	RefID        *string `json:"ref_id,omitempty"`
 	Remark       *string `json:"remark,omitempty"`
+	DisplayName  *string `json:"display_name,omitempty"`
 	CreatedAt    string  `json:"created_at"`
 }
 
@@ -303,8 +304,17 @@ func (s *WalletService) ListTransactions(ctx context.Context, userID int64, page
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT id, type, direction, amount, balance_after, ref_type, ref_id, remark, created_at
-		FROM wallet_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+		SELECT wt.id, wt.type, wt.direction, wt.amount, wt.balance_after, wt.ref_type, wt.ref_id, wt.remark, wt.created_at,
+		       COALESCE(chat_model.display_name, task_model.display_name, ''), COALESCE(t.type, ''),
+		       COALESCE(wd.name, ''), COALESCE(wd.runtime_config->>'generation_type', '')
+		FROM wallet_transactions wt
+		LEFT JOIN ai_call_logs call_log ON wt.ref_type='chat' AND call_log.request_id=wt.ref_id
+		LEFT JOIN models chat_model ON chat_model.id=call_log.model_id
+		LEFT JOIN tasks t ON wt.ref_type='task' AND t.task_no=wt.ref_id
+		LEFT JOIN models task_model ON task_model.id=t.model_id
+		LEFT JOIN workflow_projects wp ON wt.ref_type='workflow' AND wp.public_id=wt.ref_id
+		LEFT JOIN workflow_definitions wd ON wd.id=wp.workflow_id
+		WHERE wt.user_id=$1 ORDER BY wt.created_at DESC, wt.id DESC LIMIT $2 OFFSET $3`,
 		userID, pageSize, offset)
 	if err != nil {
 		return nil, 0, err
@@ -314,14 +324,69 @@ func (s *WalletService) ListTransactions(ctx context.Context, userID int64, page
 	for rows.Next() {
 		var item TransactionItem
 		var created time.Time
+		var modelName, taskType, workflowName, workflowType string
 		if err := rows.Scan(&item.ID, &item.Type, &item.Direction, &item.Amount, &item.BalanceAfter,
-			&item.RefType, &item.RefID, &item.Remark, &created); err != nil {
+			&item.RefType, &item.RefID, &item.Remark, &created, &modelName, &taskType, &workflowName, &workflowType); err != nil {
 			return nil, 0, err
+		}
+		if label := walletTransactionDisplayName(item, modelName, taskType, workflowName, workflowType); label != "" {
+			item.DisplayName = &label
 		}
 		item.CreatedAt = created.Format(time.RFC3339)
 		items = append(items, item)
 	}
 	return items, total, nil
+}
+
+func walletTransactionDisplayName(item TransactionItem, modelName, taskType, workflowName, workflowType string) string {
+	remark := strings.TrimSpace(stringPointerValue(item.Remark))
+	if strings.HasPrefix(remark, "Agent ") {
+		return remark
+	}
+	refType := strings.TrimSpace(stringPointerValue(item.RefType))
+	if refType == "workflow" && strings.TrimSpace(workflowName) != "" {
+		return strings.TrimSpace(workflowName) + " · " + walletConsumptionType(workflowType, item.Type, remark)
+	}
+	if (refType == "chat" || refType == "task") && strings.TrimSpace(modelName) != "" {
+		return strings.TrimSpace(modelName) + " · " + walletConsumptionType(taskType, item.Type, remark)
+	}
+	return remark
+}
+
+func walletConsumptionType(mediaType, transactionType, remark string) string {
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "chat", "text":
+		return "对话消费"
+	case "image", "images":
+		return "图片生成"
+	case "video":
+		return "视频生成"
+	case "audio", "speech", "music":
+		return "音频生成"
+	}
+	switch transactionType {
+	case "chat_usage":
+		return "对话消费"
+	case "image_usage":
+		return "图片生成"
+	case "video_usage":
+		return "视频生成"
+	case "audio_usage":
+		return "音频生成"
+	case "workflow_usage":
+		return "智能体消费"
+	}
+	if strings.TrimSpace(remark) != "" {
+		return strings.TrimSpace(remark)
+	}
+	return "消费"
+}
+
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 type RechargeRecord struct {

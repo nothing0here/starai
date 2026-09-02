@@ -98,6 +98,7 @@ type CompletionInput struct {
 	Params         map[string]interface{} `json:"params"`
 	Stream         bool                   `json:"stream"`
 	Ephemeral      bool                   `json:"ephemeral"`
+	BillingLabel   string                 `json:"-"`
 }
 
 type CompletionResult struct {
@@ -195,7 +196,7 @@ func (s *ChatService) Completion(ctx context.Context, userID int64, input Comple
 	if selectedRoute != nil {
 		s.models.UpdateSuccessfulRouteAttemptCost(ctx, requestID, selectedRoute.ID, providerCost)
 	}
-	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
+	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", chatBillingLabel(input.BillingLabel, "对话消费")); err != nil {
 		s.logCall(ctx, requestID, userID, model.ID, nil, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, 0, "billing_failed", err, duration)
 		return nil, fmt.Errorf("对话结算失败: %w", err)
 	}
@@ -620,7 +621,7 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	if selectedRoute != nil {
 		s.models.UpdateSuccessfulRouteAttemptCost(ctx, requestID, selectedRoute.ID, providerCost)
 	}
-	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", "对话消费"); err != nil {
+	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", chatBillingLabel(input.BillingLabel, "对话消费")); err != nil {
 		s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, 0, "billing_failed", err, 0)
 		return "", fmt.Errorf("对话结算失败: %w", err)
 	}
@@ -711,6 +712,13 @@ func prepareChatBillingParams(input *CompletionInput) {
 			input.Params["_estimated_output_tokens"] = output
 		}
 	}
+}
+
+func chatBillingLabel(configured, fallback string) string {
+	if label := strings.TrimSpace(configured); label != "" {
+		return label
+	}
+	return fallback
 }
 
 func normalizedChatUsage(usage runtime.ChatUsage, input CompletionInput, content string) runtime.ChatUsage {

@@ -36,6 +36,8 @@ type TaskDTO struct {
 	Status         string                 `json:"status"`
 	Progress       int                    `json:"progress"`
 	ModelCode      *string                `json:"model_code,omitempty"`
+	UserName       string                 `json:"user_name,omitempty"`
+	UserEmail      string                 `json:"user_email,omitempty"`
 	Input          map[string]interface{} `json:"input"`
 	Output         map[string]interface{} `json:"output"`
 	EstimatedCost  float64                `json:"estimated_cost"`
@@ -47,9 +49,10 @@ type TaskDTO struct {
 }
 
 type CreateTaskInput struct {
-	ModelCode string                 `json:"model_code"`
-	Prompt    string                 `json:"prompt"`
-	Params    map[string]interface{} `json:"params"`
+	ModelCode    string                 `json:"model_code"`
+	Prompt       string                 `json:"prompt"`
+	Params       map[string]interface{} `json:"params"`
+	BillingLabel string                 `json:"-"`
 }
 
 type CreateComposeTaskInput struct {
@@ -163,7 +166,13 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 		params[k] = v
 	}
 	for k, v := range input.Params {
+		if k == "_billing_label" {
+			continue
+		}
 		params[k] = v
+	}
+	if label := strings.TrimSpace(input.BillingLabel); label != "" {
+		params["_billing_label"] = label
 	}
 	if _, ok := params["user_prompt"]; !ok {
 		params["user_prompt"] = input.Prompt
@@ -380,7 +389,7 @@ func (s *TaskService) List(ctx context.Context, userID int64, page, pageSize int
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return scanTasks(rows, total)
+	return scanTasks(rows, total, false)
 }
 
 func (s *TaskService) ListAdmin(ctx context.Context, page, pageSize int, status string) ([]TaskDTO, int, error) {
@@ -402,20 +411,21 @@ func (s *TaskService) ListAdmin(ctx context.Context, page, pageSize int, status 
 	s.db.QueryRow(ctx, "SELECT COUNT(*) FROM tasks t WHERE "+where, args...).Scan(&total)
 	args = append(args, pageSize, (page-1)*pageSize)
 	rows, err := s.db.Query(ctx, `
-		SELECT t.task_no, t.upstream_task_id, t.type, t.status, m.code, t.input, t.output, t.estimated_cost, t.actual_cost, t.error_code, t.error_message, t.created_at, t.finished_at
-		FROM tasks t LEFT JOIN models m ON m.id=t.model_id WHERE `+where+` ORDER BY t.created_at DESC LIMIT $`+itoa(argN)+` OFFSET $`+itoa(argN+1), args...)
+		SELECT t.task_no, t.upstream_task_id, t.type, t.status, m.code, t.input, t.output, t.estimated_cost, t.actual_cost, t.error_code, t.error_message, t.created_at, t.finished_at,
+		       COALESCE(u.nickname, ''), COALESCE((SELECT a.identifier FROM auth_identities a WHERE a.user_id=u.id AND a.provider='email' ORDER BY a.id LIMIT 1), '')
+		FROM tasks t LEFT JOIN models m ON m.id=t.model_id JOIN users u ON u.id=t.user_id WHERE `+where+` ORDER BY t.created_at DESC LIMIT $`+itoa(argN)+` OFFSET $`+itoa(argN+1), args...)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return scanTasks(rows, total)
+	return scanTasks(rows, total, true)
 }
 
 func itoa(n int) string {
 	return strconv.Itoa(n)
 }
 
-func scanTasks(rows pgx.Rows, total int) ([]TaskDTO, int, error) {
+func scanTasks(rows pgx.Rows, total int, includeUser bool) ([]TaskDTO, int, error) {
 	var items []TaskDTO
 	for rows.Next() {
 		var t TaskDTO
@@ -423,8 +433,12 @@ func scanTasks(rows pgx.Rows, total int) ([]TaskDTO, int, error) {
 		var created time.Time
 		var finished *time.Time
 		var upstreamTaskID *string
-		if err := rows.Scan(&t.TaskNo, &upstreamTaskID, &t.Type, &t.Status, &t.ModelCode, &input, &output, &t.EstimatedCost, &t.ActualCost,
-			&t.ErrorCode, &t.ErrorMessage, &created, &finished); err != nil {
+		dest := []interface{}{&t.TaskNo, &upstreamTaskID, &t.Type, &t.Status, &t.ModelCode, &input, &output, &t.EstimatedCost, &t.ActualCost,
+			&t.ErrorCode, &t.ErrorMessage, &created, &finished}
+		if includeUser {
+			dest = append(dest, &t.UserName, &t.UserEmail)
+		}
+		if err := rows.Scan(dest...); err != nil {
 			return nil, 0, err
 		}
 		if upstreamTaskID != nil && *upstreamTaskID != "" {

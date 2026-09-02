@@ -178,7 +178,7 @@ export default function TasksPage() {
     return tasks.filter((t) => {
       if (type && t.type !== type) return false;
       if (kw) {
-        const hay = `${t.task_no} ${t.upstream_task_id || ""}`.toLowerCase();
+        const hay = `${t.task_no} ${t.upstream_task_id || ""} ${t.user_name || ""} ${t.user_email || ""}`.toLowerCase();
         if (!hay.includes(kw)) return false;
       }
       return true;
@@ -216,6 +216,7 @@ export default function TasksPage() {
           <thead className="bg-gray-50 text-gray-500">
             <tr>
               <th className="text-left px-4 py-3">任务号</th>
+              <th className="text-left px-4 py-3">用户</th>
               <th className="text-left px-4 py-3">类型</th>
               <th className="text-left px-4 py-3">时间</th>
               <th className="text-left px-4 py-3">状态</th>
@@ -234,6 +235,10 @@ export default function TasksPage() {
                   ) : (
                     <div className="text-[11px] text-gray-300 mt-0.5">—</div>
                   )}
+                </td>
+                <td className="px-4 py-3">
+                  <div className="text-xs text-gray-900">{t.user_name || "未设置昵称"}</div>
+                  <div className="text-[11px] text-gray-400 mt-0.5 break-all">{t.user_email || "—"}</div>
                 </td>
                 <td className="px-4 py-3">{t.type}</td>
                 <td className="px-4 py-3 whitespace-nowrap">

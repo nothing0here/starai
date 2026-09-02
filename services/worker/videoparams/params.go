@@ -229,7 +229,7 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 		"role_prompt", "channel_key", "fallback_enabled", "web_search", "timeout_sec", "asset_context",
 		"negative_prompt", "style", "selling_points", "user_intent", "asset_notes",
 		"language", "language_label", "language_name", "generation_language", "generation_language_label", "generation_language_name",
-		"_skip_billing", "_workflow_project",
+		"_skip_billing", "_workflow_project", "_billing_label",
 	}
 	if !preserveVideoParams {
 		platformOnly = append(platformOnly, "duration")

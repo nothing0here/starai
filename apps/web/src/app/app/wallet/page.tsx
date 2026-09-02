@@ -272,7 +272,7 @@ function TransactionList({ items, cash }: { items: WalletTransaction[]; cash?: b
         items.map((tx) => (
           <div key={tx.id} className="flex items-center justify-between gap-3 px-5 py-4">
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{tx.remark || ts(TX_LABELS[tx.type] || tx.type)}</div>
+              <div className="break-words text-sm font-medium">{tx.display_name || tx.remark || ts(TX_LABELS[tx.type] || tx.type)}</div>
               <div className="mt-0.5 text-xs text-gray-400">{new Date(tx.created_at).toLocaleString("zh-CN", { hour12: false })}</div>
             </div>
             <div className={`text-sm font-semibold ${tx.direction === "in" ? "text-primary" : "text-gray-700"}`}>

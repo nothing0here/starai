@@ -676,7 +676,7 @@ func (s *OpsService) listRecentFailedTasks(ctx context.Context, page, pageSize i
 		return nil, 0, err
 	}
 	defer rows.Close()
-	return scanTasks(rows, total)
+	return scanTasks(rows, total, false)
 }
 
 func (s *OpsService) ListCardRechargeAnomalies(ctx context.Context, limit int) ([]CardRechargeAnomaly, error) {

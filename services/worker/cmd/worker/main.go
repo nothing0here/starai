@@ -501,6 +501,9 @@ routeLoop:
 	} else if isAudio {
 		txType, remark = "audio_usage", "音频生成"
 	}
+	if label := strings.TrimSpace(stringAny(p.Input["_billing_label"])); label != "" {
+		remark = label
+	}
 	if boolInput(p.Input, "_skip_billing") {
 		if _, err := pool.Exec(ctx, `
 			UPDATE tasks SET status='succeeded', output=$1, actual_cost=$2, route_id=$3, provider_cost=$4, error_code=NULL, error_message=NULL, finished_at=now(), updated_at=now() WHERE task_no=$5 AND status='running'`,

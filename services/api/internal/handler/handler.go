@@ -2435,6 +2435,7 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 		ModelCode: strings.TrimSpace(req.ModelCode), ConversationID: conversationID,
 		Messages: append([]runtime.ChatMessage{{Role: "system", Content: plannerPrompt}}, normalizedMessages...),
 		Params:   map[string]interface{}{"temperature": 0.2, "asset_ids": req.AssetIDs, "deep_think": req.DeepThink}, Stream: req.Stream,
+		BillingLabel: "Agent 对话消费",
 	}
 	h.attachAssetContext(c.Request.Context(), c.GetInt64("user_id"), &input)
 	if req.Stream {
@@ -3133,7 +3134,7 @@ func (h *Handler) creativeAgentSearchDecision(ctx context.Context, userID int64,
 	input := service.CompletionInput{
 		ModelCode: modelCode, ConversationID: conversationID,
 		Messages: append([]runtime.ChatMessage{{Role: "system", Content: creativeAgentSearchDecisionPrompt + "\n" + creativeAgentClockContext(clock)}}, messages...),
-		Params:   map[string]interface{}{"temperature": 0.0}, Stream: false, Ephemeral: true,
+		Params:   map[string]interface{}{"temperature": 0.0}, Stream: false, Ephemeral: true, BillingLabel: "Agent 对话消费",
 	}
 	result, err := h.chat.Completion(ctx, userID, input)
 	if err != nil {
@@ -3582,6 +3583,9 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 	if req.Params == nil {
 		req.Params = map[string]interface{}{}
 	}
+	billingLabel := map[string]string{
+		"image": "Agent 图片生成", "video": "Agent 视频生成", "speech": "Agent 音频生成", "music": "Agent 音频生成",
+	}[req.MediaType]
 	if req.MediaType == "video" {
 		service.NormalizeAgentVideoParams(model, req.Params)
 	}
@@ -3627,7 +3631,7 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 	if lines := h.assetContextLines(c.Request.Context(), c.GetInt64("user_id"), ids); len(lines) > 0 {
 		req.Params["asset_context"] = lines
 	}
-	task, err := h.tasks.Create(c.Request.Context(), c.GetInt64("user_id"), service.CreateTaskInput{ModelCode: req.ModelCode, Prompt: req.Prompt, Params: req.Params})
+	task, err := h.tasks.Create(c.Request.Context(), c.GetInt64("user_id"), service.CreateTaskInput{ModelCode: req.ModelCode, Prompt: req.Prompt, Params: req.Params, BillingLabel: billingLabel})
 	if err != nil {
 		util.BadRequest(c, err.Error())
 		return

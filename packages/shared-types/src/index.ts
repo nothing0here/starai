@@ -28,6 +28,7 @@ export interface WalletTransaction {
   ref_type?: string;
   ref_id?: string;
   remark?: string;
+  display_name?: string;
   created_at: string;
 }
 
@@ -118,6 +119,8 @@ export interface Message {
 export interface Task {
   task_no: string;
   upstream_task_id?: string;
+  user_name?: string;
+  user_email?: string;
   type: string;
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   input: Record<string, unknown>;
