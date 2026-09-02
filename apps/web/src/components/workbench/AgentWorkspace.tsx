@@ -24,6 +24,7 @@ import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } f
 import { useI18n } from "@/i18n/I18nProvider";
 import { VideoUpscaleWorkspace } from "./VideoUpscaleWorkspace";
 import { AgentLanding, type AgentDisplayStep } from "./AgentLanding";
+import { AgentIcon } from "./AgentIcon";
 import { NovelWorkshopLanding } from "./NovelWorkshopLanding";
 import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "./PhotoStudioLanding";
 import { VirtualTryOnInputBar, VirtualTryOnLanding, VirtualTryOnResult } from "./VirtualTryOnLanding";
@@ -2035,7 +2036,7 @@ function LegacyAgentLanding({
           {generationType === "video" ? ts("视频智能体") : ts("图片智能体")}
         </div>
         <div className="flex items-center justify-center gap-3">
-          <div className={"flex h-9 w-9 items-center justify-center rounded-2xl text-xl shadow-sm sm:h-11 sm:w-11 sm:text-2xl " + theme.iconBg}>{workflowIcon}</div>
+          <div className={"flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xl shadow-sm sm:h-11 sm:w-11 sm:text-2xl " + theme.iconBg}><AgentIcon value={workflowIcon} alt={workflowName} /></div>
           <h1 title={workflowName} className="max-w-[min(78vw,960px)] truncate text-xl font-black tracking-normal text-gray-900 dark:text-white sm:text-3xl">{workflowName}</h1>
         </div>
         {workflowDescription && <p className="mx-auto mt-2 max-w-2xl px-3 text-xs leading-5 text-gray-500 dark:text-gray-300 sm:text-sm">{workflowDescription}</p>}
@@ -2085,8 +2086,8 @@ function LegacyAgentLanding({
             </span>
           </div>
           <div className="flex items-start gap-4 lg:gap-5">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-500/10 text-2xl text-cyan-600 transition duration-300 group-hover:rotate-3 group-hover:scale-110 dark:text-cyan-200 sm:h-14 sm:w-14 lg:h-16 lg:w-16">
-              {active.icon || workflowIcon}
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-cyan-500/10 text-2xl text-cyan-600 transition duration-300 group-hover:rotate-3 group-hover:scale-110 dark:text-cyan-200 sm:h-14 sm:w-14 lg:h-16 lg:w-16">
+              <AgentIcon value={active.icon || workflowIcon} fallback={workflowIcon} alt={active.title} />
             </div>
             <div className="min-w-0">
               <h2 title={active.title} className="line-clamp-2 text-lg font-black tracking-normal text-gray-900 dark:text-white sm:text-xl lg:text-2xl">{active.title}</h2>

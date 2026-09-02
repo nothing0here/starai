@@ -19,6 +19,7 @@ import { useI18n } from "@/i18n/I18nProvider";
 import { WorkbenchTopActions } from "./WorkbenchTopActions";
 import { InfiniteCanvasWorkspace } from "./workbench/InfiniteCanvasWorkspace";
 import { CreativeAgentWorkspace } from "./workbench/CreativeAgentWorkspace";
+import { AgentIcon } from "./workbench/AgentIcon";
 
 const PRIMARY_NAV = [
   { id: "models", label: "大模型", icon: LayoutGrid },
@@ -487,7 +488,7 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                 )}
               >
                 <div className="flex gap-3">
-                  <div className="tech-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-amber-200 bg-gray-950 text-lg text-amber-300 shadow-sm dark:border-amber-400/20">{creativeAgent.icon || "✦"}</div>
+                  <div className="tech-icon flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-amber-200 bg-gray-950 text-lg text-amber-300 shadow-sm dark:border-amber-400/20"><AgentIcon value={creativeAgent.icon} fallback="✦" alt={creativeAgent.name} /></div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-1">
                       <span className="tech-title truncate text-sm font-semibold text-gray-900 dark:text-gray-100">{creativeAgent.name}</span>
@@ -646,8 +647,8 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                   )}
                 >
                   <div className="flex gap-3">
-                    <div className="tech-icon w-10 h-10 rounded-xl bg-gray-900 text-white flex items-center justify-center text-lg shrink-0">
-                      {a.icon || "🤖"}
+                    <div className="tech-icon w-10 h-10 rounded-xl bg-gray-900 text-white flex items-center justify-center text-lg shrink-0 overflow-hidden">
+                      <AgentIcon value={a.icon} alt={agentName} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">

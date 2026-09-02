@@ -8,6 +8,7 @@ import { API_URL, api, legacyAuthHeaders, uploadAsset } from "@/lib/api";
 import { useSiteBranding } from "@/components/SiteBrand";
 import { WorkbenchTopActions } from "@/components/WorkbenchTopActions";
 import { AgentLanding } from "./AgentLanding";
+import { AgentIcon } from "./AgentIcon";
 import { ChatTopTools, type BottomBarState } from "./BottomBar";
 import { AGENT_THEMES } from "./categoryMeta";
 
@@ -18,7 +19,7 @@ type Message = { role: "user" | "assistant"; content: string; images?: string[];
 type Plan = { intent?: string; reply?: string; prompt?: string; params?: Record<string, unknown>; needs_confirm?: boolean };
 type TaskState = { task_no: string; type?: string; status: string; progress?: number; input?: Record<string, unknown>; output?: Record<string, unknown>; error_message?: string };
 type HistoryItem = { public_id: string; title?: string | null; updated_at: string };
-type AgentConfig = { runtime_config?: { analysis_model_code?: string; image_model_code?: string; video_model_code?: string; speech_model_code?: string; music_model_code?: string } };
+type AgentConfig = { icon?: string; runtime_config?: { analysis_model_code?: string; image_model_code?: string; video_model_code?: string; speech_model_code?: string; music_model_code?: string } };
 type AgentEvent = { type?: string; asset_ids?: string[]; task_no?: string; media_type?: string; prompt?: string; search_results?: SearchResult[]; search_trace?: SearchTrace; search_warning?: string };
 type AssetRecord = { public_id: string; name?: string; url: string; kind?: string; mime_type?: string };
 type MediaSet = { images: string[]; videos: string[]; audios: string[] };
@@ -264,6 +265,7 @@ export function CreativeAgentWorkspace({
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
   const [historyLoadingId, setHistoryLoadingId] = useState("");
   const [activeFeature, setActiveFeature] = useState(0);
+  const [agentIcon, setAgentIcon] = useState("✦");
   const [deepThink, setDeepThink] = useState(false);
   const [searchAvailable, setSearchAvailable] = useState(false);
   const [searchUnitPrice, setSearchUnitPrice] = useState(0);
@@ -288,6 +290,7 @@ export function CreativeAgentWorkspace({
         setSpeechModels(nextSpeech);
         setMusicModels(nextMusic);
         const config = agent.runtime_config || {};
+        setAgentIcon(agent.icon?.trim() || "✦");
         setChatModelCode(activeAgentChatModel(chats, agent));
         const defaultImage = nextImages.find((item) => item.code === config.image_model_code)?.code || nextImages[0]?.code || "";
         const defaultVideo = nextVideos.find((item) => item.code === config.video_model_code)?.code || nextVideos[0]?.code || "";
@@ -659,7 +662,7 @@ export function CreativeAgentWorkspace({
         {messages.length === 0 ? (
           <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-3 py-2 text-center md:hidden">
-              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/15 text-primary"><Sparkles size={19} /></div>
+              <div className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-xl bg-primary/15 text-primary"><AgentIcon value={agentIcon} fallback="✦" alt="Agent 通用智能体" /></div>
               <h1 className="mt-2 text-lg font-bold text-gray-950 dark:text-gray-50">Agent 通用智能体</h1>
               <p className="mt-1 max-w-sm text-xs leading-5 text-gray-600 dark:text-gray-300">说出目标，连续完成图片、视频、语音或音乐创作。</p>
               <div className="mt-3 grid w-full max-w-sm grid-cols-2 gap-1.5">
@@ -676,7 +679,7 @@ export function CreativeAgentWorkspace({
             </div>
             <div className="hidden min-h-0 flex-1 md:flex">
               <AgentLanding
-              workflowIcon="✦"
+              workflowIcon={agentIcon}
               workflowName="Agent 通用智能体"
               workflowDescription="一句话理解创作目标，连续完成图片、视频、语音与音乐任务；上一轮结果可直接衔接下一轮。"
               heroTags={HOT_PROMPTS}

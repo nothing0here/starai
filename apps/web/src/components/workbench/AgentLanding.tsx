@@ -1,6 +1,7 @@
 "use client";
 
 import { useI18n } from "@/i18n/I18nProvider";
+import { AgentIcon } from "./AgentIcon";
 
 export type AgentDisplayStep = {
   icon?: string;
@@ -58,7 +59,7 @@ export function AgentLanding({
           {generationType === "mixed" ? ts("全能创作 Agent") : generationType === "video" ? ts("视频智能体") : ts("图片智能体")}
         </div>
         <div className="flex items-center justify-center gap-3">
-          <div className={"flex h-9 w-9 items-center justify-center rounded-2xl text-xl shadow-sm sm:h-11 sm:w-11 sm:text-2xl " + theme.iconBg}>{workflowIcon}</div>
+          <div className={"flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xl shadow-sm sm:h-11 sm:w-11 sm:text-2xl " + theme.iconBg}><AgentIcon value={workflowIcon} alt={workflowName} /></div>
           <h1 title={workflowName} className="max-w-[min(78vw,960px)] truncate text-xl font-black tracking-normal text-gray-900 dark:text-white sm:text-3xl">{workflowName}</h1>
         </div>
         {workflowDescription && <p className="mx-auto mt-2 max-w-2xl px-3 text-xs leading-5 text-gray-500 dark:text-gray-300 sm:text-sm">{workflowDescription}</p>}
@@ -71,7 +72,7 @@ export function AgentLanding({
         </div>
       </div>
 
-      <div className={`agent-showcase min-h-0 shrink-0 items-center sm:pt-4 lg:pt-2 ${compactOnMobile ? "pt-2" : "pt-4"}`}>
+      <div className={`agent-showcase agent-showcase--landing min-h-0 shrink-0 items-center sm:pt-4 lg:pt-5 ${compactOnMobile ? "pt-2" : "pt-4"}`}>
         <div className="agent-feature-list mx-auto w-full max-w-[300px] gap-3">
           {safeFeatures.slice(0, 4).map((item, index) => {
             const selected = activeIndex === index;
@@ -100,7 +101,7 @@ export function AgentLanding({
           })}
         </div>
 
-        <div className={`agent-feature-card group mx-auto flex w-full max-w-[640px] flex-col justify-center overflow-hidden rounded-3xl border border-cyan-300/70 bg-white/65 p-3 shadow-xl shadow-cyan-950/10 backdrop-blur-xl transition duration-300 hover:-translate-y-1 hover:border-cyan-400 hover:bg-white/75 hover:shadow-2xl hover:shadow-cyan-950/15 dark:border-cyan-400/30 dark:bg-transparent dark:shadow-black/30 dark:hover:bg-cyan-400/[0.04] sm:min-h-[260px] sm:p-5 lg:min-h-[280px] lg:p-6 ${compactOnMobile ? "min-h-[155px] max-h-[190px]" : "min-h-[230px] max-h-[280px]"}`}>
+        <div className={`agent-feature-card agent-feature-card--landing group mx-auto flex w-full max-w-[640px] flex-col justify-center overflow-hidden rounded-3xl border border-cyan-300/70 bg-white/65 p-3 shadow-xl shadow-cyan-950/10 backdrop-blur-xl transition duration-300 hover:-translate-y-1 hover:border-cyan-400 hover:bg-white/75 hover:shadow-2xl hover:shadow-cyan-950/15 dark:border-cyan-400/30 dark:bg-transparent dark:shadow-black/30 dark:hover:bg-cyan-400/[0.04] sm:min-h-[260px] sm:p-5 lg:min-h-[280px] lg:p-6 ${compactOnMobile ? "min-h-[155px] max-h-[190px]" : "min-h-[230px] max-h-[280px]"}`}>
           <div className="mb-4 flex items-center justify-between gap-3 lg:mb-5">
             <span className="rounded-xl bg-cyan-500/10 px-3 py-2 text-sm font-black text-cyan-700 dark:text-cyan-200">{String(Math.min(activeIndex + 1, safeFeatures.length)).padStart(2, "0")}</span>
             <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-600 dark:border-emerald-400/20 dark:bg-emerald-400/10 dark:text-emerald-200">
@@ -108,8 +109,8 @@ export function AgentLanding({
             </span>
           </div>
           <div className="flex items-start gap-4 lg:gap-5">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-cyan-500/10 text-2xl text-cyan-600 transition duration-300 group-hover:rotate-3 group-hover:scale-110 dark:text-cyan-200 sm:h-14 sm:w-14 lg:h-16 lg:w-16">
-              {active.icon || workflowIcon}
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-cyan-500/10 text-2xl text-cyan-600 transition duration-300 group-hover:rotate-3 group-hover:scale-110 dark:text-cyan-200 sm:h-14 sm:w-14 lg:h-16 lg:w-16">
+              <AgentIcon value={active.icon || workflowIcon} fallback={workflowIcon} alt={active.title} />
             </div>
             <div className="min-w-0">
               <h2 title={active.title} className="line-clamp-2 text-lg font-black tracking-normal text-gray-900 dark:text-white sm:text-xl lg:text-2xl">{active.title}</h2>

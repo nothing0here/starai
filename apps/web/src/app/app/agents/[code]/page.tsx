@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { api, apiForLocale } from "@/lib/api";
 import { SchemaForm, schemaDefaults } from "@/components/workbench/SchemaForm";
 import { useI18n } from "@/i18n/I18nProvider";
+import { AgentIcon } from "@/components/workbench/AgentIcon";
 import { NovelWorkshopLanding } from "@/components/workbench/NovelWorkshopLanding";
 import { PhotoStudioLanding, PhotoStudioInputBar, PhotoStudioTopBar } from "@/components/workbench/PhotoStudioLanding";
 import { VirtualTryOnInputBar, VirtualTryOnLanding, VirtualTryOnResult } from "@/components/workbench/VirtualTryOnLanding";
@@ -329,8 +330,8 @@ export default function AgentWorkspacePage() {
         </button>
 
         <div className="flex items-center gap-3 mb-6">
-          <div className="w-12 h-12 rounded-2xl bg-gray-900 text-white flex items-center justify-center text-2xl">
-            {workflow.icon || "🤖"}
+          <div className="w-12 h-12 rounded-2xl bg-gray-900 text-white flex items-center justify-center text-2xl overflow-hidden">
+            <AgentIcon value={workflow.icon} alt={workflow.name} />
           </div>
           <div>
             <h1 className="text-xl font-bold">{workflow.name}</h1>

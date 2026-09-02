@@ -289,6 +289,48 @@ func TestPlatformAsyncTaskResponseUsesPollURL(t *testing.T) {
 	}
 }
 
+func TestDashScopeAsyncTaskRequestHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/video-synthesis":
+			if got := r.Header.Get("X-DashScope-Async"); got != "enable" {
+				t.Fatalf("create async header = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"task_id":"task-1","status":"pending"}`))
+		case "/tasks/task-1":
+			if got := r.Header.Get("X-DashScope-Async"); got != "" {
+				t.Fatalf("poll async header = %q", got)
+			}
+			if got := r.Header.Get("X-Keep"); got != "keep" {
+				t.Fatalf("preserved header = %q", got)
+			}
+			if got := r.Header.Get("Authorization"); got != "Bearer key-1" {
+				t.Fatalf("authorization = %q", got)
+			}
+			_, _ = w.Write([]byte(`{"status":"succeeded","output":{"videos":[{"url":"https://example.com/result.mp4"}]}}`))
+		default:
+			t.Fatalf("unexpected request path = %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	conn := connectionConfig{
+		BaseURL: server.URL,
+		APIKey:  "key-1",
+		Headers: map[string]string{"x-dashscope-async": "enable", "X-Keep": "keep"},
+	}
+	if _, statusCode, err := doJSONRequest(context.Background(), conn, http.MethodPost, server.URL+"/video-synthesis", []byte(`{}`), time.Second); err != nil || statusCode != http.StatusOK {
+		t.Fatalf("create request status=%d err=%v", statusCode, err)
+	}
+	items, _, _, err := pollUpstreamTask(context.Background(), nil, conn, pollConfig{Path: "/tasks/{id}", Interval: time.Millisecond, Timeout: time.Second}, "task-1", "local-task-header")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].URL != "https://example.com/result.mp4" {
+		t.Fatalf("items = %#v", items)
+	}
+}
+
 func TestPollUpstreamTaskSupportsPostBodyAndNumericSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/aiart/query" {

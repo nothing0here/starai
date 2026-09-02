@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bot, Check, Code2, Image as ImageIcon, Layers, Pencil, Plus, Settings2, Sparkles, Trash2, Video, X } from "lucide-react";
-import { adminApi } from "@/lib/api";
+import { Bot, Check, Code2, Image as ImageIcon, Layers, Loader2, Pencil, Plus, Settings2, Sparkles, Trash2, Upload, Video, X } from "lucide-react";
+import { adminApi, adminUploadFile } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
 
 type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "creative_agent";
@@ -155,6 +155,19 @@ type PresetBundle = {
   nodes: WorkflowNode[];
   price_rule: Record<string, unknown>;
 };
+
+function isImageIcon(value?: string) {
+  return /^(https?:\/\/|\/|data:image\/|blob:)/i.test(value?.trim() || "");
+}
+
+function AgentIconValue({ value, fallback, alt = "" }: { value?: string; fallback: string; alt?: string }) {
+  const icon = value?.trim() || fallback;
+  if (isImageIcon(icon)) {
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={icon} alt={alt} className="h-full w-full object-cover" />;
+  }
+  return <>{icon}</>;
+}
 
 const IMAGE_SCENES: SceneDef[] = [
   { code: "main_image", label: "商品主图", desc: "白底或高级简洁背景，主体清晰，适合列表和首图。", locked: true },
@@ -837,6 +850,7 @@ export default function AgentsAdminPage() {
   const [jsonDraft, setJsonDraft] = useState("");
   const [jsonErr, setJsonErr] = useState("");
   const [page, setPage] = useState(1);
+  const [iconUploading, setIconUploading] = useState(false);
 
   const chatModels = useMemo(
     () => models.filter((m) => m.is_enabled && m.category === "chat" && ["chat_completions", "responses"].includes(m.request_mode)),
@@ -1029,6 +1043,20 @@ export default function AgentsAdminPage() {
     setJsonOpen(true);
   };
 
+  const uploadAgentIcon = async (file?: File) => {
+    if (!file) return;
+    setIconUploading(true);
+    setErr("");
+    try {
+      const url = await adminUploadFile(file);
+      setForm((prev) => ({ ...prev, icon: url }));
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "图标上传失败");
+    } finally {
+      setIconUploading(false);
+    }
+  };
+
   const applyJson = () => {
     try {
       const parsed = JSON.parse(jsonDraft) as Partial<PresetBundle>;
@@ -1109,7 +1137,7 @@ export default function AgentsAdminPage() {
       code: form.code.trim(),
       name: form.name.trim(),
       description: form.description.trim(),
-      icon: form.icon,
+      icon: form.icon.trim(),
       category: form.generation_type === "creative_agent" ? "chat" : form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "workflow" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
@@ -1228,7 +1256,25 @@ export default function AgentsAdminPage() {
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Bot size={16} />基础信息</div>
                 <Field label="编码"><input className="admin-input" value={form.code} disabled={form.isEdit} onChange={(e) => setForm({ ...form, code: e.target.value })} required /></Field>
                 <Field label="名称"><input className="admin-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></Field>
-                <Field label="图标"><input className="admin-input" value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} /></Field>
+                <Field label="智能体图标" wide>
+                  <div className="flex flex-col gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3 sm:flex-row sm:items-center">
+                    <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gray-900 text-2xl text-white shadow-sm">
+                      <AgentIconValue value={form.icon} fallback={activePreset.icon} alt={form.name || activePreset.label} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap gap-2">
+                        <label className={`inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-xl bg-primary px-3 text-xs font-semibold text-dark transition active:scale-[.98] ${iconUploading ? "pointer-events-none opacity-60" : ""}`}>
+                          {iconUploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                          {iconUploading ? "上传中" : "上传图片"}
+                          <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" disabled={iconUploading} onChange={(e) => { void uploadAgentIcon(e.target.files?.[0]); e.currentTarget.value = ""; }} />
+                        </label>
+                        <button type="button" onClick={() => setForm((prev) => ({ ...prev, icon: activePreset.icon }))} className="h-9 rounded-xl border border-gray-200 bg-white px-3 text-xs text-gray-600 transition hover:bg-gray-50 active:scale-[.98]">恢复默认</button>
+                      </div>
+                      {!isImageIcon(form.icon) && <input aria-label="字符图标" maxLength={8} className="admin-input mt-2 max-w-32 bg-white text-center text-lg" value={form.icon} onChange={(e) => setForm((prev) => ({ ...prev, icon: e.target.value }))} />}
+                      <p className="mt-2 text-[11px] leading-5 text-gray-500">推荐 200×200 像素、1:1 方图，PNG 或 WebP，建议控制在 1MB 内。不上传时使用当前类型的默认图标。</p>
+                    </div>
+                  </div>
+                </Field>
                 <Field label="状态"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 px-3 text-sm"><input type="checkbox" checked={form.is_enabled} onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />启用智能体</label></Field>
                 <Field label="描述" wide><input className="admin-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
                 <Field label="排序"><input type="number" className="admin-input" value={form.sort_order} onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) || 0 })} /></Field>
@@ -1532,7 +1578,7 @@ export default function AgentsAdminPage() {
             <aside className="space-y-4">
               <div className="rounded-2xl border border-gray-100 bg-gray-950 p-5 text-white shadow-sm">
                 <div className="flex items-center gap-3">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/10 text-2xl">{form.icon || activePreset.icon}</div>
+                  <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl bg-white/10 text-2xl"><AgentIconValue value={form.icon} fallback={activePreset.icon} alt={form.name || activePreset.label} /></div>
                   <div><div className="text-sm text-white/50">前台预览</div><div className="font-semibold">{form.name || activePreset.label}</div></div>
                 </div>
                 <p className="mt-4 text-sm leading-6 text-white/70">{form.description || activePreset.description}</p>
@@ -1569,7 +1615,7 @@ export default function AgentsAdminPage() {
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xl">{w.icon || preset.icon}</span>
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-gray-900 text-xl text-white"><AgentIconValue value={w.icon} fallback={preset.icon} alt={w.name} /></span>
                     <h2 className="font-semibold text-gray-950">{w.name}</h2>
                     <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-mono text-gray-500">{w.code}</span>
                     <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-600">{preset.label}</span>

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
+import { AgentIcon } from "@/components/workbench/AgentIcon";
 
 interface WorkflowNode {
   id: string;
@@ -44,8 +45,8 @@ export default function AgentsPage() {
                 href={`/app/agents/${w.code}`}
                 className="soft-card p-5 hover:shadow-lg transition block"
               >
-                <div className="w-12 h-12 rounded-2xl bg-gray-900 text-white flex items-center justify-center text-2xl mb-3">
-                  {w.icon || "🤖"}
+                <div className="w-12 h-12 rounded-2xl bg-gray-900 text-white flex items-center justify-center text-2xl mb-3 overflow-hidden">
+                  <AgentIcon value={w.icon} alt={w.name} />
                 </div>
                 <h3 className="font-semibold text-gray-900">{w.name}</h3>
                 <p className="text-xs text-gray-500 mt-1 line-clamp-2 leading-relaxed">{w.description}</p>

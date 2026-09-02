@@ -1182,6 +1182,22 @@ func applyConnectionHeaders(req *http.Request, cfg connectionConfig) {
 	}
 }
 
+// connectionForTaskPoll keeps creation-only DashScope async mode off task queries.
+func connectionForTaskPoll(cfg connectionConfig) connectionConfig {
+	if len(cfg.Headers) == 0 {
+		return cfg
+	}
+	headers := make(map[string]string, len(cfg.Headers))
+	for key, value := range cfg.Headers {
+		if strings.EqualFold(strings.TrimSpace(key), "X-DashScope-Async") {
+			continue
+		}
+		headers[key] = value
+	}
+	cfg.Headers = headers
+	return cfg
+}
+
 func trimRightSlash(s string) string {
 	for len(s) > 1 && s[len(s)-1] == '/' {
 		s = s[:len(s)-1]
@@ -2974,6 +2990,7 @@ func parseProgressPercent(raw string) int {
 }
 
 func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionConfig, cfg pollConfig, upstreamID, taskNo string) ([]mediaItem, int, int, error) {
+	pollConn := connectionForTaskPoll(conn)
 	escapedID := url.PathEscape(upstreamID)
 	pollURL := joinBaseEndpoint(conn.BaseURL, strings.Replace(cfg.Path, "{id}", escapedID, 1))
 	pollMethod := strings.ToUpper(strings.TrimSpace(cfg.Method))
@@ -2994,7 +3011,7 @@ func pollUpstreamTask(ctx context.Context, pool *pgxpool.Pool, conn connectionCo
 			encodedID, _ := json.Marshal(upstreamID)
 			requestBody = bytes.ReplaceAll(requestBody, []byte(`"{id}"`), encodedID)
 		}
-		body, statusCode, err := doJSONRequest(ctx, conn, pollMethod, pollURL, requestBody, 60*time.Second)
+		body, statusCode, err := doJSONRequest(ctx, pollConn, pollMethod, pollURL, requestBody, 60*time.Second)
 		if err != nil {
 			consecutiveErrors++
 			if attempt == 1 || attempt%6 == 0 {
