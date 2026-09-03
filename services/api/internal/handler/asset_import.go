@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/starai/api/internal/service"
 	"github.com/starai/api/internal/util"
 )
 
@@ -130,8 +131,20 @@ func (h *Handler) ImportAssetURL(c *gin.Context) {
 		util.InternalError(c, "保存资产失败")
 		return
 	}
+	retentionDays := 7
+	if configs, configErr := h.admin.GetRawSystemConfigs(c.Request.Context()); configErr == nil {
+		retentionDays = service.ParseWorkRetentionDays(configs["work_retention_days"], retentionDays)
+	}
+	work, err := h.works.CreateFromAsset(c.Request.Context(), c.GetInt64("user_id"), publicID, name, "video", assetURL, retentionDays)
+	if err != nil {
+		_ = h.assets.Delete(c.Request.Context(), c.GetInt64("user_id"), publicID)
+		_ = h.storage.Delete(c.Request.Context(), objectName)
+		util.InternalError(c, "保存作品失败")
+		return
+	}
 	util.Created(c, map[string]interface{}{
 		"public_id":        publicID,
+		"work_public_id":   work.PublicID,
 		"name":             name,
 		"kind":             "video",
 		"asset_type":       "prop",
@@ -210,33 +223,156 @@ func openImportVideo(ctx context.Context, client *http.Client, sourceURL *url.UR
 	finalURL := resp.Request.URL
 	if isDouyinHost(sourceURL.Hostname()) || isDouyinHost(finalURL.Hostname()) {
 		resp.Body.Close()
-		return openDouyinVideo(ctx, client, sourceURL, finalURL)
+		videoResp, douyinErr := openDouyinVideo(ctx, client, sourceURL, finalURL)
+		if douyinErr == nil {
+			return videoResp, nil
+		}
+		return openSocialVideo(ctx, sourceURL, douyinErr)
 	}
 	if !isTikTokHost(sourceURL.Hostname()) && !isTikTokHost(finalURL.Hostname()) {
-		return resp, nil
+		if socialVideoPlatform(sourceURL.Hostname()) == "" && socialVideoPlatform(finalURL.Hostname()) == "" {
+			return resp, nil
+		}
+		resp.Body.Close()
+		return openSocialVideo(ctx, sourceURL, nil)
 	}
 	page, readErr := io.ReadAll(io.LimitReader(resp.Body, maxImportedPageBytes+1))
 	resp.Body.Close()
-	if readErr != nil || int64(len(page)) > maxImportedPageBytes {
-		return nil, fmt.Errorf("TikTok 页面解析失败")
+	if readErr == nil && int64(len(page)) <= maxImportedPageBytes {
+		if videoURL, parseErr := extractTikTokVideoURL(page); parseErr == nil {
+			if videoResp, fetchErr := openResolvedVideo(ctx, client, videoURL, finalURL.String()); fetchErr == nil {
+				return videoResp, nil
+			}
+		}
 	}
-	videoURL, parseErr := extractTikTokVideoURL(page)
-	if parseErr != nil {
-		return nil, parseErr
+	return openSocialVideo(ctx, sourceURL, fmt.Errorf("未能解析 TikTok 视频，请确认链接公开且可访问"))
+}
+
+func openResolvedVideo(ctx context.Context, client *http.Client, videoURL, referer string) (*http.Response, error) {
+	parsedVideoURL, err := validateImportURL(videoURL)
+	if err != nil {
+		return nil, err
 	}
-	parsedVideoURL, validateErr := validateImportURL(videoURL)
-	if validateErr != nil {
-		return nil, fmt.Errorf("TikTok 视频地址无效")
-	}
-	videoResp, fetchErr := getImportURL(ctx, client, parsedVideoURL.String(), finalURL.String())
-	if fetchErr != nil {
-		return nil, fmt.Errorf("TikTok 视频下载失败")
+	videoResp, err := getImportURL(ctx, client, parsedVideoURL.String(), referer)
+	if err != nil {
+		return nil, err
 	}
 	if videoResp.StatusCode < 200 || videoResp.StatusCode >= 300 {
 		videoResp.Body.Close()
-		return nil, fmt.Errorf("TikTok 视频返回 HTTP %d", videoResp.StatusCode)
+		return nil, fmt.Errorf("视频返回 HTTP %d", videoResp.StatusCode)
 	}
 	return videoResp, nil
+}
+
+func openSocialVideo(ctx context.Context, sourceURL *url.URL, fallbackErr error) (*http.Response, error) {
+	platform := socialVideoPlatform(sourceURL.Hostname())
+	videoResp, err := downloadSocialVideo(ctx, sourceURL.String())
+	if err != nil {
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		return nil, fmt.Errorf("未能解析%s视频，请确认链接公开且可播放", platform)
+	}
+	return videoResp, nil
+}
+
+type removingReadCloser struct {
+	*os.File
+	name string
+}
+
+func (file *removingReadCloser) Close() error {
+	err := file.File.Close()
+	_ = os.Remove(file.name)
+	return err
+}
+
+func downloadSocialVideo(ctx context.Context, rawURL string) (*http.Response, error) {
+	command := strings.TrimSpace(os.Getenv("YTDLP_PATH"))
+	commandArgs := []string{}
+	if command == "" {
+		if discovered, err := exec.LookPath("yt-dlp"); err == nil {
+			command = discovered
+		} else {
+			for _, python := range []string{"python", "python3", "py"} {
+				if discovered, pythonErr := exec.LookPath(python); pythonErr == nil {
+					if exec.CommandContext(ctx, discovered, "-m", "yt_dlp", "--version").Run() == nil {
+						command, commandArgs = discovered, []string{"-m", "yt_dlp"}
+						break
+					}
+				}
+			}
+		}
+	}
+	if command == "" {
+		return nil, fmt.Errorf("yt-dlp 未安装")
+	}
+	tmp, err := os.CreateTemp("", "starai-social-import-*.mp4")
+	if err != nil {
+		return nil, err
+	}
+	tmpName := tmp.Name()
+	_ = tmp.Close()
+	_ = os.Remove(tmpName)
+	resolveCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	commandArgs = append(commandArgs,
+		"--no-playlist", "--no-warnings", "--no-progress", "--socket-timeout", "20",
+		"--user-agent", importBrowserUserAgent,
+		"--max-filesize", "500M",
+		"--format", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+		"--merge-output-format", "mp4",
+		"--output", tmpName,
+		"--", rawURL,
+	)
+	if output, err := exec.CommandContext(resolveCtx, command, commandArgs...).CombinedOutput(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, fmt.Errorf("yt-dlp: %s", strings.TrimSpace(string(output)))
+	}
+	file, err := os.Open(tmpName)
+	if err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		ContentLength: info.Size(),
+		Header:        http.Header{"Content-Type": []string{"video/mp4"}},
+		Body:          &removingReadCloser{File: file, name: tmpName},
+	}, nil
+}
+
+func socialVideoPlatform(host string) string {
+	switch {
+	case hostMatches(host, "tiktok.com"):
+		return "TikTok"
+	case hostMatches(host, "facebook.com"), hostMatches(host, "fb.watch"):
+		return "Facebook"
+	case hostMatches(host, "instagram.com"):
+		return "Instagram"
+	case hostMatches(host, "youtube.com"), hostMatches(host, "youtu.be"), hostMatches(host, "youtube-nocookie.com"):
+		return "YouTube"
+	case hostMatches(host, "x.com"), hostMatches(host, "twitter.com"):
+		return "X"
+	case hostMatches(host, "douyin.com"), hostMatches(host, "iesdouyin.com"):
+		return "抖音"
+	case hostMatches(host, "xiaohongshu.com"), hostMatches(host, "xhslink.com"):
+		return "小红书"
+	default:
+		return ""
+	}
+}
+
+func hostMatches(host, domain string) bool {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 func getImportURL(ctx context.Context, client *http.Client, rawURL, referer string) (*http.Response, error) {
@@ -253,13 +389,11 @@ func getImportURL(ctx context.Context, client *http.Client, rawURL, referer stri
 }
 
 func isTikTokHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	return host == "tiktok.com" || strings.HasSuffix(host, ".tiktok.com")
+	return hostMatches(host, "tiktok.com")
 }
 
 func isDouyinHost(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	return host == "douyin.com" || strings.HasSuffix(host, ".douyin.com") || host == "iesdouyin.com" || strings.HasSuffix(host, ".iesdouyin.com")
+	return hostMatches(host, "douyin.com") || hostMatches(host, "iesdouyin.com")
 }
 
 func openDouyinVideo(ctx context.Context, client *http.Client, sourceURL, finalURL *url.URL) (*http.Response, error) {

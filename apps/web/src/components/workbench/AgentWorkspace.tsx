@@ -927,7 +927,14 @@ export function AgentWorkspace({ code }: { code: string }) {
     if (!project) return;
 		const failedNode = [...(project.node_runs || [])].reverse().find((node) => node.status === "failed");
 		if (failedNode) {
-			await api(`/api/agent-projects/${project.public_id}/retry-node`, { method: "POST", body: JSON.stringify({ node_id: failedNode.node_id }) });
+			await api(`/api/agent-projects/${project.public_id}/retry-node`, {
+				method: "POST",
+				body: JSON.stringify({
+					node_id: failedNode.node_id,
+					image_model_code: comicSettings.image_model_code,
+					video_model_code: comicSettings.video_model_code,
+				}),
+			});
 		} else {
 			await api(`/api/agent-projects/${project.public_id}/retry`, { method: "POST" });
 		}
@@ -1431,7 +1438,7 @@ export function AgentWorkspace({ code }: { code: string }) {
           <div className="pointer-events-none absolute inset-0 opacity-80 [background-image:linear-gradient(rgba(15,23,42,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(15,23,42,.08)_1px,transparent_1px)] [background-size:40px_40px] dark:opacity-60 dark:[background-image:linear-gradient(rgba(34,211,238,.08)_1px,transparent_1px),linear-gradient(90deg,rgba(34,211,238,.08)_1px,transparent_1px)]" />
           <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_70%_10%,rgba(34,211,238,.24),transparent_28%),radial-gradient(circle_at_12%_84%,rgba(20,184,166,.18),transparent_22%)] dark:bg-[radial-gradient(circle_at_76%_10%,rgba(20,184,166,.22),transparent_28%),radial-gradient(circle_at_14%_82%,rgba(6,182,212,.14),transparent_22%)]" />
           <div className="scrollbar-none relative z-10 flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2 pb-3 sm:px-5 lg:px-8">
-            <div className="comic-landing-stack flex min-h-0 flex-1 flex-col justify-start gap-2 py-2 sm:gap-3 sm:py-3 lg:gap-3 lg:py-2">
+            {!project && <div className="comic-landing-stack flex min-h-0 flex-1 flex-col justify-start gap-2 py-2 sm:gap-3 sm:py-3 lg:gap-3 lg:py-2">
               <div className="shrink-0 text-center">
               <div className="mb-1.5 inline-flex items-center gap-2 rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-[11px] font-semibold text-cyan-700 dark:border-cyan-400/20 dark:bg-cyan-400/10 dark:text-cyan-200 sm:px-4 sm:text-xs">
                 <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" /> {t("comic.superAgent")}
@@ -1466,7 +1473,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                   compact
                 />
               </div>
-            </div>
+            </div>}
             <div className="mx-auto w-full max-w-[1040px] shrink-0">
                 {error && <div className="mb-2 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-600 dark:bg-red-500/10 dark:text-red-200">{error}</div>}
                 {project && (
@@ -1494,7 +1501,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 )}
                 {finalVideoURL ? <div className="mb-2"><FinalComicVideo url={finalVideoURL} /></div> : null}
                 {project && (project.status === "succeeded" || project.status === "failed") ? <ComicProjectPanel project={project} /> : null}
-                <section className="soft-input overflow-hidden">
+                {!project && <section className="soft-input overflow-hidden">
                   <div className="border-b border-gray-50 px-3 py-2 dark:border-white/10 sm:px-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <button type="button" onClick={() => void openComicImageLibrary("references")} className="flex h-9 items-center gap-2 rounded-xl border border-gray-100 bg-gray-50 px-3 text-xs font-medium text-gray-600 transition hover:bg-white dark:border-white/10 dark:bg-white/5 dark:text-gray-300 dark:hover:bg-white/10">
@@ -1514,7 +1521,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                       </label>
                     </div>
 					<textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={t("comic.videoPlaceholder")} className="min-h-[68px] flex-1 resize-none bg-transparent text-sm leading-6 text-gray-700 outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500 sm:min-h-[86px]" />
-                    <button onClick={run} disabled={submitting || project?.status === "running" || project?.status === "pending"} className="mt-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-cyan-500 text-white shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400 disabled:opacity-40">
+                    <button onClick={run} disabled={submitting} className="mt-auto flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-cyan-500 text-white shadow-lg shadow-cyan-500/25 transition hover:bg-cyan-400 disabled:opacity-40">
                       {submitting ? <Loader2 size={18} className="animate-spin" /> : <ArrowUp size={18} />}
                     </button>
                   </div>
@@ -1592,7 +1599,7 @@ export function AgentWorkspace({ code }: { code: string }) {
 					<button type="button" onClick={() => setMode("auto")} className={"flex-1 rounded-full px-4 py-2 text-center text-xs font-semibold sm:flex-none " + (mode === "auto" ? "bg-gray-900 text-white shadow dark:bg-white dark:text-gray-900" : "text-gray-500 dark:text-gray-300")}>{t("agent.autopilot")}</button>
                     </div>
                   </div>
-                </section>
+                </section>}
               </div>
             </div>
         </main>
@@ -1970,7 +1977,7 @@ export function AgentWorkspace({ code }: { code: string }) {
                 <Segmented value={comicSettings.duration_mode} options={[["compact", ts("紧凑")], ["standard", ts("常规")], ["long", ts("超长")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, duration_mode: v }))} />
               </ComicSettingCard>
               <ComicSettingCard title={ts("分镜画宫格数")}>
-                <Segmented value={String(comicSettings.storyboard_grid)} options={[["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, storyboard_grid: Number(v) }))} />
+                <Segmented value={String(comicSettings.storyboard_grid)} options={[["2", ts("2宫格")], ["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => setComicSettings((prev) => ({ ...prev, storyboard_grid: Number(v) }))} />
               </ComicSettingCard>
               <ComicSettingCard title={ts("分镜图自动重试")}>
                 <NumberRow label={ts("最大重试次数")} value={comicSettings.max_retry} min={0} max={5} onChange={(v) => setComicSettings((prev) => ({ ...prev, max_retry: v }))} />
@@ -2513,7 +2520,7 @@ function ComicPreferenceModal({
           <ComicSettingCard title={ts("资产图风格参考")}><Segmented value={settings.style_reference_mode} options={[["image_reference", ts("附带风格参考图")], ["text_only", ts("仅文字描述")]]} onChange={(v) => set({ style_reference_mode: v })} /></ComicSettingCard>
           <ComicSettingCard title={ts("分镜时长模式")}><Segmented value={settings.duration_mode} options={[["compact", ts("紧凑")], ["standard", ts("常规")], ["long", ts("超长")]]} onChange={(v) => set({ duration_mode: v })} /></ComicSettingCard>
           <ComicSettingCard title={ts("配音叙事模式")}><Segmented value={settings.narration_perspective || "smart"} options={COMIC_NARRATION_MODES.map((item) => [item.value, ts(item.label)])} onChange={(v) => set({ narration_perspective: v })} /><div className="mt-2 text-[11px] leading-5 text-gray-400">{COMIC_NARRATION_MODES.find((item) => item.value === settings.narration_perspective)?.description || COMIC_NARRATION_MODES[0].description}</div></ComicSettingCard>
-          <ComicSettingCard title={ts("分镜画宫格数")}><Segmented value={String(settings.storyboard_grid)} options={[["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => set({ storyboard_grid: Number(v) })} /></ComicSettingCard>
+          <ComicSettingCard title={ts("分镜画宫格数")}><Segmented value={String(settings.storyboard_grid)} options={[["2", ts("2宫格")], ["4", ts("4宫格")], ["6", ts("6宫格")], ["9", ts("9宫格")]]} onChange={(v) => set({ storyboard_grid: Number(v) })} /></ComicSettingCard>
           <ComicSettingCard title={ts("自动重试")}><NumberRow label={ts("最大重试次数")} value={settings.max_retry} min={0} max={5} onChange={(v) => set({ max_retry: v })} /><NumberRow label={ts("资产一致性合格分")} value={settings.asset_consistency_score} min={0} max={100} onChange={(v) => set({ asset_consistency_score: v })} /><NumberRow label={ts("画面逻辑合格分")} value={settings.logic_score} min={0} max={100} onChange={(v) => set({ logic_score: v })} /></ComicSettingCard>
           <ComicSettingCard title={ts("图片模型")}><ComicModelSelect models={imageModels} value={settings.image_model_code} onChange={(value) => set({ image_model_code: value })} emptyLabel={ts("请选择图片模型")} /></ComicSettingCard>
           <ComicSettingCard title={ts("视频模型")}>

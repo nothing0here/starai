@@ -268,6 +268,9 @@ func (s *AgentService) CreateProject(ctx context.Context, userID int64, code str
 	inputsJSON, _ := json.Marshal(inputs)
 	var projectID int64
 	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
+		if err := validateAgentSubmissionTx(ctx, tx, userID, inputs); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `
 			INSERT INTO workflow_projects (public_id, user_id, workflow_id, status, inputs, estimated_cost)
 			VALUES ($1,$2,$3,'pending',$4,$5) RETURNING id`,
@@ -824,11 +827,26 @@ func firstAgentMediaURL(inputs map[string]interface{}) string {
 func (s *AgentService) createBalanceFailedProject(ctx context.Context, userID, wfID int64, publicID string, inputsJSON []byte, estimated float64) (*WorkflowProjectDTO, error) {
 	errMsg := billing.InsufficientBalanceMsg
 	var projectID int64
-	err := s.db.QueryRow(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var confirmation map[string]interface{}
+	if err := json.Unmarshal(inputsJSON, &confirmation); err != nil {
+		return nil, err
+	}
+	if err := validateAgentSubmissionTx(ctx, tx, userID, confirmation); err != nil {
+		return nil, err
+	}
+	err = tx.QueryRow(ctx, `
 		INSERT INTO workflow_projects (public_id, user_id, workflow_id, status, inputs, estimated_cost, error_message, finished_at)
 		VALUES ($1,$2,$3,'failed',$4,$5,$6,now()) RETURNING id`,
 		publicID, userID, wfID, inputsJSON, estimated, errMsg).Scan(&projectID)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	return s.GetProject(ctx, userID, publicID)
@@ -868,7 +886,7 @@ func (s *AgentService) GetProject(ctx context.Context, userID int64, publicID st
 func (s *AgentService) listNodeRuns(ctx context.Context, projectID int64) ([]NodeRunDTO, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT node_id, name, type, status, output, cost, duration_ms, error
-		FROM workflow_node_runs WHERE project_id=$1 ORDER BY seq ASC`, projectID)
+		FROM workflow_node_runs WHERE project_id=$1 ORDER BY seq ASC, id ASC`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1534,48 +1552,9 @@ func (s *AgentService) estimateAgentRuntimeCost(ctx context.Context, runtimeCfg 
 		return total
 	}
 	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
-		maxRetry := intFromAgentAny(firstAgentNonNil(inputs["max_retry"], runtimeCfg["max_retry"]))
-		if maxRetry < 0 {
-			maxRetry = 0
-		}
-		if maxRetry > 5 {
-			maxRetry = 5
-		}
-		mediaAttempts := float64(maxRetry + 1)
-		dialogueCodes := agentStringSlice(inputs["dialogue_model_codes"], nil)
-		analysisCode := stringValue(runtimeCfg["analysis_model_code"])
-		if len(dialogueCodes) > 0 {
-			analysisCode = firstAgentString(strings.TrimSpace(dialogueCodes[0]), analysisCode)
-		}
-		if code := analysisCode; code != "" {
-			total += s.estimateModelCostByCode(ctx, code, inputs, 1200, 2500)
-		}
-		if code := firstAgentString(stringValue(inputs["image_model_code"]), stringValue(runtimeCfg["image_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
-			grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
-			total += mediaAttempts * s.estimateModelCostByCode(ctx, code, map[string]interface{}{"n": grid}, 0, 0)
-		}
-		if code := firstAgentString(stringValue(inputs["video_model_code"]), stringValue(runtimeCfg["video_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
-			grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
-			duration := comicSegmentDurationSeconds(inputs, runtimeCfg)
-			params := map[string]interface{}{
-				"count":            1,
-				"n":                1,
-				"duration":         duration,
-				"duration_sec":     duration,
-				"resolution":       normalizeComicVideoResolution(firstAgentString(stringValue(inputs["quality"]), stringValue(runtimeCfg["quality"]))),
-				"generation_mode":  "image",
-				"reference_images": []string{"comic-keyframe"},
-			}
-			total += mediaAttempts * float64(grid) * s.estimateModelCostByCode(ctx, code, params, 0, 0)
-		}
-		if code := firstAgentString(stringValue(inputs["narration_model_code"]), stringValue(runtimeCfg["narration_model_code"])); code != "" {
-			audioStrategy := normalizeComicAudioStrategy(firstAgentString(stringValue(inputs["audio_strategy"]), stringValue(runtimeCfg["audio_strategy"])), code)
-			if audioStrategy != "video_native" {
-				grid := positiveAgentInt(intFromAgentAny(firstAgentNonNil(inputs["storyboard_grid"], runtimeCfg["storyboard_grid"])), 6)
-				total += float64(grid) * s.estimateModelCostByCode(ctx, code, map[string]interface{}{"count": 1}, 0, 200)
-			}
-		}
-		return total
+		resolved := copyAgentMap(inputs)
+		fillComicResumeModelDefaults(resolved, runtimeCfg)
+		return s.estimateComicRemainingCost(ctx, runtimeCfg, resolved, remainingComicWork(resolved, nil, runtimeCfg))
 	}
 	if code := stringValue(runtimeCfg["analysis_model_code"]); code != "" {
 		total += s.estimateModelCostByCode(ctx, code, inputs, 500, 1000)
@@ -1612,6 +1591,9 @@ func copyAgentMap(source map[string]interface{}) map[string]interface{} {
 }
 
 func comicSegmentDurationSeconds(inputs, runtimeCfg map[string]interface{}) int {
+	if seconds := intFromAgentAny(inputs["segment_duration_sec"]); seconds >= 1 && seconds <= 600 {
+		return seconds
+	}
 	switch firstAgentString(stringValue(inputs["duration_mode"]), stringValue(runtimeCfg["duration_mode"])) {
 	case "compact":
 		return 4
@@ -1650,7 +1632,6 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 	billingType := stringValue(rule["billing_type"])
 	switch billingType {
 	case "per_image":
-		unit := floatValue(rule["unit_price"])
 		n := floatValue(params["n"])
 		if n <= 0 {
 			n = floatValue(params["count"])
@@ -1658,7 +1639,7 @@ func estimateCostFromPriceRule(rule map[string]interface{}, params map[string]in
 		if n <= 0 {
 			n = 1
 		}
-		return unit * n
+		return imageTierPrice(rule, params, "unit_price_by_size", "unit_price") * n
 	case "per_token":
 		inPrice := perAgentTokenPrice(rule, "input_price")
 		outPrice := perAgentTokenPrice(rule, "output_price")
@@ -1702,18 +1683,52 @@ func perAgentTokenPrice(rule map[string]interface{}, key string) float64 {
 	return 0
 }
 
-func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID string) error {
+func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID string, modelOverrides map[string]string) error {
+	return s.retryProject(ctx, userID, publicID, modelOverrides)
+}
+
+func (s *AgentService) retryProject(ctx context.Context, userID int64, publicID string, modelOverrides map[string]string) error {
 	var projectID int64
 	var status string
 	var estimated float64
+	var inputsRaw, outputsRaw, runtimeRaw []byte
 	err := s.db.QueryRow(ctx,
-		`SELECT id, status, estimated_cost FROM workflow_projects WHERE public_id=$1 AND user_id=$2`, publicID, userID).
-		Scan(&projectID, &status, &estimated)
+		`SELECT p.id, p.status, p.estimated_cost, p.inputs, p.outputs, w.runtime_config
+		 FROM workflow_projects p
+		 JOIN workflow_definitions w ON w.id=p.workflow_id
+		 WHERE p.public_id=$1 AND p.user_id=$2`, publicID, userID).
+		Scan(&projectID, &status, &estimated, &inputsRaw, &outputsRaw, &runtimeRaw)
 	if err != nil {
 		return err
 	}
 	if status != "failed" {
 		return errors.New("仅失败的项目可重试")
+	}
+	inputs, outputs, runtimeCfg := map[string]interface{}{}, map[string]interface{}{}, map[string]interface{}{}
+	_ = json.Unmarshal(inputsRaw, &inputs)
+	_ = json.Unmarshal(outputsRaw, &outputs)
+	_ = json.Unmarshal(runtimeRaw, &runtimeCfg)
+	refreshComicRetryModels(inputs, outputs, runtimeCfg, modelOverrides)
+	if stringValue(runtimeCfg["agent_mode"]) == "comic_drama" {
+		fillComicResumeModelDefaults(inputs, runtimeCfg)
+		work := remainingComicWork(inputs, outputs, runtimeCfg)
+		if _, ok := outputs["comic_drama"].(map[string]interface{}); ok && work.Plan {
+			return errors.New("已保存的分镜为空，请重试规划节点；未提交新的素材任务")
+		}
+		if err := s.validateComicRemainingModels(ctx, inputs, work); err != nil {
+			return err
+		}
+		estimated = s.estimateComicRemainingCost(ctx, runtimeCfg, inputs, work)
+		// A prior settlement failure may leave real usage unpaid. It is not a
+		// second generation charge, but still needs a reservation for finalization.
+		_, unsettled, err := accruedWorkflowCostDB(ctx, s.db, projectID)
+		if err != nil {
+			return err
+		}
+		estimated += unsettled
+		inputs["_resume_remaining"] = work
+		inputs["_resume_unsettled_cost"] = unsettled
+		inputs["_resume_estimated_cost"] = estimated
 	}
 	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "workflow", publicID, func(tx pgx.Tx) error {
 		var currentStatus string
@@ -1723,6 +1738,15 @@ func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID 
 		if currentStatus != "failed" {
 			return errors.New("仅失败的项目可重试")
 		}
+		// The calculation above is a snapshot. Fail closed if another editor or
+		// node retry changed the checkpoints before this transaction acquired them.
+		var unchanged bool
+		if err := tx.QueryRow(ctx, `SELECT inputs=$2::jsonb AND outputs=$3::jsonb FROM workflow_projects WHERE id=$1`, projectID, inputsRaw, outputsRaw).Scan(&unchanged); err != nil {
+			return err
+		}
+		if !unchanged {
+			return errors.New("项目素材或参数已变化，请刷新后再续传")
+		}
 		var locked bool
 		if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, projectID).Scan(&locked); err != nil {
 			return err
@@ -1730,7 +1754,7 @@ func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID 
 		if !locked {
 			return errors.New("项目正在处理中，请稍后重试")
 		}
-		result, err := tx.Exec(ctx, `UPDATE workflow_projects SET status='pending', error_message=NULL, finished_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, projectID)
+		result, err := tx.Exec(ctx, `UPDATE workflow_projects SET status='pending', inputs=$2, error_message=NULL, finished_at=NULL, updated_at=now() WHERE id=$1 AND status='failed'`, projectID, mustAgentJSON(inputs))
 		if err != nil {
 			return err
 		}
@@ -1759,7 +1783,7 @@ func (s *AgentService) RetryProject(ctx context.Context, userID int64, publicID 
 	return nil
 }
 
-func (s *AgentService) RetryProjectNode(ctx context.Context, userID int64, publicID, nodeID string) error {
+func (s *AgentService) RetryProjectNode(ctx context.Context, userID int64, publicID, nodeID string, modelOverrides map[string]string) error {
 	nodeID = strings.TrimSpace(nodeID)
 	allowed := map[string]bool{"comic_plan": true, "keyframes": true, "video_segments": true, "narrations": true, "compose": true, "generate": true}
 	if !allowed[nodeID] {
@@ -1787,7 +1811,7 @@ func (s *AgentService) RetryProjectNode(ctx context.Context, userID int64, publi
 	if _, err := s.db.Exec(ctx, `UPDATE workflow_projects SET outputs=$1, updated_at=now() WHERE id=$2`, mustAgentJSON(outputs), projectID); err != nil {
 		return err
 	}
-	return s.RetryProject(ctx, userID, publicID)
+	return s.retryProject(ctx, userID, publicID, modelOverrides)
 }
 
 func (s *AgentService) ReplaceComicProjectMedia(ctx context.Context, userID int64, publicID, kind string, index int, rawURL string) error {
@@ -1942,6 +1966,7 @@ func pruneWorkflowOutputsForRetry(outputs map[string]interface{}, nodeID string)
 		for _, key := range []string{"comic_drama", "analysis", "keyframes", "segments", "narrations", "final_video_url", "thumbnail", "media_tasks", "current_step"} {
 			delete(outputs, key)
 		}
+		outputs["current_step"] = "comic_plan"
 	case "keyframes":
 		// 保留已经成功的关键帧。worker 会按分镜 ID 复用它们，只补失败或缺失项，
 		// 避免局部失败后重复生成成功内容和产生不必要费用。
@@ -2001,6 +2026,58 @@ func successfulComicNarrationItems(raw interface{}) []interface{} {
 		result = append(result, item)
 	}
 	return result
+}
+
+// Automatic retries keep a partial stage's model snapshot for consistency.
+// An explicit user override changes only the unfinished items in that stage.
+func refreshComicRetryModels(inputs, outputs, runtimeCfg map[string]interface{}, modelOverrides map[string]string) {
+	if stringValue(runtimeCfg["agent_mode"]) != "comic_drama" && stringValue(runtimeCfg["preset_code"]) != "ai_comic_drama" {
+		return
+	}
+	// Apply current models independently of node records: a worker may fail before
+	// recording current_step, and downstream unfinished stages also need the update.
+	for _, key := range []string{"image_model_code", "video_model_code", "narration_model_code"} {
+		if code := strings.TrimSpace(modelOverrides[key]); code != "" {
+			inputs[key] = code
+		}
+	}
+	if code := strings.TrimSpace(modelOverrides["dialogue_model_code"]); code != "" {
+		inputs["dialogue_model_codes"] = []string{code}
+	}
+	switch stringValue(outputs["current_step"]) {
+	case "comic_plan":
+		if code := strings.TrimSpace(modelOverrides["dialogue_model_code"]); code != "" {
+			inputs["dialogue_model_codes"] = []string{code}
+		} else if codes := agentStringSlice(runtimeCfg["dialogue_model_codes"], nil); len(codes) > 0 {
+			inputs["dialogue_model_codes"] = codes
+		} else if code := stringValue(runtimeCfg["analysis_model_code"]); code != "" {
+			inputs["dialogue_model_codes"] = []string{code}
+		}
+	case "keyframes":
+		if code := strings.TrimSpace(modelOverrides["image_model_code"]); code != "" {
+			inputs["image_model_code"] = code
+		} else if len(successfulComicStageItems(outputs["keyframes"], "image_url")) == 0 {
+			if code := firstAgentString(stringValue(runtimeCfg["image_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+				inputs["image_model_code"] = code
+			}
+		}
+	case "video_segments":
+		if code := strings.TrimSpace(modelOverrides["video_model_code"]); code != "" {
+			inputs["video_model_code"] = code
+		} else if len(successfulComicStageItems(outputs["segments"], "video_url")) == 0 {
+			if code := firstAgentString(stringValue(runtimeCfg["video_model_code"]), stringValue(runtimeCfg["generation_model_code"])); code != "" {
+				inputs["video_model_code"] = code
+			}
+		}
+	case "narrations":
+		if code := strings.TrimSpace(modelOverrides["narration_model_code"]); code != "" {
+			inputs["narration_model_code"] = code
+		} else if len(successfulComicNarrationItems(outputs["narrations"])) == 0 {
+			if code := stringValue(runtimeCfg["narration_model_code"]); code != "" {
+				inputs["narration_model_code"] = code
+			}
+		}
+	}
 }
 
 // ---------- admin ----------
@@ -2099,6 +2176,9 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 	schema, _ := json.Marshal(in.InputSchema)
 	price, _ := json.Marshal(in.PriceRule)
 	display, _ := json.Marshal(in.DisplayConfig)
+	// Policy versions are only written through the validated, versioned endpoint.
+	delete(in.RuntimeConfig, "agent_policy")
+	delete(in.RuntimeConfig, "agent_policy_history")
 	runtime, _ := json.Marshal(in.RuntimeConfig)
 	var desc, icon *string
 	if in.Description != "" {
@@ -2111,7 +2191,9 @@ func (s *AgentService) Upsert(ctx context.Context, in AgentUpsertInput) error {
 		INSERT INTO workflow_definitions (code, name, description, icon, category, nodes, input_schema, price_rule, display_config, runtime_config, is_enabled, sort_order, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
 		ON CONFLICT (code) DO UPDATE SET
-		  name=$2, description=$3, icon=$4, category=$5, nodes=$6, input_schema=$7, price_rule=$8, display_config=$9, runtime_config=$10, is_enabled=$11, sort_order=$12, updated_at=now()`,
+		  name=$2, description=$3, icon=$4, category=$5, nodes=$6, input_schema=$7, price_rule=$8, display_config=$9,
+		  runtime_config=$10::jsonb || (SELECT COALESCE(jsonb_object_agg(key,value),'{}'::jsonb) FROM jsonb_each(workflow_definitions.runtime_config) WHERE key IN ('agent_policy','agent_policy_history')),
+		  is_enabled=$11, sort_order=$12, updated_at=now()`,
 		in.Code, in.Name, desc, icon, in.Category, nodes, schema, price, display, runtime, in.IsEnabled, in.SortOrder)
 	return err
 }
@@ -2581,7 +2663,7 @@ func normalizeComicDramaAgentInput(in AgentUpsertInput) AgentUpsertInput {
 }
 
 func validComicGrid(v int) bool {
-	return v == 4 || v == 6 || v == 9
+	return v == 2 || v == 4 || v == 6 || v == 9
 }
 
 func defaultAgentDisplayConfig(in AgentUpsertInput) map[string]interface{} {

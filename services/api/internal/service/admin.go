@@ -1509,6 +1509,11 @@ func (s *AdminService) GetRawSystemConfigs(ctx context.Context) (map[string]inte
 }
 
 func (s *AdminService) UpdateSystemConfig(ctx context.Context, key string, value interface{}) error {
+	if key == "workbench_default_theme" {
+		if err := ValidateWorkbenchTheme(value); err != nil {
+			return err
+		}
+	}
 	if isSensitiveConfigKey(key) {
 		if text, ok := value.(string); ok && isMaskedAdminSecret(text) {
 			return nil

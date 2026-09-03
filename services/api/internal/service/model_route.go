@@ -172,6 +172,13 @@ func validateRouteCostRule(rule map[string]interface{}) error {
 			return errors.New("线路成本不能为负数")
 		}
 	}
+	if costs, ok := rule["unit_cost_by_size"].(map[string]interface{}); ok {
+		for _, cost := range costs {
+			if floatValue(cost) < 0 {
+				return errors.New("线路图片档位成本不能为负数")
+			}
+		}
+	}
 	return nil
 }
 
@@ -728,7 +735,11 @@ func EstimateRouteProviderCostWithTokenDetails(route *ModelRoute, params map[str
 		if count <= 0 {
 			count = intFromAny(params["count"], 1)
 		}
-		return float64(count) * floatValue(rule["unit_cost"])
+		unitCost := floatValue(rule["unit_cost"])
+		if typeName == "per_image" {
+			unitCost = imageTierPrice(rule, params, "unit_cost_by_size", "unit_cost")
+		}
+		return float64(count) * unitCost
 	case "per_second":
 		seconds := floatValue(params["duration"])
 		if seconds <= 0 {

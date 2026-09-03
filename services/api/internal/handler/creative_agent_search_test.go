@@ -191,6 +191,15 @@ func TestCreativeAgentSearchPromptRequiresSynthesis(t *testing.T) {
 	}
 }
 
+func TestCreativeAgentSearchCacheKeySeparatesRedFoxEngines(t *testing.T) {
+	decision := creativeSearchDecision{Query: "今日科技新闻", Topic: "news", TimeRange: "day"}
+	kimi := creativeAgentSearchCacheKey(service.WebSearchConfig{Provider: "redfox", RedFoxEngine: "kimi", MaxResults: 5}, decision)
+	doubao := creativeAgentSearchCacheKey(service.WebSearchConfig{Provider: "redfox", RedFoxEngine: "doubao", MaxResults: 5}, decision)
+	if kimi == doubao {
+		t.Fatal("switching the RedFox engine must not reuse the previous engine cache")
+	}
+}
+
 func TestCreativeAgentResearchRequestsUseMultipleSources(t *testing.T) {
 	clock := creativeAgentClockAt(nil, time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
 	requests := creativeAgentResearchRequests(
@@ -210,10 +219,10 @@ func TestCreativeAgentResearchRequestsUseMultipleSources(t *testing.T) {
 }
 
 func TestEnsureCreativeAgentSearchReplyReplacesEmptySummary(t *testing.T) {
-	plan := map[string]interface{}{"reply": "已为你整理全球热搜科技新闻。"}
+	plan := map[string]interface{}{"reply": ""}
 	ensureCreativeAgentSearchReply(plan, []service.WebSearchResult{{Title: "芯片进展", Snippet: "新一代芯片发布。"}})
 	reply := stringAny(plan["reply"])
-	if !strings.Contains(reply, "芯片进展") || !strings.Contains(reply, "[1]") {
-		t.Fatalf("empty search summary was not repaired: %s", reply)
+	if !strings.Contains(reply, "未能形成可核验") || strings.Contains(reply, "芯片进展") {
+		t.Fatalf("empty reply must not be filled with unverified raw snippets: %s", reply)
 	}
 }

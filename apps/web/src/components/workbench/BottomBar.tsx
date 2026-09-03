@@ -837,7 +837,7 @@ export function ChatTopTools({
       {showRole && (
         <button
           onClick={() => setRolesOpen(true)}
-          className="h-9 max-sm:w-9 max-sm:px-0 max-sm:justify-center px-2 sm:px-3 rounded-xl bg-white border border-gray-100 text-gray-700 text-sm shadow-sm flex items-center gap-1.5 min-w-0 sm:max-w-[200px] shrink-0 dark:bg-white/5 dark:border-white/10 dark:text-gray-200"
+          className={clsx("h-9 max-sm:w-9 max-sm:px-0 max-sm:justify-center px-2 sm:px-3 rounded-xl bg-white border border-gray-100 text-gray-700 text-sm shadow-sm flex items-center gap-1.5 min-w-0 sm:max-w-[200px] shrink-0 dark:bg-white/5 dark:border-white/10 dark:text-gray-200 active:scale-[0.98]", Boolean(value.role_id) && "border-primary/35 bg-primary/10 text-primary dark:border-primary/35 dark:bg-primary/10 dark:text-primary")}
           title={value.role_name || t("role.select")}
         >
           {value.role_icon_url ? (
@@ -864,9 +864,12 @@ export function ChatTopTools({
                   <div className="text-xs text-gray-400 mt-0.5">{t("role.manageDesc")}</div>
                 </div>
               </div>
-              <button className="w-9 h-9 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-500 dark:bg-white/5 dark:border-white/10 dark:text-gray-300" onClick={() => setRolesOpen(false)}>
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-2">
+                {value.role_id && <button type="button" className="h-9 rounded-xl border border-gray-200 px-3 text-xs font-medium text-gray-600 transition hover:border-primary/30 hover:text-primary dark:border-white/10 dark:text-gray-300" onClick={() => { set({ role_id: undefined, role_name: undefined, role_prompt: undefined, role_icon_url: undefined }); setRolesOpen(false); }}>{t("role.clear")}</button>}
+                <button type="button" aria-label={t("common.cancel")} className="w-9 h-9 rounded-xl bg-gray-50 border border-gray-200 flex items-center justify-center text-gray-500 dark:bg-white/5 dark:border-white/10 dark:text-gray-300" onClick={() => setRolesOpen(false)}>
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             <div className="p-5 max-h-[78vh] overflow-y-auto">
@@ -904,7 +907,7 @@ export function ChatTopTools({
                         return (r.name + " " + (r.description || "")).toLowerCase().includes(kw);
                       })
                       .map((r) => (
-                        <div key={r.id} className="w-full bg-white border border-gray-100 rounded-2xl px-4 py-3 flex items-center justify-between gap-3 hover:border-gray-200 transition dark:bg-white/5 dark:border-white/10 dark:hover:border-white/20">
+                        <div key={r.id} className={clsx("w-full bg-white border border-gray-100 rounded-2xl px-4 py-3 flex items-center justify-between gap-3 hover:border-gray-200 transition dark:bg-white/5 dark:border-white/10 dark:hover:border-white/20", value.role_id === r.id && "border-primary/35 bg-primary/5 dark:border-primary/35 dark:bg-primary/5")}>
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="w-10 h-10 rounded-xl bg-gray-50 border border-gray-200 overflow-hidden flex items-center justify-center shrink-0 dark:bg-white/10 dark:border-white/10">
                               {r.icon_url ? (
@@ -922,9 +925,9 @@ export function ChatTopTools({
                           <button
                             type="button"
                             onClick={() => pickRole(r)}
-                            className="shrink-0 text-xs px-4 py-2 rounded-xl bg-primary/10 border border-primary/25 text-primary font-semibold hover:bg-primary/15"
+                            className="shrink-0 text-xs px-4 py-2 rounded-xl bg-primary/10 border border-primary/25 text-primary font-semibold hover:bg-primary/15 active:scale-[0.98]"
                           >
-                            {t("role.use")}
+                            {value.role_id === r.id ? t("common.selected") : t("role.use")}
                           </button>
                         </div>
                       ))}

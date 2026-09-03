@@ -18,9 +18,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -473,8 +475,9 @@ func removeEmbeddedSubtitleTracks(ctx context.Context, pool *pgxpool.Pool, proje
 		return nil, hadTrack, err
 	}
 	workID := fmt.Sprintf("work_%d", time.Now().UnixNano())
-	pool.Exec(ctx, `INSERT INTO works (public_id,user_id,task_id,model_id,type,prompt,thumbnail_url,metadata) VALUES ($1,$2,$3,NULL,'video',$4,$5,$6)`,
-		workID, userID, taskID, "移除视频独立字幕轨", publicURL, outputJSON)
+	expires := configuredWorkExpiration(ctx, pool, 7)
+	pool.Exec(ctx, `INSERT INTO works (public_id,user_id,task_id,model_id,type,prompt,thumbnail_url,metadata,expires_at) VALUES ($1,$2,$3,NULL,'video',$4,$5,$6,$7)`,
+		workID, userID, taskID, "移除视频独立字幕轨", publicURL, outputJSON, expires)
 	pool.Exec(ctx, `INSERT INTO task_events (task_id,event_type,payload) VALUES ($1,'completed',$2)`, taskID, outputJSON)
 	item := map[string]interface{}{"task_no": taskNo, "type": "video", "status": "succeeded", "progress": 100, "output": output, "estimated_cost": 0, "actual_cost": 0}
 	appendWorkflowMediaTask(ctx, pool, projectID, item)
@@ -738,10 +741,15 @@ func processComicDramaWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL,
 	if len(storyboards) == 0 {
 		return failWorkflow(ctx, pool, p, publicID, estimated, "AI漫剧规划未生成有效分镜")
 	}
+	if err := validateComicDramaPlan(plan, inputs, runtimeCfg); err != nil {
+		return failWorkflow(ctx, pool, p, publicID, estimated, "分镜校验失败，未继续生成素材："+err.Error())
+	}
 
 	var totalCost float64
 	keyframes, _ := outputs["keyframes"].([]interface{})
 	if !comicStageComplete(keyframes, storyboards, "image_url") {
+		outputs["current_step"] = "keyframes"
+		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 		nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "keyframes", "关键帧生成", "image", map[string]interface{}{"storyboard_count": len(storyboards)}, 1)
 		start := time.Now()
 		items, cost, errMsg := runComicKeyframes(ctx, pool, baseURL, token, p, publicID, runtimeCfg, inputs, storyboards, keyframes)
@@ -773,6 +781,8 @@ func processComicDramaWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL,
 
 	segments, _ := outputs["segments"].([]interface{})
 	if !comicStageComplete(segments, storyboards, "video_url") {
+		outputs["current_step"] = "video_segments"
+		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 		nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "video_segments", "分段视频生成", "video", map[string]interface{}{"storyboard_count": len(storyboards)}, 2)
 		start := time.Now()
 		items, cost, errMsg := runComicVideoSegments(ctx, pool, baseURL, token, p, publicID, runtimeCfg, inputs, storyboards, keyframes, segments)
@@ -806,6 +816,8 @@ func processComicDramaWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL,
 	narrationModelCode := firstNonEmpty(stringAny(inputs["narration_model_code"]), stringAny(runtimeCfg["narration_model_code"]))
 	audioStrategy := comicAudioStrategy(inputs, runtimeCfg)
 	if narrationModelCode != "" && audioStrategy != "video_native" && !comicNarrationStageComplete(narrations, storyboards) {
+		outputs["current_step"] = "narrations"
+		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 		nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "narrations", "对白与旁白配音", "audio", map[string]interface{}{"storyboard_count": len(storyboards)}, 3)
 		start := time.Now()
 		items, cost, errMsg := runComicNarrations(ctx, pool, baseURL, token, p, publicID, runtimeCfg, inputs, storyboards, narrations)
@@ -827,9 +839,11 @@ func processComicDramaWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL,
 		saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 	}
 
+	outputs["current_step"] = "compose"
+	saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 	nodeRunID := insertWorkflowNodeRun(ctx, pool, p.ProjectID, "compose", "视频合成", "video", map[string]interface{}{"segments": len(segments), "narrations": len(narrations)}, 4)
 	start := time.Now()
-	final, errMsg := composeComicDramaVideo(ctx, pool, publicID, segments, narrations, inputs, runtimeCfg)
+	final, errMsg := composeComicDramaVideo(ctx, pool, publicID, storyboards, segments, narrations, inputs, runtimeCfg)
 	duration := int(time.Since(start).Milliseconds())
 	if errMsg != "" {
 		pool.Exec(ctx, `UPDATE workflow_node_runs SET status='failed', error=$1, duration_ms=$2 WHERE id=$3`, errMsg, duration, nodeRunID)
@@ -857,6 +871,9 @@ func processComicDramaWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL,
 func runComicDramaPlan(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, workflowProjectID, userID int64, runtimeCfg, inputs map[string]interface{}) (map[string]interface{}, string) {
 	grid := comicStoryboardGrid(runtimeCfg, inputs)
 	durationMode := firstNonEmpty(stringAny(inputs["duration_mode"]), stringAny(runtimeCfg["duration_mode"]), "standard")
+	if seconds := intAny(inputs["segment_duration_sec"]); seconds > 0 {
+		durationMode = fmt.Sprintf("每段模型素材 %d 秒，最终总时长 %d 秒，台词按最终每镜时长编写", seconds, intAny(inputs["target_duration_sec"]))
+	}
 	styleMode := firstNonEmpty(stringAny(inputs["style_reference_mode"]), stringAny(runtimeCfg["style_reference_mode"]), "image_reference")
 	narrationMode := comicNarrationPerspective(inputs, runtimeCfg)
 	narrationInstruction := comicNarrationInstruction(narrationMode)
@@ -868,17 +885,24 @@ JSON 字段必须包含：
   "creative_direction": "创意方向",
   "outline": "故事大纲",
   "script": "分场剧本",
-  "characters": [{"code":"CHAR_01","name":"角色名","description":"外观与性格","visual_prompt":"角色视觉提示词"}],
+  "characters": [{"code":"CHAR_01","name":"角色名","gender":"male|female|neutral","description":"外观与性格","visual_prompt":"角色视觉提示词"}],
   "props": [{"code":"PROP_01","name":"道具名","description":"外观与用途","visual_prompt":"道具视觉提示词"}],
   "locations": [{"code":"LOC_01","name":"场景名","description":"空间、时间与光线","visual_prompt":"场景视觉提示词"}],
-  "storyboards": [{"id":"S01","title":"分镜标题","duration_sec":5,"character_codes":["CHAR_01"],"prop_codes":["PROP_01"],"location_code":"LOC_01","scene":"画面描述","dialogue":"角色说出的对白，没有则为空","narration":"画外旁白或内心独白，没有则为空","camera":"镜头运动","keyframe_prompt":"关键帧图片提示词","video_prompt":"视频生成提示词"}],
+  "storyboards": [{"id":"S01","title":"分镜标题","duration_sec":5,"character_codes":["CHAR_01"],"speaker_code":"说对白的角色code；无对白则为空","prop_codes":["PROP_01"],"location_code":"LOC_01","scene":"画面描述","dialogue":"角色说出的对白，没有则为空","narration":"画外旁白或内心独白，没有则为空","camera":"镜头运动","keyframe_prompt":"关键帧图片提示词","video_prompt":"视频生成提示词"}],
   "keyframes": [],
   "segments": [],
   "current_step": "storyboard_confirm"
 }
 分镜数量必须为 %d。时长模式：%s。参考图模式：%s。配音叙事模式：%s。
 配音规则：%s
-dialogue 只能填写画面中角色实际说出的话；narration 只能填写画外旁白或内心独白，二者不要混写。每个角色、道具和场景必须有稳定 code，分镜必须通过 code 引用资产。必须保持角色和画风一致，提示词可以直接传给图片/视频模型。`, grid, durationMode, styleMode, narrationMode, narrationInstruction)
+	dialogue 只能填写画面中角色实际说出的话；narration 只能填写画外旁白或内心独白，二者不要混写。每段 dialogue 必须填写 speaker_code，角色必须填写 gender；旁白由本镜头唯一主角承担时也要让 character_codes 能唯一定位角色。每个分镜只描述一个连续镜头，不得把完整用户需求、标题或时长说明复制进 scene、dialogue 或 narration，台词必须能在该分镜时长内自然读完。每个角色、道具和场景必须有稳定 code，分镜必须通过 code 引用资产。必须保持角色和画风一致，提示词可以直接传给图片/视频模型。`, grid, durationMode, styleMode, narrationMode, narrationInstruction)
+	system += "\n工作流名称不代表画风：用户要求真人实拍就必须生成真人风格。中文旁白每秒约3–4字并留停顿，最后一镜必须落实结果，不用反转预告代替结局；参数、标题、引号内强调词不能当剧情或对白。"
+	if guidance := strings.TrimSpace(stringAny(inputs["creative_guidance"])); guidance != "" {
+		if runes := []rune(guidance); len(runes) > 6000 {
+			guidance = string(runes[:6000])
+		}
+		system += "\n运营创作指导（不得改变JSON结构、分镜数量或执行边界）：\n" + guidance
+	}
 	style := mapAnyOr(inputs["comic_style"], map[string]interface{}{})
 	user := fmt.Sprintf("用户需求：%s\n项目说明：%s\n风格名称：%s\n风格提示词：%s\n配音叙事模式：%s\n已锁定角色/道具/场景：%s\n参考图URL：%s\n生成参数：%s", firstUserPrompt(inputs), stringAny(inputs["comic_project_description"]), stringAny(style["name"]), stringAny(style["prompt"]), narrationMode, string(mustJSON(inputs["comic_assets"])), strings.Join(referenceImageURLs(inputs), "\n"), agentGenerationParamSummary(inputs))
 	modelCodes := comicDialogueModelCandidates(inputs, runtimeCfg)
@@ -901,8 +925,9 @@ dialogue 只能填写画面中角色实际说出的话；narration 只能填写�
 			continue
 		}
 		out := parseJSONish(text)
-		if len(out) == 0 {
-			out = fallbackComicDramaPlan(inputs, grid, text)
+		if err := validateComicDramaPlan(out, inputs, runtimeCfg); err != nil {
+			failures = append(failures, modelCode+"："+err.Error()+"；已停止，未用模板拼造分镜")
+			continue
 		}
 		out = normalizeComicDramaPlan(out, inputs, runtimeCfg)
 		persistComicDramaPlan(ctx, pool, workflowProjectID, userID, inputs, out)
@@ -929,66 +954,28 @@ func compactUpstreamError(body []byte) string {
 	return message
 }
 
-func fallbackComicDramaPlan(inputs map[string]interface{}, grid int, raw string) map[string]interface{} {
-	prompt := firstNonEmpty(firstUserPrompt(inputs), raw, "一个高质量 AI 漫剧短片")
-	dialogue, narration := "", prompt
-	if comicNarrationPerspective(inputs, map[string]interface{}{}) == "character_dialogue" {
-		dialogue, narration = prompt, ""
-	}
-	storyboards := make([]map[string]interface{}, 0, grid)
-	for i := 0; i < grid; i++ {
-		id := fmt.Sprintf("S%02d", i+1)
-		storyboards = append(storyboards, map[string]interface{}{
-			"id":              id,
-			"title":           fmt.Sprintf("分镜 %d", i+1),
-			"duration_sec":    5,
-			"scene":           prompt,
-			"dialogue":        dialogue,
-			"narration":       narration,
-			"camera":          "稳定推进，电影感构图",
-			"keyframe_prompt": prompt + "，AI 漫剧关键帧，角色一致，电影光影",
-			"video_prompt":    prompt + "，AI 漫剧视频片段，镜头稳定推进，角色一致",
-		})
-	}
-	return map[string]interface{}{
-		"intent":             prompt,
-		"creative_direction": "AI 漫剧短片",
-		"outline":            prompt,
-		"script":             prompt,
-		"characters":         []map[string]interface{}{},
-		"storyboards":        storyboards,
-		"current_step":       "storyboard_confirm",
-	}
-}
-
 func normalizeComicDramaPlan(plan, inputs, runtimeCfg map[string]interface{}) map[string]interface{} {
-	grid := comicStoryboardGrid(runtimeCfg, inputs)
 	storyboards := comicStoryboards(plan, runtimeCfg)
-	if len(storyboards) == 0 {
-		storyboards = comicStoryboards(fallbackComicDramaPlan(inputs, grid, ""), runtimeCfg)
-	}
-	if len(storyboards) > grid {
-		storyboards = storyboards[:grid]
-	}
-	for len(storyboards) < grid {
-		idx := len(storyboards) + 1
-		fallbackSpeech := firstNonEmpty(stringAny(plan["outline"]), firstUserPrompt(inputs))
-		dialogue, narration := "", fallbackSpeech
-		if comicNarrationPerspective(inputs, runtimeCfg) == "character_dialogue" {
-			dialogue, narration = fallbackSpeech, ""
+	segmentDuration := comicSegmentDurationSeconds(inputs, runtimeCfg)
+	requestText := strings.Join(strings.Fields(firstUserPrompt(inputs)), "")
+	seenSpeech := map[string]bool{}
+	for _, storyboard := range storyboards {
+		storyboard["duration_sec"] = segmentDuration
+		for _, key := range []string{"dialogue", "narration"} {
+			speech := strings.TrimSpace(stringAny(storyboard[key]))
+			normalizedSpeech := strings.Join(strings.Fields(speech), "")
+			isFullRequest := normalizedSpeech != "" && normalizedSpeech == requestText
+			isRepeated := utf8.RuneCountInString(normalizedSpeech) >= 6 && seenSpeech[normalizedSpeech]
+			if isFullRequest || isRepeated {
+				storyboard[key] = ""
+				continue
+			}
+			if normalizedSpeech != "" {
+				seenSpeech[normalizedSpeech] = true
+			}
 		}
-		storyboards = append(storyboards, map[string]interface{}{
-			"id":              fmt.Sprintf("S%02d", idx),
-			"title":           fmt.Sprintf("分镜 %d", idx),
-			"duration_sec":    5,
-			"scene":           firstNonEmpty(stringAny(plan["outline"]), firstUserPrompt(inputs)),
-			"dialogue":        dialogue,
-			"narration":       narration,
-			"camera":          "电影感推进",
-			"keyframe_prompt": firstNonEmpty(stringAny(plan["outline"]), firstUserPrompt(inputs)) + "，AI 漫剧关键帧",
-			"video_prompt":    firstNonEmpty(stringAny(plan["outline"]), firstUserPrompt(inputs)) + "，AI 漫剧视频片段",
-		})
 	}
+	applyComicSpeakerMetadata(plan, storyboards)
 	plan["storyboards"] = storyboards
 	plan["current_step"] = "storyboard_confirm"
 	if stringAny(plan["intent"]) == "" {
@@ -1096,6 +1083,7 @@ func runComicKeyframes(ctx context.Context, pool *pgxpool.Pool, baseURL, token s
 			"scores":      comicPassScores(runtimeCfg, inputs),
 			"retry_count": retryCount,
 		})
+		saveComicStageCheckpoint(ctx, pool, p.ProjectID, "keyframes", items)
 	}
 	return items, total, ""
 }
@@ -1121,6 +1109,19 @@ func runComicVideoSegments(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 		return nil, 0, "未配置 AI 漫剧视频模型"
 	}
 	items := make([]map[string]interface{}, 0, len(storyboards))
+	var schemaRaw, videoRuntimeRaw []byte
+	if err := pool.QueryRow(ctx, `SELECT input_schema, runtime_rule FROM models WHERE code=$1 AND is_enabled=true`, videoRuntime["generation_model_code"]).Scan(&schemaRaw, &videoRuntimeRaw); err != nil {
+		for _, raw := range existing {
+			if item, ok := raw.(map[string]interface{}); ok {
+				items = append(items, item)
+			}
+		}
+		return items, 0, "无法读取视频模型时长能力，请检查模型配置"
+	}
+	schema := map[string]interface{}{}
+	_ = json.Unmarshal(schemaRaw, &schema)
+	videoModelRuntime := map[string]interface{}{}
+	_ = json.Unmarshal(videoRuntimeRaw, &videoModelRuntime)
 	var total float64
 	maxRetry := intAny(firstNonNil(inputs["max_retry"], runtimeCfg["max_retry"]))
 	if maxRetry < 0 {
@@ -1133,14 +1134,22 @@ func runComicVideoSegments(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 	audioStrategy := comicAudioStrategy(inputs, runtimeCfg)
 	for idx, sb := range storyboards {
 		itemID := firstNonEmpty(stringAny(sb["id"]), fmt.Sprintf("S%02d", idx+1))
-		if previous, ok := existingByID[itemID]; ok && stringAny(previous["video_url"]) != "" && stringAny(previous["status"]) != "failed" {
-			items = append(items, previous)
-			continue
+		requestedAspect := comicRequestedAspectRatio(inputs, runtimeCfg)
+		referenceImageURL := ""
+		if idx < len(keyframes) {
+			if keyframe, ok := keyframes[idx].(map[string]interface{}); ok {
+				referenceImageURL = stringAny(keyframe["image_url"])
+			}
 		}
 		prompt := firstNonEmpty(stringAny(sb["video_prompt"]), stringAny(sb["scene"]), firstUserPrompt(inputs))
 		prompt = comicStylePrompt(inputs, prompt)
 		prompt = comicIdentityPrompt(inputs, prompt)
+		if previous, ok := existingByID[itemID]; ok && comicVideoCheckpointCompatible(previous, stringAny(videoRuntime["generation_model_code"]), requestedAspect, referenceImageURL, prompt) {
+			items = append(items, previous)
+			continue
+		}
 		speechText, speechType := comicStoryboardSpeech(sb, inputs, runtimeCfg)
+		voiceGender := comicStoryboardVoiceGender(sb)
 		switch audioStrategy {
 		case "video_native":
 			if speechText != "" && speechType == "dialogue" {
@@ -1150,6 +1159,9 @@ func runComicVideoSegments(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 			} else {
 				prompt += "\n原生同步音频要求：生成与场景匹配的环境音和动作音效，不添加无关对白。"
 			}
+			if requirement := comicVoiceRequirement(voiceGender, speechType); requirement != "" && speechText != "" {
+				prompt += "\n声音身份硬约束：" + requirement
+			}
 		case "hybrid":
 			prompt += "\n音频要求：只生成与画面匹配的环境音、动作音效或轻背景氛围，不生成任何角色对白或旁白；对白将由独立配音轨道混合。"
 		}
@@ -1157,30 +1169,40 @@ func runComicVideoSegments(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 		taskInputs["count"] = 1
 		taskInputs["n"] = 1
 		taskInputs["resolution"] = normalizeComicWorkerResolution(firstNonEmpty(stringAny(inputs["quality"]), stringAny(runtimeCfg["quality"])))
-		taskInputs["ratio"] = comicWorkerAspectRatio(firstNonEmpty(stringAny(inputs["orientation"]), stringAny(runtimeCfg["orientation"])))
+		// The confirmed aspect ratio is authoritative. A stale/default size (for
+		// example 1280x720) must not override an explicit portrait request.
+		delete(taskInputs, "size")
+		taskInputs["ratio"] = requestedAspect
 		taskInputs["aspect_ratio"] = taskInputs["ratio"]
-		taskInputs["generate_audio"] = audioStrategy != "tts_only"
-		if duration := intAny(sb["duration_sec"]); duration > 0 {
-			taskInputs["duration"] = duration
-			taskInputs["duration_sec"] = duration
+		if taskInputs["ratio"] == "9:16" {
+			taskInputs["orientation"] = "portrait"
+		} else if taskInputs["ratio"] == "16:9" {
+			taskInputs["orientation"] = "landscape"
 		}
-		if idx < len(keyframes) {
-			if kf, ok := keyframes[idx].(map[string]interface{}); ok {
-				if imageURL := stringAny(kf["image_url"]); imageURL != "" {
-					// A video segment must use its generated keyframe as the only image
-					// reference. Do not leak the comic style cover or the original upload
-					// into Seedance's multimodal content array.
-					for _, key := range []string{
-						"image", "images", "product_image", "reference_image",
-						"reference_images", "first_frame", "last_frame",
-					} {
-						delete(taskInputs, key)
-					}
-					taskInputs["image_url"] = imageURL
-					taskInputs["reference_images"] = []string{imageURL}
-					taskInputs["generation_mode"] = "image"
-				}
+		// Independent narration must fully own the output audio track. Some video
+		// providers ignore "no dialogue" prompts and still synthesize speech.
+		taskInputs["generate_audio"] = audioStrategy == "video_native"
+		if duration := intAny(sb["duration_sec"]); duration > 0 {
+			value, err := comicSupportedVideoDuration(schema, duration)
+			if err != nil {
+				return items, total, fmt.Sprintf("分段视频 %d：%s", idx+1, err.Error())
 			}
+			taskInputs["duration"] = value
+			taskInputs["duration_sec"] = value
+		}
+		if referenceImageURL != "" {
+			// A video segment must use its generated keyframe as the only image
+			// reference. Do not leak the comic style cover or the original upload
+			// into Seedance's multimodal content array.
+			for _, key := range []string{
+				"image", "images", "product_image", "reference_image",
+				"reference_images", "first_frame", "last_frame",
+			} {
+				delete(taskInputs, key)
+			}
+			taskInputs["image_url"] = referenceImageURL
+			taskInputs["reference_images"] = []string{referenceImageURL}
+			taskInputs["generation_mode"] = comicVideoReferenceMode(videoModelRuntime)
 		}
 		if stringAny(taskInputs["generation_mode"]) == "" {
 			taskInputs["generation_mode"] = "text"
@@ -1224,9 +1246,44 @@ func runComicVideoSegments(ctx context.Context, pool *pgxpool.Pool, baseURL, tok
 			"audio_mode":  audioStrategy,
 			"speech_type": speechType,
 			"retry_count": retryCount,
+			"model_code":  stringAny(videoRuntime["generation_model_code"]), "aspect_ratio": requestedAspect,
+			"reference_image_url": referenceImageURL,
 		})
+		saveComicStageCheckpoint(ctx, pool, p.ProjectID, "segments", items)
 	}
 	return items, total, ""
+}
+
+func comicSupportedVideoDuration(schema map[string]interface{}, requested int) (interface{}, error) {
+	props, _ := schema["properties"].(map[string]interface{})
+	prop, _ := props["duration"].(map[string]interface{})
+	values, _ := prop["enum"].([]interface{})
+	bestSeconds := 601.0
+	var best interface{}
+	for _, value := range values {
+		n, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimRight(stringAny(value), "sS秒")), 64)
+		if err == nil && n >= float64(requested) && n < bestSeconds {
+			bestSeconds, best = n, value
+		}
+	}
+	custom, _ := prop["x-allow-custom"].(bool)
+	if len(values) == 0 || custom {
+		minimum, maximum, step := floatAny(prop["minimum"]), floatAny(prop["maximum"]), floatAny(prop["multipleOf"])
+		if minimum < 1 {
+			minimum = 1
+		}
+		if step <= 0 {
+			step = 1
+		}
+		n := math.Ceil(math.Max(float64(requested), minimum)/step) * step
+		if n <= maximum && maximum <= 600 && n < bestSeconds {
+			best = int(n)
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("当前模型没有支持该分镜 %d 秒时长的配置；已完成素材保留，请调整分段方案或模型后再确认", requested)
+	}
+	return best, nil
 }
 
 func runComicNarrations(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, p WorkflowTaskPayload, publicID string, runtimeCfg, inputs map[string]interface{}, storyboards []map[string]interface{}, existing []interface{}) ([]map[string]interface{}, float64, string) {
@@ -1237,21 +1294,23 @@ func runComicNarrations(ctx context.Context, pool *pgxpool.Pool, baseURL, token 
 	audioRuntime := copyMap(runtimeCfg)
 	audioRuntime["generation_model_code"] = modelCode
 	audioRuntime["generation_type"] = "audio"
+	narrationSchema := map[string]interface{}{}
+	var narrationSchemaRaw []byte
+	if err := pool.QueryRow(ctx, `SELECT input_schema FROM models WHERE code=$1 AND is_enabled=true`, modelCode).Scan(&narrationSchemaRaw); err == nil {
+		_ = json.Unmarshal(narrationSchemaRaw, &narrationSchema)
+	}
 	items := make([]map[string]interface{}, 0, len(storyboards))
 	existingByID := comicItemsByID(existing)
 	var total float64
 	for idx, storyboard := range storyboards {
 		itemID := firstNonEmpty(stringAny(storyboard["id"]), fmt.Sprintf("S%02d", idx+1))
-		if previous, ok := existingByID[itemID]; ok && stringAny(previous["audio_url"]) != "" && stringAny(previous["status"]) != "failed" {
-			items = append(items, previous)
-			continue
-		}
 		speechText, speechType := comicStoryboardSpeech(storyboard, inputs, runtimeCfg)
 		if speechText == "" {
 			items = append(items, map[string]interface{}{
 				"id": itemID, "title": stringAny(storyboard["title"]), "status": "skipped",
 				"audio_url": "", "duration_sec": comicStoryboardDuration(storyboard),
 			})
+			saveComicStageCheckpoint(ctx, pool, p.ProjectID, "narrations", items)
 			continue
 		}
 		taskInputs := map[string]interface{}{
@@ -1261,11 +1320,26 @@ func runComicNarrations(ctx context.Context, pool *pgxpool.Pool, baseURL, token 
 			"speech_type": speechType,
 			"_mode":       "auto",
 		}
-		for _, key := range []string{"voice_id", "emotion", "speed", "format"} {
+		for _, key := range []string{"voice", "voice_id", "emotion", "speed", "format", "instruction"} {
 			if value, ok := inputs[key]; ok {
 				taskInputs[key] = value
 			}
 		}
+		voiceGender := comicStoryboardVoiceGender(storyboard)
+		if stringAny(taskInputs["voice"]) == "" && stringAny(taskInputs["voice_id"]) == "" {
+			if key, value, ok := comicVoiceForGender(narrationSchema, voiceGender); ok {
+				taskInputs[key] = value
+			}
+		}
+		selectedVoice := firstNonEmpty(stringAny(taskInputs["voice"]), stringAny(taskInputs["voice_id"]))
+		if previous, ok := existingByID[itemID]; ok && comicAudioCheckpointCompatible(previous, modelCode, voiceGender, selectedVoice, speechText) {
+			items = append(items, previous)
+			continue
+		}
+		if stringAny(taskInputs["instruction"]) == "" {
+			taskInputs["instruction"] = comicVoiceRequirement(voiceGender, speechType)
+		}
+		taskInputs["speaker_gender"] = voiceGender
 		results, errMsg := runAgentMediaTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, audioRuntime, taskInputs, speechText)
 		total += sumAgentMediaTaskCost(results)
 		output := map[string]interface{}{}
@@ -1281,8 +1355,10 @@ func runComicNarrations(ctx context.Context, pool *pgxpool.Pool, baseURL, token 
 		items = append(items, map[string]interface{}{
 			"id": itemID, "title": stringAny(storyboard["title"]), "dialogue": speechText, "speech_type": speechType,
 			"audio_url": audioURL, "status": "succeeded", "task": firstMapOrNil(results),
-			"duration_sec": comicStoryboardDuration(storyboard),
+			"duration_sec": comicStoryboardDuration(storyboard), "speaker_gender": voiceGender,
+			"voice": selectedVoice, "model_code": modelCode,
 		})
+		saveComicStageCheckpoint(ctx, pool, p.ProjectID, "narrations", items)
 	}
 	return items, total, ""
 }
@@ -1424,13 +1500,119 @@ func normalizeComicWorkerResolution(value string) string {
 }
 
 func comicWorkerAspectRatio(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), "portrait") {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "portrait", "vertical", "竖屏", "9:16":
 		return "9:16"
 	}
 	return "16:9"
 }
 
-func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID string, segments, narrations []interface{}, inputs, runtimeCfg map[string]interface{}) (map[string]interface{}, string) {
+func comicVideoReferenceMode(runtimeRule map[string]interface{}) string {
+	video, _ := runtimeRule["video"].(map[string]interface{})
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	profile := strings.ToLower(strings.TrimSpace(stringAny(video["upload_profile"])))
+	adapter := strings.ToLower(strings.TrimSpace(stringAny(upstream["adapter"])))
+	if profile == "veo_reference" || profile == "omni_reference" || adapter == "veo_reference_v1" || adapter == "omni_reference_v1" {
+		return "reference"
+	}
+	return "image"
+}
+
+func comicRequestedAspectRatio(inputs, runtimeCfg map[string]interface{}) string {
+	if explicit := firstNonEmpty(stringAny(inputs["aspect_ratio"]), stringAny(inputs["ratio"]), stringAny(inputs["orientation"])); explicit != "" {
+		return comicWorkerAspectRatio(explicit)
+	}
+	for _, key := range []string{"generation_prompt", "prompt", "comic_project_description", "script"} {
+		if ratio := comicAspectRatioFromText(stringAny(inputs[key])); ratio != "" {
+			return ratio
+		}
+	}
+	return comicWorkerAspectRatio(firstNonEmpty(stringAny(runtimeCfg["aspect_ratio"]), stringAny(runtimeCfg["ratio"]), stringAny(runtimeCfg["orientation"])))
+}
+
+func comicAspectRatioFromText(text string) string {
+	result := ""
+	for _, match := range regexp.MustCompile(`(?i)9\s*[:：/]\s*16|16\s*[:：/]\s*9|portrait|vertical|landscape|horizontal|竖屏|纵向|横屏|横向`).FindAllString(text, -1) {
+		switch strings.ToLower(strings.NewReplacer(" ", "", "：", ":", "/", ":").Replace(match)) {
+		case "9:16", "portrait", "vertical", "竖屏", "纵向":
+			result = "9:16"
+		case "16:9", "landscape", "horizontal", "横屏", "横向":
+			result = "16:9"
+		}
+	}
+	if result != "" {
+		return result
+	}
+	if match := regexp.MustCompile(`(?i)\b(\d{3,4})\s*[x×]\s*(\d{3,4})\b`).FindStringSubmatch(text); len(match) == 3 {
+		width, _ := strconv.Atoi(match[1])
+		height, _ := strconv.Atoi(match[2])
+		if height > width {
+			return "9:16"
+		}
+		if width > height {
+			return "16:9"
+		}
+	}
+	return ""
+}
+
+// Use the storyboard order and one shared timeline for video and narration.
+// Copy checkpoint items so composition never changes reusable source materials.
+func comicCompositionTimeline(storyboards []map[string]interface{}, segments, narrations []interface{}, targetDuration int) ([]interface{}, []interface{}, error) {
+	if len(storyboards) == 0 {
+		return nil, nil, fmt.Errorf("没有可合成的分镜")
+	}
+	segmentsByID, narrationsByID := comicItemsByID(segments), comicItemsByID(narrations)
+	total := 0.0
+	for _, storyboard := range storyboards {
+		total += comicStoryboardDuration(storyboard)
+	}
+	scale := 1.0
+	if targetDuration > 0 && targetDuration <= 600 {
+		scale = float64(targetDuration) / total
+	}
+	orderedSegments, orderedNarrations := []interface{}{}, []interface{}{}
+	elapsed, previousFrame := 0.0, 0
+	for idx, storyboard := range storyboards {
+		id := firstNonEmpty(stringAny(storyboard["id"]), fmt.Sprintf("S%02d", idx+1))
+		segment := segmentsByID[id]
+		if segment == nil || stringAny(segment["video_url"]) == "" || stringAny(segment["status"]) == "failed" {
+			return nil, nil, fmt.Errorf("分镜 %s 缺少可合成的视频", id)
+		}
+		// Round cumulative boundaries, not individual clips, to avoid frame drift.
+		elapsed += comicStoryboardDuration(storyboard) * scale
+		endFrame := int(math.Round(elapsed * 30))
+		duration := float64(endFrame-previousFrame) / 30
+		previousFrame = endFrame
+		segment = copyMap(segment)
+		segment["source_duration_sec"] = comicStoryboardDuration(storyboard)
+		segment["duration_sec"] = duration
+		orderedSegments = append(orderedSegments, segment)
+		if len(narrations) > 0 {
+			narration := copyMap(narrationsByID[id])
+			narration["id"], narration["duration_sec"] = id, duration
+			orderedNarrations = append(orderedNarrations, narration)
+		}
+	}
+	return orderedSegments, orderedNarrations, nil
+}
+
+func normalizeComicVideoSegment(ctx context.Context, sourcePath, outputPath string, duration float64, width, height int) error {
+	args := []string{"-y", "-i", sourcePath}
+	if mediaHasAudio(ctx, sourcePath) {
+		args = append(args, "-map", "0:v:0", "-map", "0:a:0", "-af", "asetpts=PTS-STARTPTS,apad")
+	} else {
+		// Every part needs the same streams, including silent clips from another model.
+		args = append(args, "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-map", "0:v:0", "-map", "1:a:0")
+	}
+	filter := fmt.Sprintf("setpts=PTS-STARTPTS,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=600", width, height, width, height)
+	args = append(args, "-vf", filter, "-t", strconv.FormatFloat(duration, 'f', 6, 64),
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+		"-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "192k", outputPath)
+	return runFFmpeg(ctx, args...)
+}
+
+func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID string, storyboards []map[string]interface{}, segments, narrations []interface{}, inputs, runtimeCfg map[string]interface{}) (map[string]interface{}, string) {
 	if objectStore == nil {
 		return nil, "对象存储未配置，无法保存 AI 漫剧合成视频"
 	}
@@ -1438,14 +1620,27 @@ func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID st
 	if err != nil {
 		return nil, "AI 漫剧视频合成不可用：" + err.Error()
 	}
+	segments, narrations, err = comicCompositionTimeline(storyboards, segments, narrations, intAny(inputs["target_duration_sec"]))
+	if err != nil {
+		return nil, err.Error()
+	}
 	tmpDir, err := os.MkdirTemp("", "starai-comic-*")
 	if err != nil {
 		return nil, "创建临时目录失败：" + err.Error()
 	}
 	defer os.RemoveAll(tmpDir)
 	listPath := filepath.Join(tmpDir, "list.txt")
+	narrations, err = loadComicNarrationSources(ctx, tmpDir, narrations)
+	if err != nil {
+		return nil, err.Error()
+	}
+	segments, narrations, err = alignComicNarrationTimeline(segments, narrations)
+	if err != nil {
+		return nil, err.Error()
+	}
 	var list bytes.Buffer
 	downloaded := 0
+	width, height := 0, 0
 	conn := connectionConfig{}
 	modelCode := firstNonEmpty(stringAny(inputs["video_model_code"]), stringAny(runtimeCfg["video_model_code"]), stringAny(runtimeCfg["generation_model_code"]))
 	if modelCode != "" {
@@ -1473,9 +1668,22 @@ func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID st
 		if err := os.WriteFile(partPath, data, 0600); err != nil {
 			return nil, "写入分段视频失败：" + err.Error()
 		}
+		if width == 0 || height == 0 {
+			width, height = probeMediaDimensions(ctx, partPath)
+			if width <= 0 || height <= 0 {
+				return nil, "无法读取分段视频尺寸，请检查 ffprobe 和视频素材"
+			}
+			width, height = comicTargetDimensions(width, height, comicRequestedAspectRatio(inputs, runtimeCfg))
+		}
+		normalizedPath := filepath.Join(tmpDir, fmt.Sprintf("part_%03d_timed.mp4", idx+1))
+		if err := normalizeComicVideoSegment(ctx, partPath, normalizedPath, floatAny(seg["duration_sec"]), width, height); err != nil {
+			return nil, fmt.Sprintf("分段视频 %d 时长对齐失败：%s", idx+1, err.Error())
+		}
 		list.WriteString("file '")
-		list.WriteString(strings.ReplaceAll(partPath, "'", "'\\''"))
+		list.WriteString(strings.ReplaceAll(normalizedPath, "'", "'\\''"))
 		list.WriteString("'\n")
+		// AAC packet padding must not push each following shot off its timeline.
+		fmt.Fprintf(&list, "duration %.6f\n", floatAny(seg["duration_sec"]))
 		downloaded++
 	}
 	if downloaded == 0 {
@@ -1500,20 +1708,41 @@ func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID st
 		narrationCount = count
 		if narrationPath != "" {
 			dubbedPath := filepath.Join(tmpDir, "final_dubbed.mp4")
-			args := []string{"-y", "-i", outPath, "-i", narrationPath}
-			if mediaHasAudio(ctx, outPath) {
-				args = append(args,
-					"-filter_complex", "[0:a]volume=0.25[bg];[1:a]volume=1.0[voice];[bg][voice]amix=inputs=2:duration=first:dropout_transition=2[a]",
-					"-map", "0:v:0", "-map", "[a]")
-			} else {
-				args = append(args, "-map", "0:v:0", "-map", "1:a:0")
+			args := []string{
+				"-y", "-i", outPath, "-i", narrationPath,
+				"-map", "0:v:0", "-map", "1:a:0",
+				"-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+				"-movflags", "+faststart", "-shortest", dubbedPath,
 			}
-			args = append(args, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", dubbedPath)
 			if err := runFFmpeg(ctx, args...); err != nil {
-				return nil, "配音混合失败：" + err.Error()
+				return nil, "配音替换失败：" + err.Error()
 			}
 			outPath = dubbedPath
 		}
+	}
+	targetDuration := intAny(inputs["target_duration_sec"])
+	if targetDuration > 0 && targetDuration <= 600 {
+		timedPath := filepath.Join(tmpDir, "final_timed.mp4")
+		args := []string{
+			"-y", "-i", outPath,
+			"-vf", "tpad=stop_mode=clone:stop_duration=600",
+			"-t", strconv.Itoa(targetDuration),
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+		}
+		if mediaHasAudio(ctx, outPath) {
+			args = append(args, "-af", "apad", "-c:a", "aac", "-b:a", "192k")
+		} else {
+			args = append(args, "-an")
+		}
+		args = append(args, "-movflags", "+faststart", timedPath)
+		if err := runFFmpeg(ctx, args...); err != nil {
+			return nil, "成片时长校准失败：" + err.Error()
+		}
+		outPath = timedPath
+	}
+	finalWidth, finalHeight := probeMediaDimensions(ctx, outPath)
+	if finalWidth != width || finalHeight != height {
+		return nil, fmt.Sprintf("成片画幅验收失败：实际 %dx%d，要求 %dx%d；已停止交付，素材仍保留", finalWidth, finalHeight, width, height)
 	}
 	data, err := os.ReadFile(outPath)
 	if err != nil {
@@ -1533,7 +1762,12 @@ func composeComicDramaVideo(ctx context.Context, pool *pgxpool.Pool, publicID st
 			thumbnailURL, _ = objectStore.Upload(ctx, thumbName, "image/jpeg", bytes.NewReader(thumbData), int64(len(thumbData)))
 		}
 	}
-	return map[string]interface{}{"final_video_url": publicURL, "video_url": publicURL, "thumbnail": thumbnailURL, "segments": downloaded, "narrations": narrationCount, "audio_strategy": comicAudioStrategy(inputs, runtimeCfg), "narration_perspective": comicNarrationPerspective(inputs, runtimeCfg), "orientation": stringAny(inputs["orientation"]), "quality": stringAny(inputs["quality"])}, ""
+	alignment := []map[string]interface{}{}
+	for _, raw := range narrations {
+		a, _ := raw.(map[string]interface{})
+		alignment = append(alignment, map[string]interface{}{"id": a["id"], "duration_sec": a["duration_sec"], "audio_duration_sec": a["actual_duration_sec"], "tempo": a["tempo"]})
+	}
+	return map[string]interface{}{"final_video_url": publicURL, "video_url": publicURL, "thumbnail": thumbnailURL, "segments": downloaded, "narrations": narrationCount, "audio_alignment": alignment, "target_duration_sec": targetDuration, "audio_strategy": comicAudioStrategy(inputs, runtimeCfg), "narration_perspective": comicNarrationPerspective(inputs, runtimeCfg), "orientation": stringAny(inputs["orientation"]), "aspect_ratio": comicRequestedAspectRatio(inputs, runtimeCfg), "width": width, "height": height, "quality": stringAny(inputs["quality"])}, ""
 }
 
 func prepareComicNarrationTrack(ctx context.Context, tmpDir string, narrations []interface{}) (string, int, error) {
@@ -1549,30 +1783,23 @@ func prepareComicNarrationTrack(ctx context.Context, tmpDir string, narrations [
 		if duration <= 0 {
 			duration = 5
 		}
-		durationArg := strconv.FormatFloat(duration, 'f', 3, 64)
+		durationArg := strconv.FormatFloat(duration, 'f', 6, 64)
 		audioURL := stringAny(item["audio_url"])
-		path := filepath.Join(tmpDir, fmt.Sprintf("narration_part_%03d.m4a", idx+1))
+		// PCM intermediate avoids an AAC encoder delay at every scene boundary.
+		path := filepath.Join(tmpDir, fmt.Sprintf("narration_part_%03d.wav", idx+1))
 		if audioURL == "" {
 			if err := runFFmpeg(ctx,
 				"-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-				"-t", durationArg, "-c:a", "aac", "-b:a", "192k", path,
+				"-t", durationArg, "-c:a", "pcm_s16le", path,
 			); err != nil {
 				return "", count, fmt.Errorf("生成分镜 %d 静音占位失败：%w", idx+1, err)
 			}
 		} else {
-			data, _, err := downloadAuthenticatedMedia(ctx, connectionConfig{}, audioURL, 100<<20)
-			if err != nil {
-				return "", count, fmt.Errorf("下载分镜 %d 配音失败：%w", idx+1, err)
+			sourcePath := stringAny(item["_source_path"])
+			if sourcePath == "" {
+				return "", count, fmt.Errorf("分镜%d配音尚未测量，不能直接裁剪", idx+1)
 			}
-			sourcePath := filepath.Join(tmpDir, fmt.Sprintf("narration_source_%03d", idx+1))
-			if err := os.WriteFile(sourcePath, data, 0600); err != nil {
-				return "", count, fmt.Errorf("写入分镜配音失败：%w", err)
-			}
-			if err := runFFmpeg(ctx,
-				"-y", "-i", sourcePath, "-af", "apad",
-				"-t", durationArg, "-ar", "44100", "-ac", "2",
-				"-c:a", "aac", "-b:a", "192k", path,
-			); err != nil {
+			if err := normalizeComicNarration(ctx, sourcePath, path, duration); err != nil {
 				return "", count, fmt.Errorf("标准化分镜 %d 配音失败：%w", idx+1, err)
 			}
 			count++
@@ -1580,6 +1807,7 @@ func prepareComicNarrationTrack(ctx context.Context, tmpDir string, narrations [
 		list.WriteString("file '")
 		list.WriteString(strings.ReplaceAll(path, "'", "'\\''"))
 		list.WriteString("'\n")
+		fmt.Fprintf(&list, "duration %s\n", durationArg)
 	}
 	if count == 0 {
 		return "", 0, nil
@@ -1587,8 +1815,8 @@ func prepareComicNarrationTrack(ctx context.Context, tmpDir string, narrations [
 	if err := os.WriteFile(listPath, []byte(list.String()), 0600); err != nil {
 		return "", count, err
 	}
-	outputPath := filepath.Join(tmpDir, "narration_track.m4a")
-	if err := runFFmpeg(ctx, "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "aac", "-b:a", "192k", outputPath); err != nil {
+	outputPath := filepath.Join(tmpDir, "narration_track.wav")
+	if err := runFFmpeg(ctx, "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:a", "pcm_s16le", outputPath); err != nil {
 		return "", count, fmt.Errorf("拼接配音失败：%w", err)
 	}
 	return outputPath, count, nil
@@ -1618,9 +1846,10 @@ func insertComicDramaWork(ctx context.Context, pool *pgxpool.Pool, userID int64,
 		"narration_mode":   comicNarrationPerspective(inputs, runtimeCfg),
 	}
 	publicID := fmt.Sprintf("work_%d", time.Now().UnixNano())
+	expires := configuredWorkExpiration(ctx, pool, 7)
 	_, _ = pool.Exec(ctx, `
-		INSERT INTO works (public_id, user_id, model_id, type, title, prompt, thumbnail_url, metadata)
-		VALUES ($1,$2,$3,'video',$4,$5,$6,$7)`,
+		INSERT INTO works (public_id, user_id, model_id, type, title, prompt, thumbnail_url, metadata, expires_at)
+		VALUES ($1,$2,$3,'video',$4,$5,$6,$7,$8)`,
 		publicID,
 		userID,
 		modelID,
@@ -1628,6 +1857,7 @@ func insertComicDramaWork(ctx context.Context, pool *pgxpool.Pool, userID int64,
 		firstUserPrompt(inputs),
 		firstNonEmpty(stringAny(final["thumbnail"]), videoURL),
 		mustJSON(meta),
+		expires,
 	)
 }
 
@@ -2410,7 +2640,7 @@ func estimatePriceRuleCostWorker(rule map[string]interface{}, params map[string]
 		if n <= 0 {
 			n = 1
 		}
-		return floatAny(rule["unit_price"]) * n
+		return workerImageTierValue(rule, params, "unit_price_by_size", "unit_price") * n
 	case "per_token":
 		promptTokens, outputTokens = workerEstimatedTokenCounts(rule, params, promptTokens, outputTokens)
 		// 以管理后台设定的输入/输出/缓存单价为准：缓存 token 按缓存单价计，其余输入按输入单价计。
@@ -2528,6 +2758,24 @@ func estimateDynamicPriceRuleCostWorker(rule, params map[string]interface{}) flo
 	default:
 		return floatAny(rule["fallback_cost"])
 	}
+}
+
+func workerImageTierValue(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	tier := strings.ToUpper(strings.TrimSpace(stringAny(params["image_size"])))
+	if tier == "" {
+		tier = strings.ToUpper(strings.TrimSpace(stringAny(params["quality"])))
+	}
+	if tier == "" || tier == "STANDARD" {
+		tier = "1K"
+	}
+	if values, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		for key, value := range values {
+			if strings.EqualFold(strings.TrimSpace(key), tier) {
+				return floatAny(value)
+			}
+		}
+	}
+	return floatAny(rule[fallbackKey])
 }
 
 func estimateMiniMaxH3PriceRuleCostWorker(rule, params map[string]interface{}) float64 {
@@ -2973,9 +3221,17 @@ func runAgentMediaTasks(ctx context.Context, pool *pgxpool.Pool, baseURL, token 
 
 func applyAgentModelDefaults(taskInput, defaults, runtimeRule map[string]interface{}, taskType string) {
 	videoRule, _ := runtimeRule["video"].(map[string]interface{})
+	upstreamRule, _ := runtimeRule["upstream"].(map[string]interface{})
 	modeKey := firstNonEmpty(stringAny(videoRule["mode_param"]), "generation_mode")
 	explicitMode := stringAny(taskInput[modeKey]) != ""
+	profile := strings.ToLower(strings.TrimSpace(stringAny(videoRule["upload_profile"])))
+	adapter := strings.ToLower(strings.TrimSpace(stringAny(upstreamRule["adapter"])))
+	sizeBasedAdapter := profile == "veo_reference" || profile == "veo_frame_pair" || profile == "omni_reference" ||
+		adapter == "veo_reference_v1" || adapter == "veo_frame_pair_v1" || adapter == "omni_reference_v1"
 	for key, value := range defaults {
+		if taskType == "video" && sizeBasedAdapter && key == "size" && firstNonEmpty(stringAny(taskInput["aspect_ratio"]), stringAny(taskInput["ratio"]), stringAny(taskInput["orientation"])) != "" {
+			continue
+		}
 		if _, exists := taskInput[key]; !exists {
 			taskInput[key] = value
 		}
@@ -3370,7 +3626,9 @@ func appendWorkflowMediaTask(ctx context.Context, pool *pgxpool.Pool, projectID 
 		next = append(next, item)
 	}
 	outputs["media_tasks"] = next
-	outputs["current_step"] = "generate"
+	if step := stringAny(outputs["current_step"]); step != "keyframes" && step != "video_segments" && step != "narrations" && step != "compose" {
+		outputs["current_step"] = "generate"
+	}
 	saveWorkflowOutputs(ctx, pool, projectID, outputs)
 }
 
@@ -3425,6 +3683,22 @@ func loadWorkflowOutputs(ctx context.Context, pool *pgxpool.Pool, projectID int6
 
 func saveWorkflowOutputs(ctx context.Context, pool *pgxpool.Pool, projectID int64, outputs map[string]interface{}) {
 	pool.Exec(ctx, `UPDATE workflow_projects SET outputs=$1, updated_at=now() WHERE id=$2`, mustJSON(outputs), projectID)
+}
+
+func saveComicStageCheckpoint(ctx context.Context, pool *pgxpool.Pool, projectID int64, stage string, items []map[string]interface{}) {
+	outputs := loadWorkflowOutputs(ctx, pool, projectID)
+	values := mapSliceToInterfaces(items)
+	outputs[stage] = values
+	if comic, ok := mapAny(outputs["comic_drama"]); ok {
+		comic[stage] = values
+		outputs["comic_drama"] = comic
+	}
+	step := stage
+	if stage == "segments" {
+		step = "video_segments"
+	}
+	outputs["current_step"] = step
+	saveWorkflowOutputs(ctx, pool, projectID, outputs)
 }
 
 func loadAgentMediaTask(ctx context.Context, pool *pgxpool.Pool, taskNo string) map[string]interface{} {
@@ -3482,9 +3756,13 @@ func parseJSONish(text string) map[string]interface{} {
 	start := strings.Index(text, "{")
 	end := strings.LastIndex(text, "}")
 	if start >= 0 && end > start {
-		_ = json.Unmarshal([]byte(text[start:end+1]), &out)
+		candidate := escapeComicJSONControls(text[start : end+1])
+		out = map[string]interface{}{}
+		if json.Unmarshal([]byte(candidate), &out) == nil {
+			return out
+		}
 	}
-	return out
+	return map[string]interface{}{}
 }
 
 func firstUserPrompt(inputs map[string]interface{}) string {
@@ -3839,14 +4117,31 @@ func comicDialogueModelCandidates(inputs, runtimeCfg map[string]interface{}) []s
 
 func comicStoryboardGrid(runtimeCfg, inputs map[string]interface{}) int {
 	grid := intAny(inputs["storyboard_grid"])
+	if seconds := intAny(inputs["segment_duration_sec"]); seconds >= 1 && seconds <= 600 && grid >= 1 && grid <= 75 {
+		return grid
+	}
 	if grid <= 0 {
 		grid = intAny(runtimeCfg["storyboard_grid"])
 	}
 	switch grid {
-	case 4, 6, 9:
+	case 2, 4, 6, 9:
 		return grid
 	default:
 		return 6
+	}
+}
+
+func comicSegmentDurationSeconds(inputs, runtimeCfg map[string]interface{}) int {
+	if seconds := intAny(inputs["segment_duration_sec"]); seconds >= 1 && seconds <= 600 {
+		return seconds
+	}
+	switch firstNonEmpty(stringAny(inputs["duration_mode"]), stringAny(runtimeCfg["duration_mode"]), "standard") {
+	case "compact":
+		return 4
+	case "long":
+		return 8
+	default:
+		return 5
 	}
 }
 
@@ -3865,10 +4160,10 @@ func comicStoryboards(plan, runtimeCfg map[string]interface{}) []map[string]inte
 			m["id"] = fmt.Sprintf("S%02d", idx+1)
 		}
 		if stringAny(m["keyframe_prompt"]) == "" {
-			m["keyframe_prompt"] = firstNonEmpty(stringAny(m["scene"]), stringAny(m["title"])) + "，AI 漫剧关键帧，角色一致，画风统一"
+			m["keyframe_prompt"] = firstNonEmpty(stringAny(m["scene"]), stringAny(m["title"])) + "，角色一致，遵循用户指定画风"
 		}
 		if stringAny(m["video_prompt"]) == "" {
-			m["video_prompt"] = firstNonEmpty(stringAny(m["scene"]), stringAny(m["title"])) + "，AI 漫剧视频片段，镜头自然，角色一致"
+			m["video_prompt"] = firstNonEmpty(stringAny(m["scene"]), stringAny(m["title"])) + "，镜头自然，角色一致，遵循用户指定画风"
 		}
 		assetContext := comicStoryboardAssetContext(plan, m)
 		if assetContext != "" {

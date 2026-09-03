@@ -268,6 +268,14 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
     ...current,
     cost_rule: { ...(current.cost_rule || {}), [key]: value },
   }));
+  const setImageTierCost = (tier: string, value: number) => setForm((current) => ({
+    ...current,
+    cost_rule: {
+      ...(current.cost_rule || {}),
+      unit_cost: tier === "1K" ? value : Number(current.cost_rule?.unit_cost || value),
+      unit_cost_by_size: { ...((current.cost_rule?.unit_cost_by_size as Record<string, number> | undefined) || {}), [tier]: value },
+    },
+  }));
 
   const billingType = normalizedBillingType(form.cost_rule?.billing_type || defaultBillingType);
   const unhealthyRoutes = routes.filter((route) => route.is_enabled && route.health_status !== "healthy");
@@ -348,6 +356,10 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
                 <label className="text-xs text-gray-600">输出 / 百万 Token<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.output_cost_per_m || 0)} onChange={(e) => setCostField("output_cost_per_m", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
                 <label className="text-xs text-gray-600">缓存读取 / 百万<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.cache_read_cost_per_m || 0)} onChange={(e) => setCostField("cache_read_cost_per_m", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
                 <label className="text-xs text-gray-600">缓存写入 / 百万<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.cache_write_cost_per_m || 0)} onChange={(e) => setCostField("cache_write_cost_per_m", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+              </> : billingType === "per_image" ? <>
+                {["1K", "2K", "4K"].map((tier) => (
+                  <label key={tier} className="text-xs text-gray-600">{tier} 上游成本 / 张<input type="number" min={0} step="0.000001" value={Number((form.cost_rule?.unit_cost_by_size as Record<string, number> | undefined)?.[tier] ?? form.cost_rule?.unit_cost ?? 0)} onChange={(e) => setImageTierCost(tier, Math.max(0, Number(e.target.value) || 0))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+                ))}
               </> : <label className="text-xs text-gray-600">上游单位成本<input type="number" min={0} step="0.000001" value={Number(form.cost_rule?.unit_cost || 0)} onChange={(e) => setCostField("unit_cost", Number(e.target.value))} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>}
             </div>
           </div>

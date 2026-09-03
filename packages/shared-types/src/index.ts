@@ -145,6 +145,7 @@ export interface Work {
 }
 
 export interface SystemConfig {
+  workbench_default_theme?: "dark" | "light";
   site_base_url?: string;
   site_name: string;
   site_logo?: string;

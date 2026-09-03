@@ -240,11 +240,19 @@ export default function WorksPage() {
   const [preview, setPreview] = useState<{ work: Work; index: number } | null>(null);
   const [publishDraft, setPublishDraft] = useState<{ work: Work; is_paid: boolean; price: string; title: string } | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [retentionDays, setRetentionDays] = useState<number | null>(null);
 
   const load = () => {
     setLoading(true);
-    api<{ items: Work[] }>("/api/works?page_size=80")
-      .then((r) => setWorks(r.items || []))
+    Promise.all([
+      api<{ items: Work[] }>("/api/works?page_size=80"),
+      api<{ work_retention_days?: number }>("/api/system-configs/public"),
+    ])
+      .then(([worksResponse, config]) => {
+        setWorks(worksResponse.items || []);
+        const days = Number(config.work_retention_days);
+        setRetentionDays(Number.isFinite(days) && days >= 0 ? Math.floor(days) : 7);
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   };
@@ -318,7 +326,13 @@ export default function WorksPage() {
               {ts("创作资源库")}
             </div>
             <h1 className="text-2xl font-bold text-gray-950 dark:text-gray-100">{ts("我的作品")}</h1>
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{ts("图片、视频、音频统一管理；批量生成会以拼图方式展示全部结果。")}</p>
+            <p className="mt-1 text-sm font-medium text-amber-700 dark:text-amber-300">
+              {retentionDays === null
+                ? ts("请即时下载作品，保存到本地。")
+                : retentionDays > 0
+                  ? td("works.retentionNotice", "请即时下载作品，保存到本地，系统{days}天后自动删除！", { days: retentionDays })
+                  : ts("当前作品由系统永久保留，建议及时下载到本地备份。")}
+            </p>
           </div>
           <div className="flex w-full overflow-x-auto rounded-xl border border-gray-200 bg-gray-50 p-1 text-sm sm:w-auto dark:border-white/10 dark:bg-white/5">
             {(["all", "image", "video", "audio"] as const).map((key) => (

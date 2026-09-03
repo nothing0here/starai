@@ -1,29 +1,12 @@
-"use client";
+import AppLayoutClient from "./AppLayoutClient";
+import { getPublicSystemConfig } from "@/lib/public-config";
+import { resolveWorkbenchTheme, workbenchThemeScript } from "@/lib/workbench-theme";
 
-import { usePathname } from "next/navigation";
-import { useEffect } from "react";
-import { AppShell } from "@/components/AppShell";
-import { ForcedAnnouncementModal } from "@/components/ForcedAnnouncementModal";
-
-export default function AppLayout({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const selectedModelCode = pathname.startsWith("/app/models/")
-    ? pathname.split("/").pop()
-    : undefined;
-  const selectedAgentCode = pathname.startsWith("/app/agents/")
-    ? pathname.split("/").pop()
-    : undefined;
-
-  useEffect(() => {
-    const stored = localStorage.getItem("theme");
-    const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
-    document.documentElement.classList.toggle("dark", stored ? stored === "dark" : prefersDark);
-  }, []);
-
-  return (
-    <>
-      <AppShell selectedModelCode={selectedModelCode} selectedAgentCode={selectedAgentCode}>{children}</AppShell>
-      <ForcedAnnouncementModal />
-    </>
-  );
+export default async function AppLayout({ children }: { children: React.ReactNode }) {
+  const config = await getPublicSystemConfig();
+  const defaultTheme = resolveWorkbenchTheme(null, config.workbench_default_theme);
+  return <>
+    <script dangerouslySetInnerHTML={{ __html: workbenchThemeScript(defaultTheme) }} />
+    <AppLayoutClient defaultTheme={defaultTheme}>{children}</AppLayoutClient>
+  </>;
 }

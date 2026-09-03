@@ -316,7 +316,7 @@ func (s *ModelService) EstimateCost(model *ModelFull, params map[string]interfac
 	billingType, _ := model.PriceRule["billing_type"].(string)
 	switch billingType {
 	case "per_image":
-		unitPrice := floatValue(model.PriceRule["unit_price"])
+		unitPrice := imageTierPrice(model.PriceRule, params, "unit_price_by_size", "unit_price")
 		n := floatValue(params["n"])
 		if n <= 0 {
 			n = floatValue(params["count"])
@@ -470,6 +470,26 @@ func estimateDynamicCost(rule map[string]interface{}, params map[string]interfac
 	default:
 		return floatValue(rule["fallback_cost"])
 	}
+}
+
+// imageTierPrice keeps per-image billing backward compatible while allowing a
+// logical image model to charge a different price for each output tier.
+func imageTierPrice(rule, params map[string]interface{}, tierMapKey, fallbackKey string) float64 {
+	tier := strings.ToUpper(strings.TrimSpace(stringValue(params["image_size"])))
+	if tier == "" {
+		tier = strings.ToUpper(strings.TrimSpace(stringValue(params["quality"])))
+	}
+	if tier == "" || tier == "STANDARD" {
+		tier = "1K"
+	}
+	if prices, ok := rule[tierMapKey].(map[string]interface{}); ok {
+		for key, value := range prices {
+			if strings.EqualFold(strings.TrimSpace(key), tier) {
+				return floatValue(value)
+			}
+		}
+	}
+	return floatValue(rule[fallbackKey])
 }
 
 func estimateMiniMaxH3Cost(rule map[string]interface{}, params map[string]interface{}) float64 {
@@ -1555,14 +1575,27 @@ func validateModelPriceRule(rule map[string]interface{}) error {
 			return fmt.Errorf("计费字段 %s 不能为负数", key)
 		}
 	}
+	if prices, ok := rule["unit_price_by_size"].(map[string]interface{}); ok {
+		for tier, price := range prices {
+			if floatValue(price) < 0 {
+				return fmt.Errorf("图片档位 %s 的单价不能为负数", tier)
+			}
+		}
+	}
 	switch billingType {
 	case "per_token":
 		if perTokenPrice(rule, "input_price") <= 0 && perTokenPrice(rule, "output_price") <= 0 {
 			return errors.New("Token 计费至少需要配置输入或输出单价")
 		}
-	case "per_image", "per_request", "per_second":
+	case "per_image":
+		if _, unitExists := rule["unit_price"]; !unitExists {
+			if prices, ok := rule["unit_price_by_size"].(map[string]interface{}); !ok || len(prices) == 0 {
+				return errors.New("按图计费必须配置 unit_price 或 unit_price_by_size")
+			}
+		}
+	case "per_request", "per_second":
 		if _, exists := rule["unit_price"]; !exists {
-			return errors.New("按次、按图或按秒计费必须配置 unit_price")
+			return errors.New("按次或按秒计费必须配置 unit_price")
 		}
 	case "dynamic":
 		strategy := strings.ToLower(strings.TrimSpace(stringValue(rule["strategy"])))

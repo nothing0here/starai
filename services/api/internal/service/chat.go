@@ -59,7 +59,7 @@ func (s *ChatService) CreateConversation(ctx context.Context, userID int64, mode
 	return &ConversationDTO{PublicID: publicID, Title: &title, ModelCode: &modelCode, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (s *ChatService) ListConversations(ctx context.Context, userID int64, modelCode string) ([]ConversationDTO, error) {
+func (s *ChatService) ListConversations(ctx context.Context, userID int64, modelCode, scope string) ([]ConversationDTO, error) {
 	args := []interface{}{userID}
 	// Abandoned requests can create a conversation before the upstream model
 	// answers. Keep those empty rows out of history: there is nothing to restore.
@@ -67,6 +67,17 @@ func (s *ChatService) ListConversations(ctx context.Context, userID int64, model
 	if modelCode != "" {
 		args = append(args, modelCode)
 		where += fmt.Sprintf(" AND m.code=$%d", len(args))
+	}
+	if scope == "creative_agent" {
+		where += ` AND (
+			c.title ~ '^(Agent 通用智能体|Ageng 通用智能体|Agneg 通用智能体|通用智能体)'
+			OR EXISTS (
+				SELECT 1 FROM conversation_messages agent_message
+				WHERE agent_message.conversation_id=c.id
+				  AND agent_message.role='system'
+				  AND agent_message.content ~ '"type":"creative_agent_[^"]+"'
+			)
+		)`
 	}
 	rows, err := s.db.Query(ctx, `
 		SELECT c.public_id, c.title, m.code, c.created_at, c.updated_at

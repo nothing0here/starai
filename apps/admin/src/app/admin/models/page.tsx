@@ -919,6 +919,10 @@ export default function ModelsPage() {
       max_reference_images: Math.max(0, Math.min(20, Number.isFinite(parsed) ? parsed : 4)),
       default_quality: normalizeImageQuality(image.default_quality),
       default_size: String(image.default_size || "auto"),
+      supported_size_tiers: (Array.isArray(image.supported_size_tiers) ? image.supported_size_tiers : IMAGE_QUALITY_TIERS)
+        .map(normalizeImageQuality)
+        .filter((tier: string, index: number, values: string[]) => values.indexOf(tier) === index),
+      model_by_size: (image.model_by_size || {}) as Record<string, string>,
     };
   };
 
@@ -948,7 +952,7 @@ export default function ModelsPage() {
 
   const setImageRule = (
     runtimeRuleText: string,
-    patch: { max_reference_images?: number; default_quality?: string; poll_path?: string; poll_interval_sec?: number; poll_timeout_sec?: number }
+    patch: { max_reference_images?: number; default_quality?: string; supported_size_tiers?: readonly string[]; model_by_size?: Record<string, string>; poll_path?: string; poll_interval_sec?: number; poll_timeout_sec?: number }
   ) => {
     const rr = safeParseJson(runtimeRuleText, {});
     const image = (rr?.image ?? {}) as Record<string, any>;
@@ -959,6 +963,12 @@ export default function ModelsPage() {
     }
     if (patch.default_quality !== undefined) {
       nextImage.default_quality = normalizeImageQuality(patch.default_quality);
+    }
+    if (patch.supported_size_tiers !== undefined) {
+      nextImage.supported_size_tiers = patch.supported_size_tiers.map(normalizeImageQuality);
+    }
+    if (patch.model_by_size !== undefined) {
+      nextImage.model_by_size = patch.model_by_size;
     }
     const nextUpstream = { ...upstream };
     if (patch.poll_path !== undefined) nextUpstream.poll_path = patch.poll_path;
@@ -1006,6 +1016,11 @@ export default function ModelsPage() {
       ? (BANANA_MODELS.includes(prev.new_api_model) ? prev.new_api_model : preset.model)
       : (prev.new_api_model && !prev.new_api_model.startsWith("nano_banana") ? prev.new_api_model : preset.model);
     const defaultQuality = inferImageQualityFromModel(modelName);
+    const modelBySize: Record<string, string> = isBanana
+      ? { "1K": "nano_banana_pro-1K", "2K": "nano_banana_pro-2K", "4K": "nano_banana_pro-4K" }
+      : modelName.toLowerCase().startsWith("gpt-image-2")
+        ? { "1K": "gpt-image-2", "2K": "gpt-image-2-2K", "4K": "gpt-image-2-4K" }
+        : { "1K": modelName };
     return {
       ...prev,
       category: "image",
@@ -1025,11 +1040,13 @@ export default function ModelsPage() {
       runtime_rule: setImageRule(clearModelCaps(prev.runtime_rule), {
         max_reference_images: isBanana ? 5 : getImageRule(prev.runtime_rule).max_reference_images,
         default_quality: defaultQuality,
+        supported_size_tiers: IMAGE_QUALITY_TIERS,
+        model_by_size: modelBySize,
         poll_path: isBanana ? "/v1/videos/{id}" : undefined,
         poll_interval_sec: isBanana ? 5 : undefined,
         poll_timeout_sec: isBanana ? 3600 : undefined,
       }),
-      price_rule: JSON.stringify({ billing_type: "per_image", currency: "¥", unit_price: 0.01 }, null, 2),
+      price_rule: JSON.stringify({ billing_type: "per_image", currency: "¥", unit_price: 0.01, unit_price_by_size: { "1K": 0.01, "2K": 0.01, "4K": 0.01 } }, null, 2),
     };
   };
 
@@ -1849,7 +1866,7 @@ export default function ModelsPage() {
       ? ["longanfengyue", "longanyuanfei", "longanlingxi", "longanxiaoxin", "longanhuan_v3.6", "longjielidou_v3.6", "longpaopao_v3.6", "longhuohuo_v3.6", "longchuanshu_v3.6", "loongmary", "loongeva_v3.6", "loongjohn"]
       : ["longanyang", "longanhuan_v3", "longanhuan", "longhuhu_v3", "longpaopao_v3", "longjielidou_v3", "longjiaxin_v3", "longanyue_v3", "longshange_v3", "loongabby_v3", "loongandy_v3"];
     const voiceLabels = qwen
-      ? { longanfengyue: "龙安风悦", longanyuanfei: "龙安元妃", longanlingxi: "龙安灵希", longanxiaoxin: "龙安小昕", "longanhuan_v3.6": "龙安欢", "longjielidou_v3.6": "龙杰力豆", "longpaopao_v3.6": "龙泡泡", "longhuohuo_v3.6": "龙火火", "longchuanshu_v3.6": "龙川叔", loongmary: "Mary", "loongeva_v3.6": "Eva", loongjohn: "John" }
+      ? { longanfengyue: "女声 · 龙安风悦", longanyuanfei: "女声 · 龙安元妃", longanlingxi: "女声 · 龙安灵希", longanxiaoxin: "女声 · 龙安小昕", "longanhuan_v3.6": "女声 · 龙安欢", "longjielidou_v3.6": "男童 · 龙杰力豆", "longpaopao_v3.6": "女童 · 龙泡泡", "longhuohuo_v3.6": "男童 · 龙火火", "longchuanshu_v3.6": "男声 · 龙川叔", loongmary: "女声 · Mary", "loongeva_v3.6": "女声 · Eva", loongjohn: "男声 · John" }
       : { longanyang: "龙安洋", longanhuan_v3: "龙安欢 V3", longanhuan: "龙安欢", longhuhu_v3: "龙呼呼", longpaopao_v3: "龙泡泡", longjielidou_v3: "龙杰力豆", longjiaxin_v3: "龙嘉欣", longanyue_v3: "龙安粤", longshange_v3: "龙陕哥", loongabby_v3: "Abby", loongandy_v3: "Andy" };
     return {
       ...prev,
@@ -1868,7 +1885,7 @@ export default function ModelsPage() {
       input_schema: JSON.stringify({
         type: "object",
         properties: {
-          voice: { type: "string", title: "音色", enum: voices, enumLabels: voiceLabels, default: voice, "x-order": 1, "x-widget": "option_menu", "x-icon": "voice", "x-placement": "top", "x-highlight": true },
+          voice: { type: "string", title: "音色", enum: voices, enumLabels: voiceLabels, ...(qwen ? { "x-option-genders": { longanfengyue: "female", longanyuanfei: "female", longanlingxi: "female", longanxiaoxin: "female", "longanhuan_v3.6": "female", "longjielidou_v3.6": "male", "longpaopao_v3.6": "female", "longhuohuo_v3.6": "male", "longchuanshu_v3.6": "male", loongmary: "female", "loongeva_v3.6": "female", loongjohn: "male" }, "x-agent-default-by-gender": { male: "longchuanshu_v3.6", female: "longanhuan_v3.6" } } : {}), default: voice, "x-order": 1, "x-widget": "option_menu", "x-icon": "voice", "x-placement": "top", "x-highlight": true },
           format: { type: "string", title: "输出格式", enum: ["wav", "mp3", "pcm"], enumLabels: { wav: "WAV", mp3: "MP3", pcm: "PCM" }, default: "wav", "x-order": 2, "x-widget": "option_menu", "x-icon": "format" },
           sample_rate: { type: "integer", title: "采样率", enum: [16000, 22050, 24000, 48000], enumLabels: { "16000": "16 kHz", "22050": "22.05 kHz", "24000": "24 kHz", "48000": "48 kHz" }, default: 24000, "x-order": 3, "x-widget": "option_menu", "x-icon": "audio" },
           instruction: { type: "string", title: "表达指令", description: "可选：用中文或英文描述语速、情绪、方言或角色风格", "x-order": 4 },
@@ -4123,7 +4140,11 @@ export default function ModelsPage() {
                           return {
                             ...prev,
                             new_api_model: modelName,
-                            runtime_rule: setImageRule(prev.runtime_rule, { default_quality: defaultQuality }),
+                            runtime_rule: setImageRule(prev.runtime_rule, {
+                              default_quality: defaultQuality,
+                              supported_size_tiers: IMAGE_QUALITY_TIERS,
+                              model_by_size: { "1K": "nano_banana_pro-1K", "2K": "nano_banana_pro-2K", "4K": "nano_banana_pro-4K" },
+                            }),
                             default_params: JSON.stringify(
                               { ...(safeParseJson(prev.default_params, {}) || {}), quality: defaultQuality },
                               null,
@@ -4180,29 +4201,110 @@ export default function ModelsPage() {
                       })
                     }
                   >
-                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : IMAGE_QUALITY_TIERS).map((tier) => (
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
                       <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>
                   <div className="text-[11px] text-gray-400 mt-1">{isAliyunQwenImageForm() ? "比例与分辨率合并为官方 size 参数；自动推荐时不向上游发送 size。" : "前台工作台图片质量工具栏会默认选中该值。"}</div>
                 </div>
-                <div>
-                  <label className="text-xs text-gray-500">每张扣费</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.0001"
-                    className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                    value={Number((safeParseJson(form.price_rule, {}) as any).unit_price ?? 0)}
-                    onChange={(e) => {
-                      const price = Math.max(0, Number(e.target.value) || 0);
-                      setForm((prev) => ({
-                        ...prev,
-                        price_rule: JSON.stringify({ ...(safeParseJson(prev.price_rule, {}) || {}), billing_type: "per_image", currency: "¥", unit_price: price }, null, 2),
-                      }));
-                    }}
-                  />
-                </div>
+                {!isAliyunQwenImageForm() && (
+                  <div className="col-span-2 overflow-x-auto rounded-xl border border-emerald-100 bg-white">
+                    <table className="w-full min-w-[720px] text-xs">
+                      <thead className="bg-emerald-50 text-gray-500">
+                        <tr>
+                          <th className="px-3 py-2 text-left">前台档位</th>
+                          <th className="px-3 py-2 text-left">上游模型 ID</th>
+                          <th className="px-3 py-2 text-left">用户售价 / 张</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {IMAGE_QUALITY_TIERS.map((tier) => {
+                          const imageRule = getImageRule(form.runtime_rule);
+                          const enabled = imageRule.supported_size_tiers.includes(tier);
+                          const prices = ((safeParseJson(form.price_rule, {}) as Record<string, any>).unit_price_by_size || {}) as Record<string, number>;
+                          return (
+                            <tr key={tier} className="border-t border-emerald-100">
+                              <td className="px-3 py-2">
+                                <label className="flex items-center gap-2 font-semibold text-gray-800">
+                                  <input
+                                    type="checkbox"
+                                    checked={enabled}
+                                    onChange={(event) => setForm((prev) => {
+                                      const current = getImageRule(prev.runtime_rule);
+                                      let tiers = event.target.checked
+                                        ? [...current.supported_size_tiers, tier]
+                                        : current.supported_size_tiers.filter((item: string) => item !== tier);
+                                      if (!tiers.length) tiers = ["1K"];
+                                      const defaultQuality = tiers.includes(current.default_quality) ? current.default_quality : tiers[0];
+                                      return {
+                                        ...prev,
+                                        runtime_rule: setImageRule(prev.runtime_rule, { supported_size_tiers: tiers, default_quality: defaultQuality }),
+                                        default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: defaultQuality }, null, 2),
+                                      };
+                                    })}
+                                  />
+                                  {tier}{tier === "1K" ? "（默认/标准）" : ""}
+                                </label>
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  className="w-full rounded-lg border px-2 py-1.5"
+                                  value={String(imageRule.model_by_size[tier] || "")}
+                                  placeholder={tier === "1K" ? form.new_api_model || "上游默认模型" : `例如 ${form.new_api_model}-${tier}`}
+                                  onChange={(event) => setForm((prev) => {
+                                    const current = getImageRule(prev.runtime_rule);
+                                    return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { model_by_size: { ...current.model_by_size, [tier]: event.target.value.trim() } }) };
+                                  })}
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.0001"
+                                  className="w-full rounded-lg border px-2 py-1.5"
+                                  value={Number(prices[tier] ?? (safeParseJson(form.price_rule, {}) as any).unit_price ?? 0)}
+                                  onChange={(event) => {
+                                    const price = Math.max(0, Number(event.target.value) || 0);
+                                    setForm((prev) => {
+                                      const current = safeParseJson(prev.price_rule, {}) as Record<string, any>;
+                                      return {
+                                        ...prev,
+                                        price_rule: JSON.stringify({
+                                          ...current,
+                                          billing_type: "per_image",
+                                          currency: current.currency || "¥",
+                                          unit_price: tier === "1K" ? price : Number(current.unit_price ?? price),
+                                          unit_price_by_size: { ...(current.unit_price_by_size || {}), [tier]: price },
+                                        }, null, 2),
+                                      };
+                                    });
+                                  }}
+                                />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                    <div className="border-t border-emerald-100 px-3 py-2 text-[11px] text-gray-500">
+                      前台只展示一个平台模型；用户选择档位后，系统按上游模型 ID 路由，并按该行售价扣费。未填写的上游 ID 回退到主模型。
+                    </div>
+                  </div>
+                )}
+                {isAliyunQwenImageForm() && (
+                  <div>
+                    <label className="text-xs text-gray-500">每张扣费</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.0001"
+                      className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
+                      value={Number((safeParseJson(form.price_rule, {}) as any).unit_price ?? 0)}
+                      onChange={(event) => setForm((prev) => ({ ...prev, price_rule: JSON.stringify({ ...(safeParseJson(prev.price_rule, {}) || {}), billing_type: "per_image", unit_price: Math.max(0, Number(event.target.value) || 0) }, null, 2) }))}
+                    />
+                  </div>
+                )}
               </div>
               {isBananaImageForm() && (
                 <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-6 text-gray-600">
@@ -4258,7 +4360,7 @@ export default function ModelsPage() {
                       })
                     }
                   >
-                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : IMAGE_QUALITY_TIERS).map((tier) => (
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
                       <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>

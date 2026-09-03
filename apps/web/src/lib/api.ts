@@ -91,7 +91,7 @@ export async function uploadAsset(
 }
 
 export async function importAssetFromURL(url: string, name?: string) {
-  return api<{ public_id: string; url: string; name?: string; kind: string; asset_type: string; mime_type?: string; size_bytes?: number; duration_seconds?: number }>("/api/assets/import-url", {
+  return api<{ public_id: string; work_public_id: string; url: string; name?: string; kind: string; asset_type: string; mime_type?: string; size_bytes?: number; duration_seconds?: number }>("/api/assets/import-url", {
     method: "POST",
     body: JSON.stringify({ url, ...(name ? { name } : {}) }),
   });

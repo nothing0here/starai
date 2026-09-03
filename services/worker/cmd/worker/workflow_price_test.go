@@ -69,6 +69,32 @@ func TestEstimateDynamicPriceRuleCostWorkerMiniMaxH3(t *testing.T) {
 	}
 }
 
+func TestEstimatePriceRuleCostWorkerUsesImageSizeTier(t *testing.T) {
+	rule := map[string]interface{}{
+		"billing_type": "per_image",
+		"unit_price":   float64(0.1),
+		"unit_price_by_size": map[string]interface{}{
+			"1K": float64(0.1), "2K": float64(0.25), "4K": float64(0.6),
+		},
+	}
+	if got := estimatePriceRuleCostWorker(rule, map[string]interface{}{"image_size": "4K", "count": float64(2)}, 0, 0, 0, 0); got != 1.2 {
+		t.Fatalf("cost = %v, want 1.2", got)
+	}
+}
+
+func TestWorkerRouteProviderCostUsesImageSizeTier(t *testing.T) {
+	route := workerModelRoute{CostRule: map[string]interface{}{
+		"billing_type": "per_image",
+		"unit_cost":    float64(0.05),
+		"unit_cost_by_size": map[string]interface{}{
+			"1K": float64(0.05), "2K": float64(0.12), "4K": float64(0.3),
+		},
+	}}
+	if got := workerRouteProviderCost(route, map[string]interface{}{"image_size": "2K", "count": float64(2)}, 0, 0, 0, 0); got != 0.24 {
+		t.Fatalf("provider cost = %v, want 0.24", got)
+	}
+}
+
 func TestApplyAgentModelDefaultsInfersSeedanceMode(t *testing.T) {
 	input := map[string]interface{}{"reference_images": []string{"https://example.test/frame.png"}}
 	defaults := map[string]interface{}{"resolution": "720p", "generation_mode": "text"}
@@ -91,6 +117,18 @@ func TestApplyAgentModelDefaultsInfersSeedanceMode(t *testing.T) {
 	applyAgentModelDefaults(explicit, defaults, runtimeRule, "video")
 	if explicit["generation_mode"] != "text" {
 		t.Fatalf("explicit generation mode should be preserved: %#v", explicit)
+	}
+}
+
+func TestApplyAgentModelDefaultsDoesNotOverrideConfirmedAspect(t *testing.T) {
+	input := map[string]interface{}{"aspect_ratio": "9:16", "ratio": "9:16", "orientation": "portrait"}
+	runtimeRule := map[string]interface{}{"video": map[string]interface{}{"upload_profile": "veo_reference"}, "upstream": map[string]interface{}{"adapter": "veo_reference_v1"}}
+	applyAgentModelDefaults(input, map[string]interface{}{"size": "1280x720", "duration": 8}, runtimeRule, "video")
+	if _, exists := input["size"]; exists {
+		t.Fatalf("landscape model default overrode confirmed portrait aspect: %#v", input)
+	}
+	if input["duration"] != 8 {
+		t.Fatalf("unrelated model defaults must still apply: %#v", input)
 	}
 }
 
@@ -134,11 +172,11 @@ func TestWorkerPerSecondPricingSupportsSecondsString(t *testing.T) {
 
 func TestWorkerPerTokenPricingUsesCachePrices(t *testing.T) {
 	rule := map[string]interface{}{
-		"billing_type":             "per_token",
-		"input_price_per_m":        float64(10),
-		"output_price_per_m":       float64(40),
-		"cache_read_price_per_m":   float64(1),
-		"cache_write_price_per_m":  float64(12),
+		"billing_type":            "per_token",
+		"input_price_per_m":       float64(10),
+		"output_price_per_m":      float64(40),
+		"cache_read_price_per_m":  float64(1),
+		"cache_write_price_per_m": float64(12),
 	}
 	// 输入 1000（其中缓存读 400 + 缓存写 100），输出 500
 	got := estimatePriceRuleCostWorker(rule, map[string]interface{}{}, 1000, 500, 400, 100)

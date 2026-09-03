@@ -47,6 +47,7 @@ interface ConfigItem {
   min?: number;
   step?: number;
   options?: { value: string; label: string }[];
+  onChange?: (value: string) => void;
 }
 
 const BASE_ITEMS: ConfigItem[] = [
@@ -311,10 +312,14 @@ export default function SystemConfigPage() {
               String(cfg.customer_service_enabled).toLowerCase() === "false"
             );
       setConfigs({
+        workbench_default_theme: "dark",
         web_search_enabled: false,
         web_search_provider: "tavily",
         web_search_api_key: "",
         web_search_base_url: "",
+        web_search_redfox_api_key: "",
+        web_search_redfox_base_url: "",
+        web_search_redfox_engine: "kimi",
         web_search_depth: "basic",
         web_search_max_results: 5,
         web_search_timeout_sec: 12,
@@ -380,14 +385,14 @@ export default function SystemConfigPage() {
     await loadVersionInfo();
   };
 
-  const handleSave = async () => {
+  const handleSave = async (values: Record<string, unknown> = configs) => {
     setSaving(true);
     setSaveMsg("");
     setSaveErr("");
     try {
       await adminApi("/system-configs", {
         method: "PATCH",
-        body: JSON.stringify(configs),
+        body: JSON.stringify(values),
       });
       setSaved(true);
       setSaveMsg("配置已保存");
@@ -568,8 +573,10 @@ export default function SystemConfigPage() {
   const testWebSearch = async () => {
     setWebSearchTesting(true); setSaveErr(""); setSaveMsg("");
     try {
-      const result = await adminApi<{ provider: string; result_count: number; latency_ms: number }>("/system-configs/web-search/test", { method: "POST", body: JSON.stringify(configs) });
-      setSaveMsg(`联网搜索连接正常：${result.provider} 返回 ${result.result_count} 条结果，耗时 ${result.latency_ms}ms`);
+      const result = await adminApi<{ provider: string; primary_provider?: string; fallback_used?: boolean; result_count: number; latency_ms: number }>("/system-configs/web-search/test", { method: "POST", body: JSON.stringify(configs) });
+      const provider = result.provider;
+      const fallback = result.fallback_used ? `（主服务 ${result.primary_provider} 未返回来源，已回退）` : "";
+      setSaveMsg(`联网搜索连接正常：${provider}${fallback} 返回 ${result.result_count} 条结果，耗时 ${result.latency_ms}ms`);
     } catch (err) { setSaveErr(err instanceof Error ? err.message : "联网搜索连接测试失败"); }
     finally { setWebSearchTesting(false); }
   };
@@ -697,8 +704,9 @@ export default function SystemConfigPage() {
         </label>
       ) : item.type === "select" ? (
         <select
+          aria-label={item.label}
           value={String(configs[item.key] ?? "")}
-          onChange={(e) => setField(item.key, e.target.value)}
+          onChange={(e) => item.onChange ? item.onChange(e.target.value) : setField(item.key, e.target.value)}
           className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm focus:border-primary focus:outline-none"
         >
           {(item.options || []).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
@@ -1035,6 +1043,10 @@ export default function SystemConfigPage() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 {renderItem({ key: "site_name", label: "品牌名称", type: "text", hint: "显示在前台工作台、登录弹窗、API 文档、后台左上角等主要品牌位置。" })}
+                <div>
+                  {renderItem({ key: "workbench_default_theme", label: "工作台默认主题", type: "select", options: [{ value: "dark", label: "深色" }, { value: "light", label: "浅色" }], hint: "新用户及从未手动切换主题的老用户进入工作台时使用此设置；已手动切换的用户保留该浏览器原有选择。修改后刷新工作台生效。" })}
+                  <button type="button" disabled={saving} onClick={() => void handleSave({ workbench_default_theme: configs.workbench_default_theme })} className="mt-2 rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-700 disabled:opacity-50">保存默认主题</button>
+                </div>
                 {renderItem({ key: "site_description", label: "前台品牌描述", type: "text", hint: "显示在用户前台工作台品牌区域、登录弹窗等位置。" })}
                 {renderItem({ key: "admin_site_description", label: "后台品牌描述", type: "text", hint: "显示在管理后台左上角、后台登录页等品牌副标题位置。" })}
                 {renderItem({ key: "site_api_tagline", label: "API 文档描述", type: "text", hint: "显示在开放 API 文档页面的品牌副标题位置。" })}
@@ -1373,7 +1385,7 @@ export default function SystemConfigPage() {
 
         <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm shadow-gray-950/5 xl:col-span-2">
           <div className="mb-1 text-sm font-semibold text-gray-900">Agent 联网搜索</div>
-          <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。生产环境推荐混合模式：优先使用自建 SearXNG，结果为空或异常时再由 Tavily 兜底。</p>
+          <p className="mb-5 text-xs leading-relaxed text-gray-400">供 Agent 通用智能体的“智能搜索”使用。RedFox 按官方同步 API 搜索抖音账号和作品；其他网页问题自动使用备用搜索。切换服务商后仅影响新发起的搜索。</p>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {renderItem({ key: "web_search_enabled", label: "启用智能搜索", type: "checkbox", hint: "关闭后用户端不显示智能搜索按钮。" })}
             {renderItem({ key: "web_search_provider", label: "搜索服务商", type: "select", options: [
@@ -1381,9 +1393,14 @@ export default function SystemConfigPage() {
               { value: "hybrid", label: "混合模式（SearXNG 优先，Tavily 兜底）" },
               { value: "brave", label: "Brave Search API" },
               { value: "searxng", label: "SearXNG（自建）" },
-            ] })}
-            {String(configs.web_search_provider || "tavily") !== "searxng" && renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "Tavily / Brave 使用；保存后只显示脱敏值，不会下发到用户端。" })}
+              { value: "redfox", label: "RedFox 抖音数据 API" },
+            ], onChange: (value) => setConfigs((prev) => ({ ...prev, web_search_provider: value, web_search_enabled: true })), hint: "切换服务商时会同步开启智能搜索；如需停用，请在切换后手动关闭。" })}
+            {["tavily", "brave", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_api_key", label: "搜索 API Key", type: "password", hint: "Tavily / Brave 使用；保存后只显示脱敏值，不会下发到用户端。" })}
             {["searxng", "hybrid"].includes(String(configs.web_search_provider || "tavily")) && renderItem({ key: "web_search_base_url", label: "SearXNG 服务地址", type: "text", hint: "内置生产环境填写 http://searxng:8080；本地开发填写 http://127.0.0.1:8888。" })}
+            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_base_url", label: "备用 SearXNG 地址", type: "text", hint: "RedFox 未返回可核验网页来源时自动回退；留空则不回退。本地开发可填写 http://127.0.0.1:8888。" })}
+            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_api_key", label: "二级备用 Tavily API Key", type: "password", hint: "RedFox 和 SearXNG 都无可核验结果时使用；留空则不启用二级回退。保存后仅显示脱敏值。" })}
+            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_redfox_api_key", label: "RedFox API Key", type: "password", hint: "在 RedFoxHub 获取；独立保存，切换到其他搜索服务商时不会被覆盖。" })}
+            {String(configs.web_search_provider || "tavily") === "redfox" && renderItem({ key: "web_search_redfox_base_url", label: "RedFox 服务地址", type: "text", hint: "留空使用官方地址 https://redfox.hk；仅代理或私有网关场景需要修改。" })}
             {renderItem({ key: "agent_default_timezone", label: "Agent 默认时区", type: "text", hint: "IANA 时区，例如 Asia/Shanghai、Asia/Tokyo、America/New_York。用于可信系统时间工具。" })}
             {renderItem({ key: "web_search_router_model_code", label: "模糊问题路由模型", type: "select", options: [
               { value: "", label: "跟随 Agent 主模型" },
@@ -1395,7 +1412,7 @@ export default function SystemConfigPage() {
             ], hint: "时效范围和新闻主题由 Agent 自动判断；Advanced 会消耗更多 Tavily Credits。" })}
             {renderItem({ key: "web_search_unit_price", label: "单次真实搜索售价（算力）", type: "number", min: 0, step: 0.001, hint: "支持 0.001、0.01、0.1 等价格。真实搜索成功后扣费；命中缓存或搜索失败不收费。0 表示免费。" })}
             {renderItem({ key: "web_search_max_results", label: "每次最大结果数", type: "number", hint: "允许 1–10 条，建议 5 条。" })}
-            {renderItem({ key: "web_search_timeout_sec", label: "搜索超时（秒）", type: "number", hint: "允许 3–30 秒。超时会自动降级为普通 Agent 对话。" })}
+            {renderItem({ key: "web_search_timeout_sec", label: "搜索超时（秒）", type: "number", hint: "允许 3–30 秒。RedFox 官方数据接口为同步请求，失败时会自动使用备用搜索。" })}
             {renderItem({ key: "web_search_daily_limit", label: "每用户每日搜索上限", type: "number", hint: "0 表示不限；需要 Redis 才能严格执行。" })}
             {renderItem({ key: "web_search_cache_ttl_sec", label: "搜索缓存（秒）", type: "number", hint: "允许 0–3600，推荐 600；命中缓存不消耗搜索额度。" })}
           </div>
@@ -1519,7 +1536,7 @@ export default function SystemConfigPage() {
           {saveErr ? <span className="text-red-500">{saveErr}</span> : null}
           {saveMsg ? <span className="text-emerald-600">{saveMsg}</span> : null}
         </div>
-        <button onClick={handleSave} disabled={saving} className="min-w-[140px] rounded-xl bg-primary px-8 py-2.5 text-sm font-semibold text-dark disabled:cursor-not-allowed disabled:opacity-60">
+        <button onClick={() => void handleSave()} disabled={saving} className="min-w-[140px] rounded-xl bg-primary px-8 py-2.5 text-sm font-semibold text-dark disabled:cursor-not-allowed disabled:opacity-60">
           {saving ? "保存中..." : saved ? "已保存" : "保存配置"}
         </button>
       </div>

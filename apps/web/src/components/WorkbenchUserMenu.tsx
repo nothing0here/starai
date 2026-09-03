@@ -39,13 +39,6 @@ function QuickEntryIcon() {
   );
 }
 
-function initialDarkMode() {
-  if (typeof window === "undefined") return false;
-  const stored = localStorage.getItem("theme");
-  if (stored) return stored === "dark";
-  return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
-}
-
 export function WorkbenchUserMenu({ onRecharge }: Props) {
   const { t } = useI18n();
   const { api_docs_enabled, api_docs_operations } = useSiteBranding();
@@ -71,10 +64,11 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
   );
 
   useEffect(() => {
-    const isDark = initialDarkMode();
-    setDarkMode(isDark);
-    document.documentElement.classList.toggle("dark", isDark);
-
+    const sync = () => setDarkMode(document.documentElement.classList.contains("dark"));
+    sync();
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
@@ -101,10 +95,10 @@ export function WorkbenchUserMenu({ onRecharge }: Props) {
   }, [open]);
 
   const toggleTheme = () => {
-    const next = !darkMode;
+    const next = !document.documentElement.classList.contains("dark");
     setDarkMode(next);
     document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("theme", next ? "dark" : "light");
+    try { localStorage.setItem("theme", next ? "dark" : "light"); } catch { /* Keep the current page usable without storage. */ }
   };
 
   const openAnnouncements = () => {

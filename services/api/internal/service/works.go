@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,7 +104,8 @@ func (s *WorksService) Delete(ctx context.Context, userID int64, publicID string
 	}
 	defer tx.Rollback(ctx)
 	var workID int64
-	if err = tx.QueryRow(ctx, `SELECT id FROM works WHERE public_id=$1 AND user_id=$2`, publicID, userID).Scan(&workID); err != nil {
+	var assetID *int64
+	if err = tx.QueryRow(ctx, `SELECT id, asset_id FROM works WHERE public_id=$1 AND user_id=$2`, publicID, userID).Scan(&workID, &assetID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM gallery_items WHERE user_id=$1 AND work_id=$2`, userID, workID); err != nil {
@@ -111,6 +113,11 @@ func (s *WorksService) Delete(ctx context.Context, userID int64, publicID string
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM works WHERE id=$1 AND user_id=$2`, workID, userID); err != nil {
 		return err
+	}
+	if assetID != nil {
+		if _, err = tx.Exec(ctx, `DELETE FROM assets WHERE id=$1 AND user_id=$2 AND NOT EXISTS (SELECT 1 FROM works WHERE asset_id=$1)`, *assetID, userID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -138,7 +145,7 @@ func (s *WorksService) CleanupExpired(ctx context.Context, store ObjectDeleter, 
 		limit = 200
 	}
 	rows, err := s.db.Query(ctx, `
-		SELECT w.public_id, w.type, w.title, w.prompt, w.thumbnail_url, w.metadata, COALESCE(t.output, '{}'::jsonb), w.expires_at, w.created_at
+		SELECT w.public_id, w.user_id, w.type, w.title, w.prompt, w.thumbnail_url, w.metadata, COALESCE(t.output, '{}'::jsonb), w.expires_at, w.created_at
 		FROM works w
 		LEFT JOIN tasks t ON t.id = w.task_id
 		WHERE w.expires_at IS NOT NULL AND w.expires_at <= now()
@@ -147,14 +154,19 @@ func (s *WorksService) CleanupExpired(ctx context.Context, store ObjectDeleter, 
 		return 0, err
 	}
 	defer rows.Close()
-	var items []WorkDTO
+	type expiredWork struct {
+		work   WorkDTO
+		userID int64
+	}
+	var items []expiredWork
 	for rows.Next() {
 		var w WorkDTO
+		var userID int64
 		var meta []byte
 		var taskOutput []byte
 		var created time.Time
 		var expires *time.Time
-		if err := rows.Scan(&w.PublicID, &w.Type, &w.Title, &w.Prompt, &w.ThumbnailURL, &meta, &taskOutput, &expires, &created); err != nil {
+		if err := rows.Scan(&w.PublicID, &userID, &w.Type, &w.Title, &w.Prompt, &w.ThumbnailURL, &meta, &taskOutput, &expires, &created); err != nil {
 			return 0, err
 		}
 		json.Unmarshal(meta, &w.Metadata)
@@ -164,20 +176,42 @@ func (s *WorksService) CleanupExpired(ctx context.Context, store ObjectDeleter, 
 			es := expires.Format(time.RFC3339)
 			w.ExpiresAt = &es
 		}
-		items = append(items, w)
+		items = append(items, expiredWork{work: w, userID: userID})
 	}
-	for _, w := range items {
+	for _, item := range items {
 		if store != nil {
-			for _, key := range WorkStorageKeys(&w, store) {
+			for _, key := range WorkStorageKeys(&item.work, store) {
 				_ = store.Delete(ctx, key)
 			}
 		}
-		_, err = s.db.Exec(ctx, `DELETE FROM works WHERE public_id=$1`, w.PublicID)
-		if err != nil {
+		if err = s.Delete(ctx, item.userID, item.work.PublicID); err != nil {
 			return 0, err
 		}
 	}
 	return len(items), nil
+}
+
+// ParseWorkRetentionDays normalizes the JSON-decoded system setting.
+func ParseWorkRetentionDays(value interface{}, fallback int) int {
+	days := fallback
+	switch v := value.(type) {
+	case float64:
+		days = int(v)
+	case int:
+		days = v
+	case json.Number:
+		if parsed, err := strconv.Atoi(v.String()); err == nil {
+			days = parsed
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			days = parsed
+		}
+	}
+	if days < 0 {
+		return 0
+	}
+	return days
 }
 
 func mergeWorkMetadata(meta map[string]interface{}, taskOutput []byte) map[string]interface{} {
@@ -275,6 +309,40 @@ func (s *WorksService) CreateFromTask(ctx context.Context, userID, taskID, model
 	return &WorkDTO{
 		PublicID: publicID, Type: "image", Prompt: &prompt, ThumbnailURL: &imageURL,
 		Metadata: map[string]interface{}{"image_url": imageURL}, ExpiresAt: expStr, CreatedAt: now,
+	}, nil
+}
+
+func (s *WorksService) CreateFromAsset(ctx context.Context, userID int64, assetPublicID, title, mediaType, mediaURL string, retentionDays int) (*WorkDTO, error) {
+	publicID := util.NewPublicID("work")
+	var expires *time.Time
+	if retentionDays > 0 {
+		t := time.Now().Add(time.Duration(retentionDays) * 24 * time.Hour)
+		expires = &t
+	}
+	meta, _ := json.Marshal(map[string]interface{}{
+		mediaType + "_url": mediaURL,
+		"source":           "url_import",
+		"asset_public_id":  assetPublicID,
+	})
+	var created time.Time
+	err := s.db.QueryRow(ctx, `
+		INSERT INTO works (public_id, user_id, type, title, prompt, asset_id, thumbnail_url, metadata, expires_at)
+		SELECT $1,$2,$3,$4,$4,id,$5,$6,$7 FROM assets WHERE public_id=$8 AND user_id=$2
+		RETURNING created_at`,
+		publicID, userID, mediaType, title, mediaURL, meta, expires, assetPublicID).Scan(&created)
+	if err != nil {
+		return nil, err
+	}
+	createdAt := created.Format(time.RFC3339)
+	var expiresAt *string
+	if expires != nil {
+		formatted := expires.Format(time.RFC3339)
+		expiresAt = &formatted
+	}
+	return &WorkDTO{
+		PublicID: publicID, Type: mediaType, Title: &title, Prompt: &title, ThumbnailURL: &mediaURL,
+		Metadata:  map[string]interface{}{mediaType + "_url": mediaURL, "source": "url_import", "asset_public_id": assetPublicID},
+		ExpiresAt: expiresAt, CreatedAt: createdAt,
 	}, nil
 }
 

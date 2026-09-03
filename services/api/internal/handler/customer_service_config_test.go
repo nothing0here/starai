@@ -90,6 +90,48 @@ func TestCreativeAgentPlanFromStream(t *testing.T) {
 	}
 }
 
+func TestCreativeAgentRolePromptKeepsPlannerBoundary(t *testing.T) {
+	prompt := creativeAgentRolePrompt(&service.PromptRoleDTO{Name: "短剧导演", SystemPrompt: "擅长设计节奏紧凑的竖屏短剧"})
+	for _, want := range []string{"短剧导演", "节奏紧凑", "不得改变", "严格按上述 JSON/流式协议"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("role prompt missing %q: %s", want, prompt)
+		}
+	}
+}
+
+func TestNormalizeCreativeAgentWorkflowPlan(t *testing.T) {
+	plan := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "workflow", "workflow_code": "invented_workflow", "prompt": "角色冒险故事", "params": map[string]interface{}{},
+	}, "根据参考图角色生成40-50秒视频，分段执行后合成成片")
+	params, _ := plan["params"].(map[string]interface{})
+	if plan["workflow_code"] != "ai_comic_drama" || params["storyboard_grid"] != 6 || params["duration_mode"] != "long" || params["target_duration_sec"] != 48 || params["_mode"] != "auto" {
+		t.Fatalf("unexpected workflow plan: %#v", plan)
+	}
+
+	exact := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "workflow", "params": map[string]interface{}{"target_duration_sec": float64(22)},
+	}, "生成短剧")
+	exactParams := exact["params"].(map[string]interface{})
+	if exactParams["storyboard_grid"] != 4 || exactParams["duration_mode"] != "standard" || exactParams["target_duration_sec"] != 22 {
+		t.Fatalf("unexpected exact-duration layout: %#v", exactParams)
+	}
+
+	sixteen := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "workflow", "params": map[string]interface{}{},
+	}, "生成16秒视频")
+	sixteenParams := sixteen["params"].(map[string]interface{})
+	if sixteenParams["storyboard_grid"] != 2 || sixteenParams["duration_mode"] != "long" || sixteenParams["target_duration_sec"] != 16 {
+		t.Fatalf("unexpected 16-second layout: %#v", sixteenParams)
+	}
+
+	misclassified := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "video", "prompt": "角色短剧", "params": map[string]interface{}{"duration": float64(48)},
+	}, "根据角色参考图生成48秒完整视频")
+	if misclassified["intent"] != "workflow" || misclassified["workflow_code"] != "ai_comic_drama" {
+		t.Fatalf("long-form video was not promoted to workflow: %#v", misclassified)
+	}
+}
+
 func TestNormalizeCreativeAgentMessages(t *testing.T) {
 	messages := normalizeCreativeAgentMessages([]runtime.ChatMessage{
 		{Role: "user", Content: "生成一张图片"},

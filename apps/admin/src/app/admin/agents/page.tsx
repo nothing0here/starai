@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { Bot, Check, Code2, Image as ImageIcon, Layers, Loader2, Pencil, Plus, Settings2, Sparkles, Trash2, Upload, Video, X } from "lucide-react";
 import { adminApi, adminUploadFile } from "@/lib/api";
 import { AdminPagination } from "@/components/AdminPagination";
+import { AgentPolicyEditor } from "./AgentPolicyEditor";
 
 type GenerationType = "image" | "video" | "video_upscale" | "video_redraw" | "subtitle_remove" | "comic_drama" | "novel_workshop" | "photo_studio" | "virtual_try_on" | "creative_agent";
 type WorkflowNode = { id: string; name: string; type: string; model_code: string; prompt_template?: string; cost: number };
@@ -1310,6 +1311,7 @@ export default function AgentsAdminPage() {
                 </section>
               )}
 
+              {form.isEdit && form.code === "general_creative_agent" && <AgentPolicyEditor />}
               {!form.system_workspace && <section className="grid gap-4 rounded-2xl border border-gray-100 p-4 md:grid-cols-2">
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Settings2 size={16} />模型与计费</div>
                 {!isVideoUtilityType(form.generation_type) && form.generation_type !== "virtual_try_on" && <Field label={form.generation_type === "creative_agent" ? "Agent 主聊天模型" : "分析大模型"}><select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}><option value="">请选择{form.generation_type === "creative_agent" ? "主聊天" : "分析"}模型</option>{chatModels.filter((m) => !/multi.?collab|多模型协作/i.test(`${m.code} ${m.display_name}`)).map((m) => <option key={m.code} value={m.code}>{m.display_name} / {m.code}</option>)}</select>{form.generation_type === "creative_agent" && <p className="mt-1.5 text-[11px] leading-5 text-gray-400">Agent 会使用此模型理解需求、判断图片或视频意图，并生成执行计划。</p>}</Field>}
@@ -1489,6 +1491,7 @@ export default function AgentsAdminPage() {
                   </Field>
                   <Field label="分镜宫格数">
                     <select className="admin-input" value={form.storyboard_grid} onChange={(e) => setForm({ ...form, storyboard_grid: Number(e.target.value) })}>
+                      <option value={2}>2宫格</option>
                       <option value={4}>4宫格</option>
                       <option value={6}>6宫格</option>
                       <option value={9}>9宫格</option>

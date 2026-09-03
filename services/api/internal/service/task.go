@@ -198,6 +198,9 @@ func (s *TaskService) Create(ctx context.Context, userID int64, input CreateTask
 	inputJSON, _ := json.Marshal(params)
 	var taskID int64
 	if err := s.billing.FreezeWithFinalize(ctx, userID, estimated, "task", taskNo, func(tx pgx.Tx) error {
+		if err := validateAgentSubmissionTx(ctx, tx, userID, params); err != nil {
+			return err
+		}
 		return tx.QueryRow(ctx, `
 			INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost)
 			VALUES ($1,$2,$3,$4,'pending',$5,$6) RETURNING id`,
@@ -234,11 +237,26 @@ func (s *TaskService) createBalanceFailedTask(ctx context.Context, userID, model
 	errCode := "INSUFFICIENT_BALANCE"
 	errMsg := billing.InsufficientBalanceMsg
 	var taskID int64
-	err := s.db.QueryRow(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var confirmation map[string]interface{}
+	if err := json.Unmarshal(inputJSON, &confirmation); err != nil {
+		return nil, err
+	}
+	if err := validateAgentSubmissionTx(ctx, tx, userID, confirmation); err != nil {
+		return nil, err
+	}
+	err = tx.QueryRow(ctx, `
 		INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost, error_code, error_message, finished_at)
 		VALUES ($1,$2,$3,$4,'failed',$5,$6,$7,$8,now()) RETURNING id`,
 		taskNo, userID, modelID, taskType, inputJSON, estimated, errCode, errMsg).Scan(&taskID)
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 	s.addEvent(ctx, taskID, "failed", map[string]interface{}{"reason": errMsg, "code": errCode})

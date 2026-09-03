@@ -17,16 +17,19 @@ import (
 )
 
 type WebSearchConfig struct {
-	Enabled     bool
-	Provider    string
-	APIKey      string
-	BaseURL     string
-	SearchDepth string
-	MaxResults  int
-	TimeoutSec  int
-	DailyLimit  int
-	CacheTTLSec int
-	UnitPrice   float64
+	Enabled       bool
+	Provider      string
+	APIKey        string
+	BaseURL       string
+	RedFoxAPIKey  string
+	RedFoxBaseURL string
+	RedFoxEngine  string
+	SearchDepth   string
+	MaxResults    int
+	TimeoutSec    int
+	DailyLimit    int
+	CacheTTLSec   int
+	UnitPrice     float64
 }
 
 type WebSearchResult struct {
@@ -35,6 +38,7 @@ type WebSearchResult struct {
 	Snippet       string  `json:"snippet"`
 	PublishedDate string  `json:"published_date,omitempty"`
 	Score         float64 `json:"score,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
 }
 
 type WebSearchRequest struct {
@@ -46,24 +50,34 @@ type WebSearchRequest struct {
 
 var tavilySearchURL = "https://api.tavily.com/search"
 
+var ErrWebSearchNoResults = errors.New("搜索服务未返回有效结果")
+
+const defaultRedFoxBaseURL = "https://redfox.hk"
+
 func ParseWebSearchConfig(values map[string]interface{}) WebSearchConfig {
 	cfg := WebSearchConfig{
-		Enabled:     boolConfigValue(values["web_search_enabled"]),
-		Provider:    strings.ToLower(strings.TrimSpace(stringConfigValue(values["web_search_provider"]))),
-		APIKey:      strings.TrimSpace(stringConfigValue(values["web_search_api_key"])),
-		BaseURL:     strings.TrimSpace(stringConfigValue(values["web_search_base_url"])),
-		SearchDepth: strings.ToLower(strings.TrimSpace(stringConfigValue(values["web_search_depth"]))),
-		MaxResults:  intConfigValue(values["web_search_max_results"], 5),
-		TimeoutSec:  intConfigValue(values["web_search_timeout_sec"], 12),
-		DailyLimit:  intConfigValue(values["web_search_daily_limit"], 100),
-		CacheTTLSec: intConfigValue(values["web_search_cache_ttl_sec"], 600),
-		UnitPrice:   floatConfigValue(values["web_search_unit_price"]),
+		Enabled:       boolConfigValue(values["web_search_enabled"]),
+		Provider:      strings.ToLower(strings.TrimSpace(stringConfigValue(values["web_search_provider"]))),
+		APIKey:        strings.TrimSpace(stringConfigValue(values["web_search_api_key"])),
+		BaseURL:       strings.TrimSpace(stringConfigValue(values["web_search_base_url"])),
+		RedFoxAPIKey:  strings.TrimSpace(stringConfigValue(values["web_search_redfox_api_key"])),
+		RedFoxBaseURL: strings.TrimSpace(stringConfigValue(values["web_search_redfox_base_url"])),
+		RedFoxEngine:  strings.ToLower(strings.TrimSpace(stringConfigValue(values["web_search_redfox_engine"]))),
+		SearchDepth:   strings.ToLower(strings.TrimSpace(stringConfigValue(values["web_search_depth"]))),
+		MaxResults:    intConfigValue(values["web_search_max_results"], 5),
+		TimeoutSec:    intConfigValue(values["web_search_timeout_sec"], 12),
+		DailyLimit:    intConfigValue(values["web_search_daily_limit"], 100),
+		CacheTTLSec:   intConfigValue(values["web_search_cache_ttl_sec"], 600),
+		UnitPrice:     floatConfigValue(values["web_search_unit_price"]),
 	}
 	if cfg.Provider == "" {
 		cfg.Provider = "tavily"
 	}
 	if cfg.SearchDepth != "advanced" {
 		cfg.SearchDepth = "basic"
+	}
+	if cfg.RedFoxEngine == "" {
+		cfg.RedFoxEngine = "kimi"
 	}
 	if cfg.MaxResults < 1 {
 		cfg.MaxResults = 1
@@ -113,6 +127,15 @@ func ValidateWebSearchConfig(cfg WebSearchConfig) error {
 				return errors.New("SearXNG 服务地址必须是有效的 HTTP/HTTPS 地址")
 			}
 		}
+	case "redfox":
+		if cfg.Enabled && cfg.RedFoxAPIKey == "" {
+			return errors.New("启用 RedFox 联网搜索前请填写 RedFox API Key")
+		}
+		if cfg.RedFoxBaseURL != "" {
+			if _, err := redFoxEndpoint(cfg.RedFoxBaseURL, "/story/api/dyData/searchUser"); err != nil {
+				return errors.New("RedFox 服务地址必须是有效的 HTTP/HTTPS 地址")
+			}
+		}
 	default:
 		return errors.New("联网搜索服务商参数错误")
 	}
@@ -144,6 +167,24 @@ func SearchWebWithOptions(ctx context.Context, cfg WebSearchConfig, input WebSea
 		results, err = searchBrave(ctx, client, cfg, input)
 	case "searxng":
 		results, err = searchSearXNG(ctx, client, cfg, input)
+	case "redfox":
+		results, err = searchRedFox(ctx, client, cfg, input)
+		results = cleanWebSearchResults(results, cfg.MaxResults, input)
+		// RedFox is a social-data provider, so unsupported or empty queries fall
+		// through to normal web search rather than being reported as an outage.
+		if (err != nil || len(results) == 0) && strings.TrimSpace(cfg.BaseURL) != "" {
+			fallbackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			fallbackClient := &http.Client{Timeout: 5 * time.Second}
+			fallbackResults, fallbackErr := searchSearXNG(fallbackCtx, fallbackClient, cfg, input)
+			cancel()
+			fallbackResults = cleanWebSearchResults(fallbackResults, cfg.MaxResults, input)
+			if fallbackErr == nil && len(fallbackResults) > 0 {
+				results, err = fallbackResults, nil
+			}
+		}
+		if (err != nil || len(results) == 0) && strings.TrimSpace(cfg.APIKey) != "" {
+			results, err = searchTavily(ctx, client, cfg, input)
+		}
 	case "hybrid":
 		// Self-hosted search is the free first choice, but it must never hold the
 		// whole Agent request hostage when public engines are slow or blocked.
@@ -163,9 +204,209 @@ func SearchWebWithOptions(ctx context.Context, cfg WebSearchConfig, input WebSea
 	}
 	results = cleanWebSearchResults(results, cfg.MaxResults, input)
 	if len(results) == 0 {
-		return nil, errors.New("搜索服务未返回有效结果")
+		return nil, ErrWebSearchNoResults
 	}
 	return results, nil
+}
+
+func searchRedFox(ctx context.Context, client *http.Client, cfg WebSearchConfig, input WebSearchRequest) ([]WebSearchResult, error) {
+	baseURL := cfg.RedFoxBaseURL
+	if baseURL == "" {
+		baseURL = defaultRedFoxBaseURL
+	}
+	if !regexp.MustCompile(`(?i)抖音|douyin`).MatchString(input.Query) {
+		return nil, fmt.Errorf("%w: RedFox 当前配置仅用于抖音数据搜索", ErrWebSearchNoResults)
+	}
+	path := "/story/api/dyData/searchArticle"
+	if regexp.MustCompile(`(?i)账号|用户|博主|达人|作者|粉丝|account|creator|user`).MatchString(input.Query) {
+		path = "/story/api/dyData/searchUser"
+	}
+	var payload map[string]interface{}
+	body := map[string]interface{}{"keyword": redFoxSearchKeyword(input.Query), "offset": 0, "sortType": "default"}
+	if err := redFoxPost(ctx, client, baseURL, cfg.RedFoxAPIKey, path, body, &payload); err != nil {
+		return nil, err
+	}
+	results := redFoxWebResults(payload)
+	if len(results) == 0 {
+		return nil, fmt.Errorf("%w: RedFox 抖音数据接口未返回匹配结果", ErrWebSearchNoResults)
+	}
+	return results, nil
+}
+
+func redFoxSearchKeyword(query string) string {
+	keyword := regexp.MustCompile(`(?i)https?://\S+|\btop\s*\d+\b|\d{4}[-/.年]\d{1,2}(?:[-/.月]\d{1,2}日?)?`).ReplaceAllString(query, " ")
+	keyword = regexp.MustCompile(`(?i)麻烦(?:你)?|请(?:你)?|能否|可以|帮我|给我|替我|为我|整理|列出|列一下|搜索|查找|查一下|看看|告诉我|今天|今日|当前|现在|抖音|douyin|账号|用户|博主|达人|作者|粉丝|视频|作品|热门|热搜|热点|排行|排行榜|榜单|有哪些|关于|的`).ReplaceAllString(keyword, " ")
+	keyword = strings.TrimSpace(regexp.MustCompile(`[，。！？、,:;；\s]+`).ReplaceAllString(keyword, " "))
+	if keyword == "" {
+		return "热门"
+	}
+	if runes := []rune(keyword); len(runes) > 40 {
+		keyword = string(runes[:40])
+	}
+	return keyword
+}
+
+func redFoxEndpoint(baseURL, path string) (*url.URL, error) {
+	endpoint, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil {
+		return nil, errors.New("invalid RedFox service URL")
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	endpoint.RawQuery = ""
+	endpoint.Fragment = ""
+	return endpoint, nil
+}
+
+func redFoxPost(ctx context.Context, client *http.Client, baseURL, apiKey, path string, bodyValue interface{}, target interface{}) error {
+	endpoint, err := redFoxEndpoint(baseURL, path)
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(bodyValue)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("REDFOX_API_KEY", apiKey)
+	var envelope map[string]json.RawMessage
+	if err := doSearchRequest(client, req, &envelope); err != nil {
+		return err
+	}
+	if raw := envelope["code"]; len(raw) > 0 {
+		var code int
+		if json.Unmarshal(raw, &code) != nil {
+			var text string
+			_ = json.Unmarshal(raw, &text)
+			code, _ = strconv.Atoi(text)
+		}
+		if code != 0 && code != 2000 {
+			message := redFoxRawString(envelope["msg"])
+			if message == "" {
+				message = redFoxRawString(envelope["message"])
+			}
+			if message == "" {
+				message = "未知错误"
+			}
+			return fmt.Errorf("RedFox API 返回错误 %d: %s", code, message)
+		}
+	}
+	raw := envelope["data"]
+	if len(raw) == 0 || string(raw) == "null" {
+		raw, _ = json.Marshal(envelope)
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		return fmt.Errorf("RedFox API 响应解析失败: %w", err)
+	}
+	return nil
+}
+
+func redFoxRawString(raw json.RawMessage) string {
+	var value string
+	_ = json.Unmarshal(raw, &value)
+	return strings.TrimSpace(value)
+}
+
+func redFoxMapValue(payload map[string]interface{}, keys ...string) interface{} {
+	for _, key := range keys {
+		if value, ok := payload[key]; ok {
+			return value
+		}
+	}
+	for _, container := range []string{"result", "data"} {
+		if nested, ok := payload[container].(map[string]interface{}); ok {
+			if value := redFoxMapValue(nested, keys...); value != nil {
+				return value
+			}
+		}
+	}
+	return nil
+}
+
+func redFoxScalar(value interface{}) string {
+	switch item := value.(type) {
+	case string:
+		return strings.TrimSpace(item)
+	case json.Number:
+		return item.String()
+	case float64:
+		return strconv.FormatFloat(item, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(item)
+	default:
+		return ""
+	}
+}
+
+func redFoxWebResults(payload map[string]interface{}) []WebSearchResult {
+	results := make([]WebSearchResult, 0)
+	seen := make(map[string]bool)
+	var visit func(interface{}, bool)
+	visit = func(value interface{}, resultCollection bool) {
+		switch item := value.(type) {
+		case []interface{}:
+			for _, child := range item {
+				visit(child, resultCollection)
+			}
+		case map[string]interface{}:
+			if resultCollection {
+				nickname := redFoxScalar(redFoxMapValue(item, "nickname", "accountName", "displayName"))
+				result := WebSearchResult{
+					Title:         firstNonEmptyWebSearchString(redFoxScalar(redFoxMapValue(item, "title", "name", "siteName", "noteTitle")), nickname),
+					URL:           redFoxScalar(redFoxMapValue(item, "url", "link", "href", "workUrl", "opusUrl", "articleUrl", "sourceUrl", "noteUrl")),
+					Snippet:       redFoxScalar(redFoxMapValue(item, "snippet", "summary", "content", "description", "text")),
+					PublishedDate: redFoxScalar(redFoxMapValue(item, "publishedDate", "published_date", "publishTime", "releaseTime", "crawlTime", "lastCreateTime", "date", "time")),
+					Provider:      "redfox",
+				}
+				if result.URL == "" && nickname != "" {
+					result.URL = "https://www.douyin.com/search/" + url.PathEscape(nickname) + "?type=user"
+					result.Snippet = strings.Join([]string{
+						"账号：" + nickname,
+						"简介：" + redFoxScalar(redFoxMapValue(item, "signature", "bio")),
+						"粉丝数：" + redFoxScalar(redFoxMapValue(item, "followerCount", "fansCount")),
+						"获赞数：" + redFoxScalar(redFoxMapValue(item, "totalFavorited", "totalLikes")),
+						"作品数：" + redFoxScalar(redFoxMapValue(item, "awemeCount", "videoCount")),
+					}, "；")
+				}
+				if score, ok := redFoxMapValue(item, "score", "relevance").(float64); ok {
+					result.Score = score
+				}
+				if result.URL != "" && !seen[result.URL] {
+					seen[result.URL] = true
+					results = append(results, result)
+				}
+			}
+			for key, child := range item {
+				switch key {
+				case "webPages", "web_pages", "sources", "references", "searchGuid", "search_guid", "list", "workList":
+					visit(child, true)
+				case "result", "data", "search_result", "searchResult":
+					visit(child, resultCollection)
+				}
+			}
+		case string:
+			candidate := strings.TrimSpace(item)
+			if resultCollection && (strings.HasPrefix(candidate, "https://") || strings.HasPrefix(candidate, "http://")) && !seen[candidate] {
+				seen[candidate] = true
+				results = append(results, WebSearchResult{Title: candidate, URL: candidate, Provider: "redfox"})
+			}
+		}
+	}
+	visit(payload, false)
+	return results
+}
+
+func firstNonEmptyWebSearchString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func searchTavily(ctx context.Context, client *http.Client, cfg WebSearchConfig, input WebSearchRequest) ([]WebSearchResult, error) {
@@ -203,7 +444,7 @@ func searchTavily(ctx context.Context, client *http.Client, cfg WebSearchConfig,
 		if item.Score > 0 && item.Score < 0.25 {
 			continue
 		}
-		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Content, PublishedDate: item.PublishedDate, Score: item.Score})
+		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Content, PublishedDate: item.PublishedDate, Score: item.Score, Provider: "tavily"})
 	}
 	return results, nil
 }
@@ -239,7 +480,7 @@ func searchBrave(ctx context.Context, client *http.Client, cfg WebSearchConfig, 
 	}
 	results := make([]WebSearchResult, 0, len(payload.Web.Results))
 	for _, item := range payload.Web.Results {
-		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Description, PublishedDate: item.Age})
+		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Description, PublishedDate: item.Age, Provider: "brave"})
 	}
 	return results, nil
 }
@@ -314,7 +555,7 @@ func searchSearXNG(ctx context.Context, client *http.Client, cfg WebSearchConfig
 	}
 	results := make([]WebSearchResult, 0, len(payload.Results))
 	for _, item := range payload.Results {
-		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Content, PublishedDate: item.PublishedDate, Score: item.Score})
+		results = append(results, WebSearchResult{Title: item.Title, URL: item.URL, Snippet: item.Content, PublishedDate: item.PublishedDate, Score: item.Score, Provider: "searxng"})
 	}
 	return results, nil
 }
@@ -360,7 +601,11 @@ func cleanWebSearchResults(items []WebSearchResult, limit int, input WebSearchRe
 			continue
 		}
 		host := strings.ToLower(parsed.Hostname())
-		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= 2 ||
+		hostLimit := 2
+		if item.Provider == "redfox" {
+			hostLimit = limit
+		}
+		if host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || seen[item.URL] || hostCounts[host] >= hostLimit ||
 			!searchResultMatchesDomains(item.URL, input.IncludeDomains) || unsafeWebSearchResult(host, item.Title, item.Snippet) ||
 			!relevantWebSearchResult(input, item) {
 			continue
@@ -487,6 +732,9 @@ func unsafeWebSearchResult(host, title, snippet string) bool {
 
 func relevantWebSearchResult(input WebSearchRequest, item WebSearchResult) bool {
 	if len(input.IncludeDomains) > 0 {
+		return true
+	}
+	if item.Provider == "redfox" {
 		return true
 	}
 	signals := searchRelevanceSignals(input.Query)

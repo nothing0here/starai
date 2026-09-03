@@ -71,3 +71,29 @@ func TestDouyinLinkAndMetadataParsing(t *testing.T) {
 		t.Fatalf("unexpected Douyin video URL: %q", got)
 	}
 }
+
+func TestSocialVideoPlatforms(t *testing.T) {
+	tests := map[string]string{
+		"www.tiktok.com":      "TikTok",
+		"fb.watch":            "Facebook",
+		"www.facebook.com":    "Facebook",
+		"instagram.com":       "Instagram",
+		"m.youtube.com":       "YouTube",
+		"youtu.be":            "YouTube",
+		"x.com":               "X",
+		"mobile.twitter.com":  "X",
+		"v.douyin.com":        "抖音",
+		"www.xiaohongshu.com": "小红书",
+		"xhslink.com":         "小红书",
+	}
+	for host, want := range tests {
+		if got := socialVideoPlatform(host); got != want {
+			t.Errorf("socialVideoPlatform(%q) = %q, want %q", host, got, want)
+		}
+	}
+	for _, host := range []string{"example.com", "youtube.com.example.org", "notx.com"} {
+		if got := socialVideoPlatform(host); got != "" {
+			t.Errorf("expected unsupported host %q, got %q", host, got)
+		}
+	}
+}

@@ -5,9 +5,61 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
+
+// AgentVideoLayout reads advertised capabilities, never treats a default as a
+// maximum. Unknown capabilities must be configured before automatic planning.
+func AgentVideoLayout(model *ModelFull, target int) (count, seconds int, err error) {
+	if model == nil || target < 1 || target > 600 {
+		return 0, 0, errors.New("请指定 1–600 秒的目标视频时长")
+	}
+	props, _ := model.InputSchema["properties"].(map[string]interface{})
+	prop, _ := props["duration"].(map[string]interface{})
+	values, _ := prop["enum"].([]interface{})
+	allowed := []int{}
+	for _, value := range values {
+		if n, ok := schemaDurationSeconds(value); ok && n >= 1 && n <= 600 && n == math.Trunc(n) {
+			allowed = append(allowed, int(n))
+		}
+	}
+	custom, _ := prop["x-allow-custom"].(bool)
+	if len(values) == 0 || custom {
+		maximum, maxOK := schemaDurationSeconds(prop["maximum"])
+		minimum, minOK := schemaDurationSeconds(prop["minimum"])
+		if !minOK || minimum < 1 {
+			minimum = 1
+		}
+		step, stepOK := schemaDurationSeconds(prop["multipleOf"])
+		if !stepOK || step <= 0 {
+			step = 1
+		}
+		if maxOK && maximum <= 600 {
+			for n := int(math.Ceil(minimum)); n <= int(maximum); n++ {
+				if math.Abs(float64(n)/step-math.Round(float64(n)/step)) < 1e-8 {
+					allowed = append(allowed, n)
+				}
+			}
+		}
+	}
+	if len(allowed) == 0 {
+		return 0, 0, errors.New("所选视频模型未配置明确的支持时长，请先完善模型时长参数，不能直接套用默认时长")
+	}
+	sort.Ints(allowed)
+	maximum := allowed[len(allowed)-1]
+	count = (target + maximum - 1) / maximum
+	if count > 75 {
+		return 0, 0, errors.New("当前模型需要超过 75 个分段，请缩短时长或选择支持更长片段的模型")
+	}
+	for _, seconds = range allowed {
+		if seconds*count >= target {
+			return count, seconds, nil
+		}
+	}
+	return 0, 0, errors.New("无法规划视频时长")
+}
 
 // ValidateVideoParams checks upload slots + input_schema enums/required fields.
 func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error {
@@ -17,36 +69,6 @@ func ValidateVideoParams(model *ModelFull, params map[string]interface{}) error 
 		return err
 	}
 	return validateSchemaParams(model.InputSchema, params)
-}
-
-// NormalizeAgentVideoParams keeps planner-proposed durations within the
-// selected model's schema. Agent prompts may contain a duration unsupported by
-// the model; in that case the model default (or first allowed value) is safer
-// than rejecting the whole generation request.
-func NormalizeAgentVideoParams(model *ModelFull, params map[string]interface{}) {
-	if model == nil || params == nil {
-		return
-	}
-	normalizeVideoSchemaParamTypes(model.InputSchema, params)
-	props, _ := model.InputSchema["properties"].(map[string]interface{})
-	durationProp, _ := props["duration"].(map[string]interface{})
-	enumValues, _ := durationProp["enum"].([]interface{})
-	current, exists := params["duration"]
-	if !exists || len(enumValues) == 0 || enumContains(enumValues, current) {
-		return
-	}
-	if allowCustom, _ := durationProp["x-allow-custom"].(bool); allowCustom && validateIntRange(durationProp, current) {
-		return
-	}
-	if fallback, ok := model.DefaultParams["duration"]; ok {
-		normalized := map[string]interface{}{"duration": fallback}
-		normalizeVideoSchemaParamTypes(model.InputSchema, normalized)
-		if enumContains(enumValues, normalized["duration"]) {
-			params["duration"] = normalized["duration"]
-			return
-		}
-	}
-	params["duration"] = enumValues[0]
 }
 
 // normalizeVideoSchemaParamTypes accepts semantically equivalent legacy

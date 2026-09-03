@@ -129,10 +129,11 @@ func processComposeTask(ctx context.Context, pool *pgxpool.Pool, p ComposeTaskPa
 	}
 	publicID := fmt.Sprintf("work_%d", time.Now().UnixNano())
 	meta, _ := json.Marshal(outputMap)
+	expires := configuredWorkExpiration(ctx, pool, 7)
 	pool.Exec(ctx, `
-		INSERT INTO works (public_id, user_id, task_id, model_id, type, prompt, thumbnail_url, metadata)
-		VALUES ($1,$2,$3,NULL,$4,$5,$6,$7)`,
-		publicID, p.UserID, taskID, outputKind, "无限画布媒体合成", publicURL, meta)
+		INSERT INTO works (public_id, user_id, task_id, model_id, type, prompt, thumbnail_url, metadata, expires_at)
+		VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8)`,
+		publicID, p.UserID, taskID, outputKind, "无限画布媒体合成", publicURL, meta, expires)
 	pool.Exec(ctx, `INSERT INTO task_events (task_id, event_type, payload) VALUES ($1,'completed',$2)`, taskID, outputJSON)
 	insertNotification(ctx, pool, p.UserID, "合成完成", fmt.Sprintf("您的媒体合成任务已完成，任务号：%s", p.TaskNo), "task")
 	return nil
@@ -297,9 +298,16 @@ func composeOutputDimensions(value string) (int, int) {
 }
 
 func probeMediaDimensions(ctx context.Context, path string) (int, int) {
+	ffprobePath := "ffprobe"
+	if ffmpegPath, err := ffmpegBinaryPath(); err == nil {
+		candidate := filepath.Join(filepath.Dir(ffmpegPath), ffprobeExecutableName())
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			ffprobePath = candidate
+		}
+	}
 	cmd := exec.CommandContext(
 		ctx,
-		"ffprobe",
+		ffprobePath,
 		"-v", "error",
 		"-select_streams", "v:0",
 		"-show_entries", "stream=width,height",

@@ -13,6 +13,23 @@ func TestEstimateCostSupportsCountForPerImage(t *testing.T) {
 	}
 }
 
+func TestEstimateCostUsesImageSizeTierPrice(t *testing.T) {
+	service := &ModelService{}
+	model := &ModelFull{ModelDTO: ModelDTO{PriceRule: map[string]interface{}{
+		"billing_type": "per_image",
+		"unit_price":   float64(0.1),
+		"unit_price_by_size": map[string]interface{}{
+			"1K": float64(0.1), "2K": float64(0.25), "4K": float64(0.6),
+		},
+	}}}
+	if got := service.EstimateCost(model, map[string]interface{}{"image_size": "2k", "count": float64(3)}, 0, 0); math.Abs(got-0.75) > 0.000000001 {
+		t.Fatalf("cost = %v, want 0.75", got)
+	}
+	if got := service.EstimateCost(model, map[string]interface{}{"quality": "standard"}, 0, 0); math.Abs(got-0.1) > 0.000000001 {
+		t.Fatalf("standard cost = %v, want 0.1", got)
+	}
+}
+
 func TestEstimateCostSupportsDurationAliases(t *testing.T) {
 	service := &ModelService{}
 	model := &ModelFull{ModelDTO: ModelDTO{PriceRule: map[string]interface{}{"billing_type": "per_second", "unit_price": float64(0.5)}}}

@@ -47,6 +47,29 @@ const (
 	TypeWorkflowTask = "workflow:run"
 )
 
+func configuredWorkExpiration(ctx context.Context, pool *pgxpool.Pool, fallbackDays int) *time.Time {
+	days := fallbackDays
+	var raw []byte
+	if err := pool.QueryRow(ctx, `SELECT value FROM system_configs WHERE key='work_retention_days'`).Scan(&raw); err == nil {
+		var value interface{}
+		if json.Unmarshal(raw, &value) == nil {
+			switch v := value.(type) {
+			case float64:
+				days = int(v)
+			case string:
+				if parsed, parseErr := strconv.Atoi(strings.TrimSpace(v)); parseErr == nil {
+					days = parsed
+				}
+			}
+		}
+	}
+	if days <= 0 {
+		return nil
+	}
+	expires := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+	return &expires
+}
+
 type ImageTaskPayload struct {
 	TaskNo    string                 `json:"task_no"`
 	UserID    int64                  `json:"user_id"`
@@ -404,13 +427,15 @@ routeLoop:
 			if strings.Contains(strings.ToLower(videoURL), "/content") {
 				contentURL = videoURL
 			}
-			if stored, err := mirrorUpstreamMedia(ctx, conn, videoURL, upstreamID, fmt.Sprintf("%s_%d", p.TaskNo, i+1), "video"); err != nil {
-				if shouldMirrorMediaURL(videoURL, conn) {
-					log.Printf("Task %s mirror video #%d failed: %v", p.TaskNo, i+1, err)
-					return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", err.Error())
-				}
-				log.Printf("Task %s skip mirror for public url: %s", p.TaskNo, truncateText(videoURL, 100))
-			} else if stored != "" {
+			stored, err := mirrorUpstreamMedia(ctx, conn, videoURL, upstreamID, fmt.Sprintf("%s_%d", p.TaskNo, i+1), "video")
+			if err == nil && stored == "" {
+				stored, err = persistGeneratedMedia(ctx, conn, videoURL, p.TaskNo, fmt.Sprintf("video_%d", i+1), "video", 500<<20)
+			}
+			if err != nil {
+				log.Printf("Task %s persist video #%d failed: %v", p.TaskNo, i+1, err)
+				return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成成功，但作品转存失败："+err.Error())
+			}
+			if stored != "" {
 				videoURL = stored
 			}
 			itemThumb := strings.TrimSpace(item.Thumbnail)
@@ -455,7 +480,8 @@ routeLoop:
 			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成完成但未返回可用音频地址")
 		}
 		if stored, err := persistGeneratedMedia(ctx, conn, audioURL, p.TaskNo, "audio", "audio", 250<<20); err != nil {
-			log.Printf("Task %s persist audio failed, keeping upstream URL: %v", p.TaskNo, err)
+			log.Printf("Task %s persist audio failed: %v", p.TaskNo, err)
+			return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成成功，但作品转存失败："+err.Error())
 		} else if stored != "" {
 			audioURL = stored
 		}
@@ -477,6 +503,7 @@ routeLoop:
 				stored, err := persistGeneratedMedia(ctx, conn, url, p.TaskNo, fmt.Sprintf("image_%d", idx+1), "image", 50<<20)
 				if err != nil {
 					log.Printf("Task %s persist image #%d failed: %v", p.TaskNo, idx+1, err)
+					return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", "生成成功，但作品转存失败："+err.Error())
 				}
 				if stored != "" {
 					url = stored
@@ -526,11 +553,7 @@ routeLoop:
 	}
 
 	publicID := fmt.Sprintf("work_%d", time.Now().UnixNano())
-	var expires *time.Time
-	if retentionDays > 0 {
-		t := time.Now().Add(time.Duration(retentionDays) * 24 * time.Hour)
-		expires = &t
-	}
+	expires := configuredWorkExpiration(ctx, pool, retentionDays)
 	pool.Exec(ctx, `
 		INSERT INTO works (public_id, user_id, task_id, model_id, type, prompt, thumbnail_url, metadata, expires_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -871,7 +894,11 @@ func workerRouteProviderCost(route workerModelRoute, input map[string]interface{
 		if count <= 0 {
 			count = 1
 		}
-		return float64(count) * value("unit_cost")
+		unitCost := value("unit_cost")
+		if typeName == "per_image" {
+			unitCost = workerImageTierValue(route.CostRule, input, "unit_cost_by_size", "unit_cost")
+		}
+		return float64(count) * unitCost
 	case "per_second":
 		seconds := floatAny(input["duration"])
 		if seconds <= 0 {

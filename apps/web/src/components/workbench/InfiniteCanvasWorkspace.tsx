@@ -1638,12 +1638,23 @@ function TextInputNode({ id, data, selected }: NodeProps<CanvasNode>) {
             ))}
             {videoURLs.map((url, index) => (
               <div key={`video-${url}-${index}`} className="group relative h-11 w-11 shrink-0 overflow-hidden rounded-lg border border-gray-100 dark:border-white/10">
-                <video src={url} muted preload="metadata" className="h-full w-full object-cover" />
+                <button
+                  type="button"
+                  title={t("common.preview")}
+                  aria-label={t("common.preview")}
+                  onClick={() => actions?.openResultPreview({ url, kind: "video", title: data.label || t("canvas.node.referenceVideo") })}
+                  className="nodrag relative h-full w-full cursor-zoom-in overflow-hidden bg-gray-950"
+                >
+                  <video src={url} muted preload="metadata" className="pointer-events-none h-full w-full object-cover" />
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/20 text-white opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    <Play size={15} fill="currentColor" />
+                  </span>
+                </button>
                 <button type="button" onClick={() => actions?.update(id, {
                   referenceVideoUrls: videoURLs.filter((_, itemIndex) => itemIndex !== index),
                   referenceVideoIds: (data.referenceVideoIds || []).filter((_, itemIndex) => itemIndex !== index),
                   ...(isOneClickViral ? { referenceVideoDuration: 0, viralTimingSourceDuration: 0 } : {}),
-                })} className="nodrag absolute right-0.5 top-0.5 rounded bg-black/65 p-0.5 text-white opacity-0 group-hover:opacity-100"><X size={9} /></button>
+                })} aria-label={t("common.remove")} className="nodrag absolute right-0.5 top-0.5 rounded bg-black/65 p-0.5 text-white opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"><X size={9} /></button>
               </div>
             ))}
             {audioURLs.map((url, index) => (
@@ -2406,11 +2417,11 @@ function CanvasEditor({
   }, []);
 
   useEffect(() => {
-    const query = window.matchMedia("(prefers-color-scheme: dark)");
-    const updateColorMode = () => setFlowColorMode(query.matches ? "dark" : "light");
+    const updateColorMode = () => setFlowColorMode(document.documentElement.classList.contains("dark") ? "dark" : "light");
     updateColorMode();
-    query.addEventListener("change", updateColorMode);
-    return () => query.removeEventListener("change", updateColorMode);
+    const observer = new MutationObserver(updateColorMode);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
   }, []);
 
   const refreshHistory = useCallback(() => {
