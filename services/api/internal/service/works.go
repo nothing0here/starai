@@ -327,9 +327,9 @@ func (s *WorksService) CreateFromAsset(ctx context.Context, userID int64, assetP
 	var created time.Time
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO works (public_id, user_id, type, title, prompt, asset_id, thumbnail_url, metadata, expires_at)
-		SELECT $1,$2,$3,$4,$4,id,$5,$6,$7 FROM assets WHERE public_id=$8 AND user_id=$2
+		SELECT $1,$2,$3,$4,$5,id,$6,$7,$8 FROM assets WHERE public_id=$9 AND user_id=$2
 		RETURNING created_at`,
-		publicID, userID, mediaType, title, mediaURL, meta, expires, assetPublicID).Scan(&created)
+		publicID, userID, mediaType, title, title, mediaURL, meta, expires, assetPublicID).Scan(&created)
 	if err != nil {
 		return nil, err
 	}

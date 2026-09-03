@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -137,6 +138,7 @@ func (h *Handler) ImportAssetURL(c *gin.Context) {
 	}
 	work, err := h.works.CreateFromAsset(c.Request.Context(), c.GetInt64("user_id"), publicID, name, "video", assetURL, retentionDays)
 	if err != nil {
+		log.Printf("URL import create work failed: user_id=%d asset_id=%s error=%v", c.GetInt64("user_id"), publicID, err)
 		_ = h.assets.Delete(c.Request.Context(), c.GetInt64("user_id"), publicID)
 		_ = h.storage.Delete(c.Request.Context(), objectName)
 		util.InternalError(c, "保存作品失败")
