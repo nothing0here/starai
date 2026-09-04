@@ -17,6 +17,42 @@ function localeHeaders(): Record<string, string> {
   return { "X-Locale": locale, "Accept-Language": locale };
 }
 
+function responseMessage(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const body = value as { message?: unknown; error?: unknown };
+  if (typeof body.message === "string") return body.message.trim();
+  if (body.error && typeof body.error === "object") {
+    const message = (body.error as { message?: unknown }).message;
+    if (typeof message === "string") return message.trim();
+  }
+  return "";
+}
+
+async function parseResponse<T>(res: Response, fallback: string): Promise<T> {
+  const raw = await res.text();
+  let json: unknown;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch {
+    const detail = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+    throw new Error(`${fallback}（HTTP ${res.status}）${detail ? `：${detail}` : ""}`);
+  }
+
+  if (!res.ok) {
+    throw new Error(responseMessage(json) || `${fallback}（HTTP ${res.status}）`);
+  }
+
+  if (json && typeof json === "object" && "code" in json) {
+    const envelope = json as { code?: unknown; message?: unknown; data?: unknown };
+    if (typeof envelope.code === "number" && envelope.code !== 0) {
+      throw new Error(responseMessage(json) || fallback);
+    }
+    return envelope.data as T;
+  }
+
+  return json as T;
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {}
@@ -29,9 +65,7 @@ export async function api<T>(
   };
 
   const res = await fetch(`${API_URL}${path}`, { ...options, headers, credentials: "include" });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || "请求失败");
-  return json.data as T;
+  return parseResponse<T>(res, "请求失败");
 }
 
 /**
@@ -64,9 +98,8 @@ export async function uploadFile(file: File): Promise<string> {
     credentials: "include",
     body: form,
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || "上传失败");
-  return json.data.url as string;
+  const data = await parseResponse<{ url: string }>(res, "上传失败");
+  return data.url;
 }
 
 export async function uploadAsset(
@@ -85,9 +118,7 @@ export async function uploadAsset(
     credentials: "include",
     body: form,
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.message || "上传失败");
-  return json.data as { public_id: string; url: string; name?: string; kind?: string; asset_type?: string; mime_type?: string; size_bytes?: number };
+  return parseResponse<{ public_id: string; url: string; name?: string; kind?: string; asset_type?: string; mime_type?: string; size_bytes?: number }>(res, "上传失败");
 }
 
 export async function importAssetFromURL(url: string, name?: string) {

@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,6 +46,15 @@ func (h *Handler) ImportContentURL(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
+	if contentID := toutiaoContentID(remoteURL); contentID != "" {
+		result, importErr := importToutiaoContent(ctx, remoteURL, contentID)
+		if importErr != nil {
+			util.BadRequest(c, importErr.Error())
+			return
+		}
+		util.OK(c, result)
+		return
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, remoteURL.String(), nil)
 	if err != nil {
 		util.BadRequest(c, "内容 URL 无效")
@@ -98,6 +108,102 @@ func (h *Handler) ImportContentURL(c *gin.Context) {
 		return
 	}
 	util.OK(c, result)
+}
+
+func toutiaoContentID(sourceURL *url.URL) string {
+	if sourceURL == nil || !hostMatches(sourceURL.Hostname(), "toutiao.com") {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(sourceURL.Path, "/"), "/")
+	if len(parts) < 2 || (parts[0] != "w" && parts[0] != "article") {
+		return ""
+	}
+	id := parts[1]
+	if len(id) < 10 || len(id) > 24 {
+		return ""
+	}
+	for _, char := range id {
+		if char < '0' || char > '9' {
+			return ""
+		}
+	}
+	return id
+}
+
+func importToutiaoContent(ctx context.Context, sourceURL *url.URL, contentID string) (importedContent, error) {
+	detailURL, _ := url.Parse("https://www.toutiao.com/api/pc/detail/")
+	query := detailURL.Query()
+	query.Set("aid", "24")
+	query.Set("app_name", "toutiao_web")
+	query.Set("item_id", contentID)
+	query.Set("group_id", contentID)
+	detailURL.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, detailURL.String(), nil)
+	if err != nil {
+		return importedContent{}, fmt.Errorf("今日头条链接无效")
+	}
+	req.Header.Set("User-Agent", importBrowserUserAgent)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	resp, err := safeImportHTTPClient().Do(req)
+	if err != nil {
+		return importedContent{}, fmt.Errorf("今日头条正文读取失败：%v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return importedContent{}, fmt.Errorf("今日头条正文接口返回 HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxImportedPageBytes+1))
+	if err != nil || int64(len(raw)) > maxImportedPageBytes {
+		return importedContent{}, fmt.Errorf("今日头条正文读取失败")
+	}
+	return extractToutiaoDetail(raw, sourceURL)
+}
+
+func extractToutiaoDetail(raw []byte, sourceURL *url.URL) (importedContent, error) {
+	var payload struct {
+		Message string `json:"message"`
+		Data    struct {
+			Content     string `json:"content"`
+			PGCInfoCard struct {
+				MediaInfo struct {
+					Name string `json:"name"`
+				} `json:"media_info"`
+			} `json:"pgc_info_card"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || strings.TrimSpace(payload.Data.Content) == "" {
+		return importedContent{}, fmt.Errorf("今日头条未返回可识别的正文")
+	}
+	content := ""
+	var richContent struct {
+		RichContent struct {
+			Text string `json:"text"`
+		} `json:"rich_content"`
+	}
+	if json.Unmarshal([]byte(payload.Data.Content), &richContent) == nil {
+		content = normalizeImportedText(richContent.RichContent.Text)
+	}
+	if content == "" {
+		parsed, err := extractImportedContent([]byte(payload.Data.Content), sourceURL, "text/html")
+		if err != nil {
+			return importedContent{}, fmt.Errorf("今日头条未返回可识别的正文")
+		}
+		content = parsed.Content
+	}
+	content, truncated := truncateImportedContent(content)
+	if utf8.RuneCountInString(content) < 20 {
+		return importedContent{}, fmt.Errorf("今日头条正文过短，无法用于内容拆解")
+	}
+	title := strings.TrimSpace(strings.SplitN(content, "\n", 2)[0])
+	return importedContent{
+		URL:       sourceURL.String(),
+		Platform:  "今日头条",
+		Title:     truncateImportedRunes(title, 100),
+		Author:    truncateImportedRunes(normalizeImportedText(payload.Data.PGCInfoCard.MediaInfo.Name), 100),
+		Content:   content,
+		Truncated: truncated,
+	}, nil
 }
 
 func extractImportedContent(page []byte, sourceURL *url.URL, contentType string) (importedContent, error) {
