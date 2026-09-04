@@ -170,7 +170,7 @@ func validateImportURL(raw string) (*url.URL, error) {
 	raw = strings.Trim(raw, "\"'<>，。；;）)]】")
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
-		return nil, fmt.Errorf("仅支持公开的 HTTP/HTTPS 视频直链")
+		return nil, fmt.Errorf("仅支持公开的 HTTP/HTTPS 链接")
 	}
 	return u, nil
 }
@@ -185,7 +185,7 @@ func safeImportHTTPClient() *http.Client {
 		}
 		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 		if err != nil || len(addresses) == 0 {
-			return nil, fmt.Errorf("无法解析视频地址")
+			return nil, fmt.Errorf("无法解析链接地址")
 		}
 		for _, address := range addresses {
 			if blockedImportIP(address.IP) {
@@ -201,7 +201,7 @@ func safeImportHTTPClient() *http.Client {
 		Jar:       jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
-				return fmt.Errorf("视频 URL 重定向次数过多")
+				return fmt.Errorf("URL 重定向次数过多")
 			}
 			_, err := validateImportURL(req.URL.String())
 			return err

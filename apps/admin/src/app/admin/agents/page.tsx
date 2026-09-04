@@ -942,6 +942,7 @@ export default function AgentsAdminPage() {
     const runtime = w.runtime_config || {};
     const type = typeFromRuntime(runtime, w.category);
     const preset = TYPE_PRESETS[type];
+    const systemWorkspace = runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas";
     const inputCaps = runtime.input_capabilities || {};
     const flow = runtime.flow_options || {};
     const display = w.display_config || {};
@@ -949,7 +950,7 @@ export default function AgentsAdminPage() {
     setForm({
       ...makeEmptyForm(),
       isEdit: true,
-      system_workspace: runtime.system_workspace === true || runtime.agent_mode === "infinite_canvas",
+      system_workspace: systemWorkspace,
       code: w.code,
       name: w.name,
       description: w.description || preset.description,
@@ -959,8 +960,8 @@ export default function AgentsAdminPage() {
       generation_type: type,
       analysis_model_code: runtime.analysis_model_code || "",
       generation_model_code: runtime.generation_model_code || "",
-      image_model_code: runtime.image_model_code || "image_fast_v1",
-      video_model_code: runtime.video_model_code || runtime.generation_model_code || "video_demo_v1",
+      image_model_code: runtime.image_model_code || (systemWorkspace ? "" : "image_fast_v1"),
+      video_model_code: runtime.video_model_code || runtime.generation_model_code || (systemWorkspace ? "" : "video_demo_v1"),
       speech_model_code: runtime.speech_model_code || "",
       music_model_code: runtime.music_model_code || "",
       narration_model_code: runtime.narration_model_code || "",
@@ -1165,7 +1166,16 @@ export default function AgentsAdminPage() {
         : bundle.price_rule,
       display_config: bundle.display_config,
       runtime_config: form.system_workspace
-        ? { ...bundle.runtime_config, agent_mode: "infinite_canvas", system_workspace: true }
+        ? {
+            ...bundle.runtime_config,
+            agent_mode: "infinite_canvas",
+            system_workspace: true,
+            ...(["one_click_viral_remake", "viral_remake", "video_remake"].includes(form.code) ? {
+              analysis_model_code: form.analysis_model_code,
+              image_model_code: form.image_model_code,
+              video_model_code: form.video_model_code,
+            } : {}),
+          }
         : form.generation_type === "comic_drama"
         ? bundle.runtime_config
         : form.generation_type === "novel_workshop"
@@ -1287,6 +1297,27 @@ export default function AgentsAdminPage() {
                   <p className="mt-2 text-xs leading-5 text-cyan-700">
                     可直接管理前台“导入画布”中的模板。内置类型会由前端创建标准节点；完整自定义节点画布仍可通过下方高级 JSON 的 document 配置。
                   </p>
+                  {["one_click_viral_remake", "viral_remake", "video_remake"].includes(form.code) && <div className="mt-4 grid gap-3 rounded-xl border border-cyan-100 bg-white p-3 md:grid-cols-3">
+                    <Field label="默认分析与改写模型">
+                      <select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}>
+                        <option value="">自动选择</option>
+                        {chatModels.filter((model) => !/multi.?collab|多模型协作/i.test(`${model.code} ${model.display_name}`)).map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="默认关键帧图片模型">
+                      <select className="admin-input" value={form.image_model_code} onChange={(e) => setForm({ ...form, image_model_code: e.target.value })}>
+                        <option value="">自动选择</option>
+                        {imageModels.map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="默认视频片段模型">
+                      <select className="admin-input" value={form.video_model_code} onChange={(e) => setForm({ ...form, video_model_code: e.target.value })}>
+                        <option value="">自动选择</option>
+                        {videoModels.map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
+                      </select>
+                    </Field>
+                    <p className="text-[11px] leading-5 text-cyan-700 md:col-span-3">这里设置新建画布的默认模型；前台仍可在每次任务中选择其他已启用模型。未声明视频理解能力的聊天模型可以选择，但上游不接受原始视频时分析会失败。</p>
+                  </div>}
                   <div className="mt-4 space-y-3">
                     {form.canvas_templates.map((template, index) => (
                       <div key={`${template.id}-${index}`} className="grid gap-2 rounded-xl border border-cyan-100 bg-white p-3 md:grid-cols-[150px_1fr_170px_auto]">
@@ -1628,7 +1659,7 @@ export default function AgentsAdminPage() {
                   <p className="mt-2 text-sm text-gray-500">{w.description || preset.description}</p>
                   <p className="mt-2 text-xs text-gray-400">
                     {isSystemWorkspace
-                      ? "节点内可选择后台已启用的图片、视频模型；画布历史独立保存。"
+                      ? "节点内可选择后台已启用的分析、图片、视频模型；画布历史独立保存。"
                       : `分析模型：${runtime.analysis_model_code || "-"} · 生成模型：${runtime.generation_model_code || "-"} · 类型：${preset.label}`}
                   </p>
                 </div>

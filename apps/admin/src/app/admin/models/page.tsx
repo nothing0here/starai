@@ -763,6 +763,7 @@ export default function ModelsPage() {
       rr,
       web_search: !!caps.web_search,
       deep_think: !!caps.deep_think,
+      video_analysis: !!caps.video_analysis,
     };
   };
 
@@ -5071,6 +5072,18 @@ export default function ModelsPage() {
                     />
                     深度思考
                   </label>
+                  {form.category === "chat" && <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={getCaps(form.runtime_rule).video_analysis}
+                      onChange={(e) => {
+                        const { rr } = getCaps(form.runtime_rule);
+                        const next = { ...rr, capabilities: { ...(rr?.capabilities ?? {}), video_analysis: e.target.checked } };
+                        setForm((prev) => ({ ...prev, runtime_rule: JSON.stringify(next, null, 2) }));
+                      }}
+                    />
+                    视频理解（可接收原始视频）
+                  </label>}
                   {getCaps(form.runtime_rule).deep_think && (
                     <div className="w-full rounded-xl border border-amber-200 bg-amber-50/60 p-3">
                       <div className="text-xs text-gray-600 mb-2">思考参数映射（保存到 runtime_rule.reasoning）</div>
