@@ -45,6 +45,27 @@ func TestStandardAPIDocContentUsesNativeMediaTaskResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAIImagesAPIDocDeclaresEditUploadAndStandardQuality(t *testing.T) {
+	doc := &APIDocDTO{
+		Slug: "gpt-image", ModelCode: "gpt-image", RequestMode: "images", Endpoint: "/v1/images/generations",
+		RuntimeRule: map[string]interface{}{"upstream": map[string]interface{}{"adapter": "openai_images"}},
+	}
+	content := standardAPIDocContent(doc, nil)
+	example := content["request_example"].(map[string]interface{})
+	if example["quality"] != "auto" {
+		t.Fatalf("OpenAI Images example must use a standard quality: %#v", example)
+	}
+	foundImage := false
+	for _, parameter := range content["parameters"].([]map[string]interface{}) {
+		if parameter["name"] == "image" && parameter["type"] == "file|file[]" {
+			foundImage = true
+		}
+	}
+	if !foundImage {
+		t.Fatalf("OpenAI Images docs must declare the multipart edit image element: %#v", content["parameters"])
+	}
+}
+
 func TestStandardAPIDocResponsesUseNativeErrorShape(t *testing.T) {
 	responses := standardAPIDocResponses(map[string]interface{}{
 		"responses": map[string]interface{}{

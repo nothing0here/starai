@@ -31,6 +31,10 @@ type RuntimeConfig = {
   speech_model_code?: string;
   music_model_code?: string;
   narration_model_code?: string;
+  audio_model_code?: string;
+  default_segment_count?: number;
+  default_segment_duration?: number;
+  default_story_review_required?: boolean;
   audio_strategy?: "video_native" | "tts_only" | "hybrid";
   style_reference_mode?: string;
   duration_mode?: string;
@@ -101,6 +105,9 @@ type FormState = {
   speech_model_code: string;
   music_model_code: string;
   narration_model_code: string;
+  default_segment_count: number;
+  default_segment_duration: number;
+  default_story_review_required: boolean;
   audio_strategy: "video_native" | "tts_only" | "hybrid";
   dialogue_model_codes: string;
   style_reference_mode: string;
@@ -322,6 +329,7 @@ const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "text-image", name: "文字生图片", description: "文本提示词连接图片生成节点", template_id: "text-image" },
   { id: "image-image", name: "图片生图片", description: "参考图片连接图片生成节点", template_id: "image-image" },
   { id: "text-image-mix", name: "文案与配图", description: "文字与参考图片共同生成新图片", template_id: "text-image-mix" },
+  { id: "content-image-post", name: "内容创作", description: "文字内容与图片混合创作，适配公众号、小红书和今日头条", template_id: "content-image-post" },
   { id: "multi-image", name: "多图对比", description: "多个参考素材连接双图片生成节点", template_id: "multi-image" },
   { id: "text-video", name: "文字生视频", description: "文本提示词连接视频生成节点", template_id: "text-video" },
   { id: "image-video", name: "图片生视频", description: "首帧或参考图片连接视频生成节点", template_id: "image-video" },
@@ -330,7 +338,7 @@ const DEFAULT_CANVAS_TEMPLATES: CanvasTemplateAdmin[] = [
   { id: "product-showcase-video", name: "商品展示视频", description: "商品图先生成关键视觉，再延展为展示视频", template_id: "product-showcase-video" },
   { id: "brand-visual-kit", name: "品牌视觉套件", description: "品牌需求并行生成标志创意和视觉海报", template_id: "brand-visual-kit" },
   { id: "photo-restoration", name: "老照片修复", description: "参考照片经过修复、上色与高清增强生成新图", template_id: "photo-restoration" },
-  { id: "story-short-video", name: "故事短视频", description: "故事拆分为多关键帧、多视频片段并合成为完整成片", template_id: "story-short-video" },
+  { id: "story-short-video", name: "视频创作", description: "创作需求生成视频脚本、分镜、关键帧、视频片段与完整成片", template_id: "story-short-video" },
   { id: "viral-remake", name: "爆款复刻", description: "多模态拆解爆款参考，生成多关键帧、多片段并合成为原创短视频", template_id: "viral-remake" },
   { id: "one-click-viral-remake", name: "一键爆款复刻", description: "导入 TikTok 视频和商品素材，一键拆解并生成原创带货短视频", template_id: "one-click-viral-remake" },
 ];
@@ -772,6 +780,9 @@ function makeEmptyForm(): FormState {
     speech_model_code: "",
     music_model_code: "",
     narration_model_code: "",
+    default_segment_count: 4,
+    default_segment_duration: 8,
+    default_story_review_required: true,
     audio_strategy: "video_native",
     dialogue_model_codes: "chat_demo_v1",
     style_reference_mode: "image_reference",
@@ -964,7 +975,10 @@ export default function AgentsAdminPage() {
       video_model_code: runtime.video_model_code || runtime.generation_model_code || (systemWorkspace ? "" : "video_demo_v1"),
       speech_model_code: runtime.speech_model_code || "",
       music_model_code: runtime.music_model_code || "",
-      narration_model_code: runtime.narration_model_code || "",
+      narration_model_code: runtime.audio_model_code || runtime.narration_model_code || "",
+      default_segment_count: Number(runtime.default_segment_count || 4),
+      default_segment_duration: Number(runtime.default_segment_duration || 8),
+      default_story_review_required: runtime.default_story_review_required !== false,
       audio_strategy: runtime.audio_strategy === "video_native" || runtime.audio_strategy === "tts_only" || runtime.audio_strategy === "hybrid"
         ? runtime.audio_strategy
         : runtime.narration_model_code ? "hybrid" : "video_native",
@@ -1143,7 +1157,9 @@ export default function AgentsAdminPage() {
       category: form.generation_type === "creative_agent" ? "chat" : form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "workflow" : form.generation_type,
       sort_order: Number(form.sort_order) || 0,
       is_enabled: form.is_enabled,
-       agent_mode: form.system_workspace ? "infinite_canvas" : form.generation_type === "creative_agent" ? "creative_chat" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : form.generation_type === "virtual_try_on" ? "virtual_try_on" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
+      agent_mode: form.system_workspace
+        ? form.code === "content_image_post" ? "simple_pipeline" : "infinite_canvas"
+        : form.generation_type === "creative_agent" ? "creative_chat" : form.generation_type === "comic_drama" ? "comic_drama" : form.generation_type === "novel_workshop" ? "novel_workshop" : form.generation_type === "photo_studio" ? "photo_studio" : form.generation_type === "virtual_try_on" ? "virtual_try_on" : isVideoUtilityType(form.generation_type) ? form.generation_type : "simple_pipeline",
       analysis_model_code: form.analysis_model_code,
       generation_model_code: form.generation_type === "comic_drama" ? form.video_model_code : form.generation_type === "creative_agent" ? form.image_model_code : form.generation_model_code,
       generation_type: form.generation_type === "comic_drama" || isVideoUtilityType(form.generation_type) ? "video" : form.generation_type === "photo_studio" || form.generation_type === "virtual_try_on" ? "image" : form.generation_type,
@@ -1168,12 +1184,23 @@ export default function AgentsAdminPage() {
       runtime_config: form.system_workspace
         ? {
             ...bundle.runtime_config,
-            agent_mode: "infinite_canvas",
+            agent_mode: form.code === "content_image_post" ? "simple_pipeline" : "infinite_canvas",
             system_workspace: true,
-            ...(["one_click_viral_remake", "viral_remake", "video_remake"].includes(form.code) ? {
+            ...(["one_click_viral_remake", "viral_remake", "video_remake", "video_creation"].includes(form.code) ? {
               analysis_model_code: form.analysis_model_code,
               image_model_code: form.image_model_code,
               video_model_code: form.video_model_code,
+            } : {}),
+            ...(form.code === "content_image_post" ? {
+              analysis_model_code: form.analysis_model_code,
+              generation_model_code: form.generation_model_code,
+              default_count: Number(form.default_count) || 4,
+            } : {}),
+            ...(form.code === "video_creation" ? {
+              audio_model_code: form.narration_model_code,
+              default_segment_count: form.default_segment_count,
+              default_segment_duration: form.default_segment_duration,
+              default_story_review_required: form.default_story_review_required,
             } : {}),
           }
         : form.generation_type === "comic_drama"
@@ -1228,8 +1255,8 @@ export default function AgentsAdminPage() {
         <form onSubmit={submit} className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
             <div>
-              <h2 className="font-semibold text-gray-950">{form.isEdit ? "编辑智能体" : "新增智能体"}</h2>
-              <p className="mt-0.5 text-xs text-gray-400">常规配置只需选择类型和勾选场景，JSON 预设用于高级备用。</p>
+              <h2 className="font-semibold text-gray-950">{form.system_workspace ? "管理工作流" : form.isEdit ? "编辑智能体" : "新增智能体"}</h2>
+              <p className="mt-0.5 text-xs text-gray-400">{form.system_workspace ? "管理工作流展示、默认模型和画布模板。" : "常规配置只需选择类型和勾选场景，JSON 预设用于高级备用。"}</p>
             </div>
             <button type="button" onClick={() => setShowForm(false)} className="h-9 rounded-xl px-3 text-sm text-gray-400 hover:text-gray-700">取消</button>
           </div>
@@ -1267,7 +1294,7 @@ export default function AgentsAdminPage() {
                 <div className="md:col-span-2 flex items-center gap-2 text-sm font-semibold text-gray-900"><Bot size={16} />基础信息</div>
                 <Field label="编码"><input className="admin-input" value={form.code} disabled={form.isEdit} onChange={(e) => setForm({ ...form, code: e.target.value })} required /></Field>
                 <Field label="名称"><input className="admin-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required /></Field>
-                <Field label="智能体图标" wide>
+                <Field label={form.system_workspace ? "工作流图标" : "智能体图标"} wide>
                   <div className="flex flex-col gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3 sm:flex-row sm:items-center">
                     <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gray-900 text-2xl text-white shadow-sm">
                       <AgentIconValue value={form.icon} fallback={activePreset.icon} alt={form.name || activePreset.label} />
@@ -1286,7 +1313,7 @@ export default function AgentsAdminPage() {
                     </div>
                   </div>
                 </Field>
-                <Field label="状态"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 px-3 text-sm"><input type="checkbox" checked={form.is_enabled} onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />启用智能体</label></Field>
+                <Field label="状态"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 px-3 text-sm"><input type="checkbox" checked={form.is_enabled} onChange={(e) => setForm({ ...form, is_enabled: e.target.checked })} />启用{form.system_workspace ? "工作流" : "智能体"}</label></Field>
                 <Field label="描述" wide><input className="admin-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
                 <Field label="排序"><input type="number" className="admin-input" value={form.sort_order} onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) || 0 })} /></Field>
               </section>
@@ -1297,26 +1324,46 @@ export default function AgentsAdminPage() {
                   <p className="mt-2 text-xs leading-5 text-cyan-700">
                     可直接管理前台“导入画布”中的模板。内置类型会由前端创建标准节点；完整自定义节点画布仍可通过下方高级 JSON 的 document 配置。
                   </p>
-                  {["one_click_viral_remake", "viral_remake", "video_remake"].includes(form.code) && <div className="mt-4 grid gap-3 rounded-xl border border-cyan-100 bg-white p-3 md:grid-cols-3">
-                    <Field label="默认分析与改写模型">
+                  {["content_image_post", "one_click_viral_remake", "viral_remake", "video_remake", "video_creation"].includes(form.code) && <div className="mt-4 grid gap-3 rounded-xl border border-cyan-100 bg-white p-3 md:grid-cols-4">
+                    <Field label={form.code === "content_image_post" ? "默认内容分析模型" : "默认分析与改写模型"}>
                       <select className="admin-input" value={form.analysis_model_code} onChange={(e) => setForm({ ...form, analysis_model_code: e.target.value })}>
                         <option value="">自动选择</option>
                         {chatModels.filter((model) => !/multi.?collab|多模型协作/i.test(`${model.code} ${model.display_name}`)).map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
                       </select>
                     </Field>
-                    <Field label="默认关键帧图片模型">
-                      <select className="admin-input" value={form.image_model_code} onChange={(e) => setForm({ ...form, image_model_code: e.target.value })}>
+                    <Field label={form.code === "content_image_post" ? "默认配图模型" : "默认关键帧图片模型"}>
+                      <select className="admin-input" value={form.code === "content_image_post" ? form.generation_model_code : form.image_model_code} onChange={(e) => setForm(form.code === "content_image_post" ? { ...form, generation_model_code: e.target.value } : { ...form, image_model_code: e.target.value })}>
                         <option value="">自动选择</option>
                         {imageModels.map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
                       </select>
                     </Field>
-                    <Field label="默认视频片段模型">
+                    {form.code !== "content_image_post" && <Field label="默认视频片段模型">
                       <select className="admin-input" value={form.video_model_code} onChange={(e) => setForm({ ...form, video_model_code: e.target.value })}>
                         <option value="">自动选择</option>
                         {videoModels.map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
                       </select>
-                    </Field>
-                    <p className="text-[11px] leading-5 text-cyan-700 md:col-span-3">这里设置新建画布的默认模型；前台仍可在每次任务中选择其他已启用模型。未声明视频理解能力的聊天模型可以选择，但上游不接受原始视频时分析会失败。</p>
+                    </Field>}
+                    {form.code === "content_image_post" && <Field label="默认配图数量">
+                      <select className="admin-input" value={form.default_count} onChange={(e) => setForm({ ...form, default_count: Number(e.target.value) })}>
+                        {[2, 3, 4, 5, 6].map((count) => <option key={count} value={count}>{count} 张配图</option>)}
+                      </select>
+                    </Field>}
+                    {form.code === "video_creation" && <Field label="默认配音模型">
+                      <select className="admin-input" value={form.narration_model_code} onChange={(e) => setForm({ ...form, narration_model_code: e.target.value })}>
+                        <option value="">自动选择</option>
+                        {audioModels.map((model) => <option key={model.code} value={model.code}>{model.display_name} / {model.code}</option>)}
+                      </select>
+                    </Field>}
+                    {form.code === "video_creation" && <>
+                      <Field label="默认视频片段数">
+                        <select className="admin-input" value={form.default_segment_count} onChange={(e) => setForm({ ...form, default_segment_count: Number(e.target.value) })}>
+                          {[1, 2, 3, 4, 6, 8].map((count) => <option key={count} value={count}>{count} 个片段</option>)}
+                        </select>
+                      </Field>
+                      <Field label="默认单段时长（秒）"><input type="number" min={1} max={600} step={0.5} className="admin-input" value={form.default_segment_duration} onChange={(e) => setForm({ ...form, default_segment_duration: Math.max(1, Number(e.target.value) || 8) })} /></Field>
+                      <Field label="默认确认方式"><label className="flex h-10 items-center gap-2 rounded-xl border border-gray-100 px-3 text-sm"><input type="checkbox" checked={form.default_story_review_required} onChange={(e) => setForm({ ...form, default_story_review_required: e.target.checked })} />生成媒体前确认分镜</label></Field>
+                    </>}
+                    <p className="text-[11px] leading-5 text-cyan-700 md:col-span-4">这里设置新建画布的默认模型；前台仍可在每次任务中选择其他已启用模型。未声明所需能力的模型仍可选择，但上游不支持对应输入时生成会失败。</p>
                   </div>}
                   <div className="mt-4 space-y-3">
                     {form.canvas_templates.map((template, index) => (
@@ -1592,18 +1639,18 @@ export default function AgentsAdminPage() {
               <section className="rounded-2xl border border-gray-100 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="flex items-center gap-2 text-sm font-semibold text-gray-900"><Code2 size={16} />智能体高级 JSON 设置</div>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-gray-900"><Code2 size={16} />{form.system_workspace ? "工作流" : "智能体"}高级 JSON 设置</div>
                     <p className="mt-1 text-xs leading-5 text-gray-400">
-                      当前智能体的完整预设配置，包含 AI 分析方案、前台展示、输入参数和提交到图片/视频生成模型的运行配置。默认由系统按类型和场景生成，管理员可微调。
+                      当前{form.system_workspace ? "工作流" : "智能体"}的完整预设配置，包含 AI 分析方案、前台展示、输入参数和运行配置。默认由系统生成，管理员可按需微调。
                     </p>
                   </div>
                   <button type="button" onClick={openJson} className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-gray-100 px-3 text-sm text-gray-600 hover:bg-gray-50">
-                    <Code2 size={15} />查看/编辑当前智能体 JSON
+                    <Code2 size={15} />查看/编辑当前{form.system_workspace ? "工作流" : "智能体"} JSON
                   </button>
                 </div>
                 {form.preset_override && (
                   <div className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                    已应用自定义 JSON。保存当前智能体后，该高级配置会随本智能体生效。
+                    已应用自定义 JSON。保存当前{form.system_workspace ? "工作流" : "智能体"}后，该高级配置会随之生效。
                   </div>
                 )}
               </section>
@@ -1616,17 +1663,24 @@ export default function AgentsAdminPage() {
                   <div><div className="text-sm text-white/50">前台预览</div><div className="font-semibold">{form.name || activePreset.label}</div></div>
                 </div>
                 <p className="mt-4 text-sm leading-6 text-white/70">{form.description || activePreset.description}</p>
-                <div className="mt-4 flex flex-wrap gap-2">{activePreset.featureTags.map((tag) => <span key={tag} className="rounded-full bg-white/10 px-2 py-1 text-[11px] text-white/80">{tag}</span>)}</div>
+                <div className="mt-4 flex flex-wrap gap-2">{(form.system_workspace ? form.canvas_templates.map((item) => item.name).filter(Boolean).slice(0, 4) : activePreset.featureTags).map((tag) => <span key={tag} className="rounded-full bg-white/10 px-2 py-1 text-[11px] text-white/80">{tag}</span>)}</div>
               </div>
               <div className="rounded-2xl border border-gray-100 bg-white p-5">
                 <div className="mb-3 text-sm font-semibold text-gray-900">配置摘要</div>
-                <Summary icon={form.generation_type === "video" ? <Video size={15} /> : <ImageIcon size={15} />} label="生成类型" value={activePreset.label} />
-                <Summary icon={<Sparkles size={15} />} label="场景" value={normalizeScenes(form.creative_scenes, form.generation_type).map((code) => sceneDefs(form.generation_type).find((x) => x.code === code)?.label || code).join(" / ")} />
-                <Summary icon={<Check size={15} />} label="方案数量" value={`${form.candidate_count} 条`} />
-                <Summary icon={<Bot size={15} />} label="模式" value={[form.enable_step_confirm && "逐步确认", form.enable_autopilot && "智能托管"].filter(Boolean).join(" / ") || "仅手动"} />
+                {form.system_workspace ? <>
+                  <Summary icon={<Layers size={15} />} label="类型" value="无限画布工作流" />
+                  <Summary icon={<Sparkles size={15} />} label="模板" value={`${form.canvas_templates.length} 个`} />
+                  <Summary icon={<Bot size={15} />} label="分析模型" value={form.analysis_model_code || "自动选择"} />
+                  <Summary icon={<ImageIcon size={15} />} label="配图模型" value={(form.code === "content_image_post" ? form.generation_model_code : form.image_model_code) || "自动选择"} />
+                </> : <>
+                  <Summary icon={form.generation_type === "video" ? <Video size={15} /> : <ImageIcon size={15} />} label="生成类型" value={activePreset.label} />
+                  <Summary icon={<Sparkles size={15} />} label="场景" value={normalizeScenes(form.creative_scenes, form.generation_type).map((code) => sceneDefs(form.generation_type).find((x) => x.code === code)?.label || code).join(" / ")} />
+                  <Summary icon={<Check size={15} />} label="方案数量" value={`${form.candidate_count} 条`} />
+                  <Summary icon={<Bot size={15} />} label="模式" value={[form.enable_step_confirm && "逐步确认", form.enable_autopilot && "智能托管"].filter(Boolean).join(" / ") || "仅手动"} />
+                </>}
               </div>
               {err && <div className="rounded-2xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">{err}</div>}
-              <button type="submit" className="h-11 w-full rounded-xl bg-primary font-semibold text-dark shadow-sm">{form.isEdit ? "保存修改" : "创建智能体"}</button>
+              <button type="submit" className="h-11 w-full rounded-xl bg-primary font-semibold text-dark shadow-sm">{form.system_workspace ? "保存工作流" : form.isEdit ? "保存修改" : "创建智能体"}</button>
             </aside>
           </div>
         </form>
@@ -1659,7 +1713,9 @@ export default function AgentsAdminPage() {
                   <p className="mt-2 text-sm text-gray-500">{w.description || preset.description}</p>
                   <p className="mt-2 text-xs text-gray-400">
                     {isSystemWorkspace
-                      ? "节点内可选择后台已启用的分析、图片、视频模型；画布历史独立保存。"
+                      ? w.code === "content_image_post"
+                        ? "可管理默认内容分析、配图模型、配图数量和画布模板；Agent 调用方式保持不变。"
+                        : "节点内可选择后台已启用的分析、图片、视频模型；画布历史独立保存。"
                       : `分析模型：${runtime.analysis_model_code || "-"} · 生成模型：${runtime.generation_model_code || "-"} · 类型：${preset.label}`}
                   </p>
                 </div>
@@ -1682,7 +1738,7 @@ export default function AgentsAdminPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setJsonOpen(false)}>
           <div className="w-full max-w-4xl overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4">
-              <div><div className="font-semibold text-gray-950">当前智能体高级 JSON</div><div className="mt-0.5 text-xs text-gray-400">只作用于正在新增/编辑的这个智能体。应用后，再点击保存智能体才会写入生效。</div></div>
+              <div><div className="font-semibold text-gray-950">当前{form.system_workspace ? "工作流" : "智能体"}高级 JSON</div><div className="mt-0.5 text-xs text-gray-400">只作用于正在编辑的这个{form.system_workspace ? "工作流" : "智能体"}。应用后，再点击保存才会写入生效。</div></div>
               <button type="button" onClick={() => setJsonOpen(false)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-gray-50 text-gray-500"><X size={16} /></button>
             </div>
             <div className="p-5">

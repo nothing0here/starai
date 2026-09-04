@@ -163,6 +163,27 @@ func TestTestModelConnectionPreservesCustomMediaEndpoint(t *testing.T) {
 	}
 }
 
+func TestTestImageConnectionUsesNonGeneratingValidationProbe(t *testing.T) {
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"prompt is required"}}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "token", 5, 5)
+	result := client.TestModelConnection(context.Background(), "/v1/images/generations", "images", "gpt-image-2-2k", nil)
+	if !result.OK || body["model"] != "gpt-image-2-2k" || body["prompt"] != "" || body["n"] != float64(0) {
+		t.Fatalf("body=%#v result=%#v", body, result)
+	}
+	if !strings.Contains(result.Message, "未提交生图") {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
 func TestJoinEndpointDoesNotDuplicateProviderPathPrefix(t *testing.T) {
 	for _, test := range []struct{ baseURL, endpoint, want string }{
 		{"https://tokenhub.tencentmaas.com/v1", "/v1/images/generations", "https://tokenhub.tencentmaas.com/v1/images/generations"},

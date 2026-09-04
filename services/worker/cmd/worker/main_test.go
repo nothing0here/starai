@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,6 +85,97 @@ func TestApplyOpenAIImageOptionsKeepsThirdPartyParameters(t *testing.T) {
 	}
 	if _, leaked := out["wait"]; leaked {
 		t.Fatalf("platform control leaked upstream: %#v", out)
+	}
+}
+
+func TestBuildOpenAIImagesPayloadUsesStrictCompatibleFields(t *testing.T) {
+	payload := buildOpenAIImagesPayload("gpt-image-1", "fallback", "draw a cat", 2, map[string]interface{}{
+		"size": "1344x768", "quality": "1K", "aspect_ratio": "16:9", "image_size": "1K",
+		"negative_prompt": "blur", "watermark": true, "reference_images": []interface{}{"https://example.com/ref.png"},
+		"background": "transparent", "output_format": "png",
+	})
+	if payload["model"] != "gpt-image-1" || payload["prompt"] != "draw a cat" || payload["n"] != 2 {
+		t.Fatalf("required OpenAI Images fields are wrong: %#v", payload)
+	}
+	if payload["quality"] != "auto" || payload["size"] != "1536x1024" {
+		t.Fatalf("quality/size were not normalized: %#v", payload)
+	}
+	if payload["background"] != "transparent" || payload["output_format"] != "png" {
+		t.Fatalf("supported OpenAI Images options were lost: %#v", payload)
+	}
+	for _, key := range []string{"aspect_ratio", "image_size", "negative_prompt", "watermark", "reference_images", "image"} {
+		if _, leaked := payload[key]; leaked {
+			t.Fatalf("non-standard field %q leaked upstream: %#v", key, payload)
+		}
+	}
+}
+
+func TestOpenAIImagesQualityCompatibility(t *testing.T) {
+	for _, quality := range []string{"auto", "low", "medium", "high"} {
+		if got := normalizeOpenAIImageQuality(quality); got != quality {
+			t.Fatalf("quality %q normalized to %q", quality, got)
+		}
+	}
+	if got := normalizeOpenAIImageQuality("2K"); got != "auto" {
+		t.Fatalf("invalid quality normalized to %q, want auto", got)
+	}
+	if !isOpenAIImagesAdapter(map[string]interface{}{"upstream": map[string]interface{}{"adapter": "openai_images"}}) {
+		t.Fatal("OpenAI Images adapter was not detected")
+	}
+}
+
+func TestOpenAIImagesRequestTimeoutAllowsLargeSynchronousResponse(t *testing.T) {
+	if got := openAIImagesRequestTimeout(120 * time.Second); got != 10*time.Minute {
+		t.Fatalf("timeout = %s, want 10m", got)
+	}
+	if got := openAIImagesRequestTimeout(15 * time.Minute); got != 15*time.Minute {
+		t.Fatalf("configured timeout = %s, want 15m", got)
+	}
+}
+
+func TestResolveWorkerAPIKeyReference(t *testing.T) {
+	t.Setenv("STARAI_TEST_ROUTE_KEY", "resolved-secret")
+	if got := resolveWorkerAPIKeyReference("${STARAI_TEST_ROUTE_KEY}"); got != "resolved-secret" {
+		t.Fatalf("resolved key = %q", got)
+	}
+	if got := resolveWorkerAPIKeyReference("literal-secret"); got != "literal-secret" {
+		t.Fatalf("literal key = %q", got)
+	}
+}
+
+func TestOpenAIImagesReferenceUploadUsesEditsMultipart(t *testing.T) {
+	var requestErr error
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/edits" {
+			requestErr = fmt.Errorf("path = %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			requestErr = err
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("model") != "gpt-image-1" || r.FormValue("quality") != "high" {
+			requestErr = fmt.Errorf("fields = %#v", r.MultipartForm.Value)
+		}
+		if files := r.MultipartForm.File["image[]"]; len(files) != 2 {
+			requestErr = fmt.Errorf("image files = %d", len(files))
+		} else if files[0].Header.Get("Content-Type") != "image/png" {
+			requestErr = fmt.Errorf("image content type = %s", files[0].Header.Get("Content-Type"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aW1hZ2U="}]}`))
+	}))
+	defer server.Close()
+
+	payload := buildOpenAIImagesPayload("gpt-image-1", "fallback", "edit these", 1, map[string]interface{}{
+		"size": "1024x1024", "quality": "high",
+	})
+	imageData := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nimage"))
+	runtimeRule := map[string]interface{}{"upstream": map[string]interface{}{"adapter": "openai_images", "edit_endpoint": "/v1/images/edits"}}
+	endpoint := openAIImageEditEndpoint(runtimeRule, "/v1/images/generations")
+	body, status, err := postOpenAIImagesUpstream(context.Background(), connectionConfig{BaseURL: server.URL}, endpoint, payload, []string{imageData, imageData}, time.Second)
+	if err != nil || status != http.StatusOK || requestErr != nil {
+		t.Fatalf("multipart edit failed: status=%d err=%v requestErr=%v body=%s", status, err, requestErr, body)
 	}
 }
 
@@ -623,6 +715,18 @@ func TestHumanizeUpstreamFailureHandlesAsyncModerationBlock(t *testing.T) {
 	want := "生成内容未通过上游安全审核，请修改提示词或参考素材后重试（避免武器、暴力、敏感人物、侵权或受限内容）"
 	if got != want {
 		t.Fatalf("message = %q, want %q", got, want)
+	}
+}
+
+func TestHumanizeUpstreamFailureExplainsNetworkTimeouts(t *testing.T) {
+	for input, want := range map[string]string{
+		`Post "https://example.com": net/http: TLS handshake timeout`:                "连接上游时 TLS 握手超时，请检查服务器到上游的网络或代理",
+		`context deadline exceeded (Client.Timeout exceeded while awaiting headers)`: "等待上游响应超时；请求可能仍在生成，请检查上游网关超时设置",
+		`upstream HTTP 504: <!DOCTYPE html><title>504 Gateway Timeout</title>`:       "上游网关超时（HTTP 504/524），不是模型参数错误",
+	} {
+		if got := humanizeUpstreamFailure(input); got != want {
+			t.Fatalf("humanizeUpstreamFailure(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

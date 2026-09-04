@@ -56,6 +56,7 @@ interface UpstreamModel {
 const REQUEST_MODES = ["chat_completions", "responses", "images", "video", "audio", "custom"];
 const PAGE_SIZE = 10;
 const IMAGE_QUALITY_TIERS = ["1K", "2K", "4K"] as const;
+const OPENAI_IMAGE_QUALITIES = ["auto", "low", "medium", "high"] as const;
 const QWEN_IMAGE_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792", "2048x1536", "1536x2048", "2048x2048"] as const;
 type SeedanceVariant = "standard" | "fast" | "mini";
 const MINIMAX_H3_TEMPLATE_KEY = "minimax_h3_v2";
@@ -193,6 +194,11 @@ const buildSeedancePriceRule = (variant: SeedanceVariant) => {
 const normalizeImageQuality = (value: unknown) => {
   const text = String(value ?? "").trim().toUpperCase();
   return IMAGE_QUALITY_TIERS.includes(text as (typeof IMAGE_QUALITY_TIERS)[number]) ? text : "1K";
+};
+
+const normalizeOpenAIImageQuality = (value: unknown) => {
+  const text = String(value ?? "").trim().toLowerCase();
+  return OPENAI_IMAGE_QUALITIES.includes(text as (typeof OPENAI_IMAGE_QUALITIES)[number]) ? text : "auto";
 };
 
 const inferImageQualityFromModel = (modelName: string) => {
@@ -444,10 +450,17 @@ const IMAGE_ENDPOINT_PRESETS = [
   },
   {
     key: "openai_images",
-    label: "OpenAI / NEW API 图片生成",
+    label: "OpenAI / NEW API Images（标准兼容）",
     endpoint: "/v1/images/generations",
     model: "gpt-image-1",
-    description: "适合兼容 OpenAI Images 的上游，支持 n/count 批量生成。",
+    description: "无参考图走 Generations JSON；有参考图自动走 Edits multipart，quality 仅发送标准值。",
+  },
+  {
+    key: "otuapi_images",
+    label: "章鱼哥 Image 生成",
+    endpoint: "/v1/images/generations",
+    model: "gpt-image-1",
+    description: "保留原图片向导的 1K / 2K / 4K、aspect_ratio 与分档模型路由格式。",
   },
   {
     key: "banana_async",
@@ -913,13 +926,17 @@ export default function ModelsPage() {
   const getImageRule = (runtimeRuleText: string) => {
     const rr = safeParseJson(runtimeRuleText, {});
     const image = (rr?.image ?? {}) as Record<string, any>;
+    const isOpenAIImages = rr?.upstream?.adapter === "openai_images";
     const raw = image.max_reference_images;
     const parsed = raw === undefined || raw === null || raw === "" ? 4 : Number(raw);
     return {
       rr,
       max_reference_images: Math.max(0, Math.min(20, Number.isFinite(parsed) ? parsed : 4)),
-      default_quality: normalizeImageQuality(image.default_quality),
+      default_quality: isOpenAIImages ? normalizeOpenAIImageQuality(image.default_quality) : normalizeImageQuality(image.default_quality),
       default_size: String(image.default_size || "auto"),
+      supported_qualities: (Array.isArray(image.supported_qualities) ? image.supported_qualities : OPENAI_IMAGE_QUALITIES)
+        .map(normalizeOpenAIImageQuality)
+        .filter((quality: string, index: number, values: string[]) => values.indexOf(quality) === index),
       supported_size_tiers: (Array.isArray(image.supported_size_tiers) ? image.supported_size_tiers : IMAGE_QUALITY_TIERS)
         .map(normalizeImageQuality)
         .filter((tier: string, index: number, values: string[]) => values.indexOf(tier) === index),
@@ -933,8 +950,8 @@ export default function ModelsPage() {
     return JSON.stringify(
       {
         ...rr,
-        image: { ...(rr?.image ?? {}), max_reference_images: max },
-        capabilities: { ...(rr?.capabilities ?? {}), web_search: false, deep_think: false },
+        image: { ...(rr?.image ?? {}), max_reference_images: max, reference_images: { ...((rr?.image?.reference_images ?? {}) as Record<string, any>), key: "reference_images", max } },
+        capabilities: { ...(rr?.capabilities ?? {}), reference_images: max > 0, web_search: false, deep_think: false },
       },
       null,
       2
@@ -951,19 +968,34 @@ export default function ModelsPage() {
     state.category === "image" &&
     safeParseJson(state.runtime_rule, {})?.upstream?.adapter === "aliyun_qwen_image_v3";
 
+  const isOpenAIImagesForm = (state: FormState = form) =>
+    state.category === "image" &&
+    safeParseJson(state.runtime_rule, {})?.upstream?.adapter === "openai_images";
+
+  const imagePresetKey = (state: FormState = form) => {
+    if (isAliyunQwenImageForm(state)) return ALIYUN_QWEN_IMAGE_TEMPLATE_KEY;
+    if (isBananaImageForm(state)) return "banana_async";
+    if (isOpenAIImagesForm(state)) return "openai_images";
+    if (state.new_api_endpoint === "/v1/images/generations") return "otuapi_images";
+    return "custom";
+  };
+
   const setImageRule = (
     runtimeRuleText: string,
-    patch: { max_reference_images?: number; default_quality?: string; supported_size_tiers?: readonly string[]; model_by_size?: Record<string, string>; poll_path?: string; poll_interval_sec?: number; poll_timeout_sec?: number }
+    patch: { adapter?: string; max_reference_images?: number; default_quality?: string; supported_size_tiers?: readonly string[]; model_by_size?: Record<string, string>; poll_path?: string | null; poll_interval_sec?: number | null; poll_timeout_sec?: number | null }
   ) => {
     const rr = safeParseJson(runtimeRuleText, {});
     const image = (rr?.image ?? {}) as Record<string, any>;
     const upstream = (rr?.upstream ?? {}) as Record<string, any>;
     const nextImage = { ...image };
+    const useOpenAIQuality = (patch.adapter ?? upstream.adapter) === "openai_images";
     if (patch.max_reference_images !== undefined) {
-      nextImage.max_reference_images = Math.max(0, Math.min(20, Number(patch.max_reference_images) || 0));
+      const max = Math.max(0, Math.min(20, Number(patch.max_reference_images) || 0));
+      nextImage.max_reference_images = max;
+      nextImage.reference_images = { ...((nextImage.reference_images ?? {}) as Record<string, any>), key: "reference_images", max };
     }
     if (patch.default_quality !== undefined) {
-      nextImage.default_quality = normalizeImageQuality(patch.default_quality);
+      nextImage.default_quality = useOpenAIQuality ? normalizeOpenAIImageQuality(patch.default_quality) : normalizeImageQuality(patch.default_quality);
     }
     if (patch.supported_size_tiers !== undefined) {
       nextImage.supported_size_tiers = patch.supported_size_tiers.map(normalizeImageQuality);
@@ -972,15 +1004,19 @@ export default function ModelsPage() {
       nextImage.model_by_size = patch.model_by_size;
     }
     const nextUpstream = { ...upstream };
-    if (patch.poll_path !== undefined) nextUpstream.poll_path = patch.poll_path;
-    if (patch.poll_interval_sec !== undefined) nextUpstream.poll_interval_sec = patch.poll_interval_sec;
-    if (patch.poll_timeout_sec !== undefined) nextUpstream.poll_timeout_sec = patch.poll_timeout_sec;
+    if (patch.adapter !== undefined) nextUpstream.adapter = patch.adapter;
+    if (patch.poll_path === null) delete nextUpstream.poll_path;
+    else if (patch.poll_path !== undefined) nextUpstream.poll_path = patch.poll_path;
+    if (patch.poll_interval_sec === null) delete nextUpstream.poll_interval_sec;
+    else if (patch.poll_interval_sec !== undefined) nextUpstream.poll_interval_sec = patch.poll_interval_sec;
+    if (patch.poll_timeout_sec === null) delete nextUpstream.poll_timeout_sec;
+    else if (patch.poll_timeout_sec !== undefined) nextUpstream.poll_timeout_sec = patch.poll_timeout_sec;
     return JSON.stringify(
       {
         ...rr,
         image: nextImage,
         upstream: nextUpstream,
-        capabilities: { ...(rr?.capabilities ?? {}), web_search: false, deep_think: false },
+        capabilities: { ...(rr?.capabilities ?? {}), reference_images: Number(nextImage.max_reference_images || 0) > 0, web_search: false, deep_think: false },
       },
       null,
       2
@@ -1007,10 +1043,45 @@ export default function ModelsPage() {
       2
     );
 
+  const openAIImageSchema = () => {
+    const schema = safeParseJson(imageAspectSchema(["auto", "1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9"]), {});
+    return JSON.stringify({
+      ...schema,
+      properties: {
+        ...(schema.properties || {}),
+        quality: { type: "string", title: "生成质量", enum: OPENAI_IMAGE_QUALITIES, default: "auto", "x-order": 2 },
+      },
+    }, null, 2);
+  };
+
   const applyImageEndpointPreset = (prev: FormState, presetKey: string): FormState => {
     const preset = IMAGE_ENDPOINT_PRESETS.find((x) => x.key === presetKey) || IMAGE_ENDPOINT_PRESETS[0];
     if (preset.key === ALIYUN_QWEN_IMAGE_TEMPLATE_KEY) {
       return applyAliyunQwenImageV3(prev);
+    }
+    if (preset.key === "openai_images") {
+      const modelName = prev.new_api_model && !prev.new_api_model.startsWith("nano_banana") ? prev.new_api_model : preset.model;
+      const rr = safeParseJson(clearModelCaps(prev.runtime_rule), {});
+      const upstream = { ...(rr.upstream || {}) } as Record<string, any>;
+      delete upstream.poll_path;
+      delete upstream.poll_interval_sec;
+      delete upstream.poll_timeout_sec;
+      return {
+        ...prev,
+        category: "image",
+        request_mode: "images",
+        new_api_endpoint: preset.endpoint,
+        new_api_model: modelName,
+        input_schema: openAIImageSchema(),
+        default_params: JSON.stringify({ aspect_ratio: "auto", quality: "auto", max_reference_images: 4 }, null, 2),
+        runtime_rule: JSON.stringify({
+          ...rr,
+          image: { max_reference_images: 4, reference_images: { key: "reference_images", max: 4 }, default_quality: "auto", supported_qualities: OPENAI_IMAGE_QUALITIES },
+          upstream: { ...upstream, adapter: "openai_images", edit_endpoint: "/v1/images/edits" },
+          capabilities: { ...(rr.capabilities || {}), reference_images: true, web_search: false, deep_think: false },
+        }, null, 2),
+        price_rule: JSON.stringify({ billing_type: "per_image", currency: "¥", unit_price: 0.01 }, null, 2),
+      };
     }
     const isBanana = preset.key === "banana_async";
     const modelName = isBanana
@@ -1039,13 +1110,14 @@ export default function ModelsPage() {
         2
       ),
       runtime_rule: setImageRule(clearModelCaps(prev.runtime_rule), {
+        adapter: isBanana ? "otuapi_banana_image" : "otuapi_image",
         max_reference_images: isBanana ? 5 : getImageRule(prev.runtime_rule).max_reference_images,
         default_quality: defaultQuality,
         supported_size_tiers: IMAGE_QUALITY_TIERS,
         model_by_size: modelBySize,
-        poll_path: isBanana ? "/v1/videos/{id}" : undefined,
-        poll_interval_sec: isBanana ? 5 : undefined,
-        poll_timeout_sec: isBanana ? 3600 : undefined,
+        poll_path: isBanana ? "/v1/videos/{id}" : null,
+        poll_interval_sec: isBanana ? 5 : null,
+        poll_timeout_sec: isBanana ? 3600 : null,
       }),
       price_rule: JSON.stringify({ billing_type: "per_image", currency: "¥", unit_price: 0.01, unit_price_by_size: { "1K": 0.01, "2K": 0.01, "4K": 0.01 } }, null, 2),
     };
@@ -3215,11 +3287,16 @@ export default function ModelsPage() {
   };
 
   const toggleEnabled = async (m: AdminModel) => {
-    await adminApi(`/models/${m.id}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ is_enabled: !m.is_enabled }),
-    });
-    load();
+    try {
+      setErr("");
+      await adminApi(`/models/${m.id}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ is_enabled: !m.is_enabled }),
+      });
+      load();
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "切换模型状态失败");
+    }
   };
 
   const testConnection = async (m: AdminModel) => {
@@ -4027,7 +4104,7 @@ export default function ModelsPage() {
               <div className="space-y-2">
                 <select
                   className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                  value={isAliyunQwenImageForm() ? ALIYUN_QWEN_IMAGE_TEMPLATE_KEY : isBananaImageForm() ? "banana_async" : form.new_api_endpoint === "/v1/images/generations" ? "openai_images" : "custom"}
+                  value={imagePresetKey()}
                   onChange={(e) => {
                     if (e.target.value === "custom") return;
                     setForm((prev) => applyImageEndpointPreset(prev, e.target.value));
@@ -4049,7 +4126,9 @@ export default function ModelsPage() {
                 <div className="text-[11px] text-gray-400">
                   {isBananaImageForm()
                     ? "香蕉图片接口固定使用 /v1/videos，系统会自动创建任务、轮询进度，并按图片结果展示。"
-                    : "普通图片接口通常使用 /v1/images/generations。"}
+                    : isOpenAIImagesForm()
+                      ? "无参考图使用 /v1/images/generations；上传参考图后自动使用 /v1/images/edits。"
+                      : "普通图片接口通常使用 /v1/images/generations。"}
                 </div>
               </div>
             ) : (
@@ -4100,9 +4179,9 @@ export default function ModelsPage() {
                     不懂 JSON 也可以在这里完成配置。选择香蕉接口后，系统会自动使用 /v1/videos 创建任务、轮询结果，并把结果按图片展示。
                   </div>
                 </div>
-                {isBananaImageForm() && (
+                {(isBananaImageForm() || isOpenAIImagesForm()) && (
                   <div className="rounded-xl border border-emerald-100 bg-white px-3 py-2 text-xs text-emerald-700">
-                    已启用香蕉 API 兼容
+                    {isOpenAIImagesForm() ? "已启用标准 OpenAI Images 兼容" : "已启用香蕉 API 兼容"}
                   </div>
                 )}
               </div>
@@ -4111,7 +4190,7 @@ export default function ModelsPage() {
                   <label className="text-xs text-gray-500">接口类型</label>
                   <select
                     className="w-full mt-1 px-3 py-2 rounded-lg border text-sm bg-white"
-                    value={isAliyunQwenImageForm() ? ALIYUN_QWEN_IMAGE_TEMPLATE_KEY : isBananaImageForm() ? "banana_async" : "openai_images"}
+                    value={imagePresetKey()}
                     onChange={(e) => setForm((prev) => applyImageEndpointPreset(prev, e.target.value))}
                   >
                     {IMAGE_ENDPOINT_PRESETS.map((preset) => (
@@ -4198,17 +4277,18 @@ export default function ModelsPage() {
                           const rr = safeParseJson(prev.runtime_rule, {});
                           return { ...prev, runtime_rule: JSON.stringify({ ...rr, image: { ...(rr.image || {}), default_size: e.target.value } }, null, 2), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), size: e.target.value }, null, 2) };
                         }
-                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2) };
+                        const quality = isOpenAIImagesForm(prev) ? normalizeOpenAIImageQuality(e.target.value) : normalizeImageQuality(e.target.value);
+                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: quality }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality }, null, 2) };
                       })
                     }
                   >
-                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : isOpenAIImagesForm() ? getImageRule(form.runtime_rule).supported_qualities : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
                       <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>
-                  <div className="text-[11px] text-gray-400 mt-1">{isAliyunQwenImageForm() ? "比例与分辨率合并为官方 size 参数；自动推荐时不向上游发送 size。" : "前台工作台图片质量工具栏会默认选中该值。"}</div>
+                  <div className="text-[11px] text-gray-400 mt-1">{isAliyunQwenImageForm() ? "比例与分辨率合并为官方 size 参数；自动推荐时不向上游发送 size。" : isOpenAIImagesForm() ? "标准接口只允许 auto、low、medium、high；其他值会安全回退为 auto。" : "前台工作台图片质量工具栏会默认选中该值。"}</div>
                 </div>
-                {!isAliyunQwenImageForm() && (
+                {!isAliyunQwenImageForm() && !isOpenAIImagesForm() && (
                   <div className="col-span-2 overflow-x-auto rounded-xl border border-emerald-100 bg-white">
                     <table className="w-full min-w-[720px] text-xs">
                       <thead className="bg-emerald-50 text-gray-500">
@@ -4293,7 +4373,7 @@ export default function ModelsPage() {
                     </div>
                   </div>
                 )}
-                {isAliyunQwenImageForm() && (
+                {(isAliyunQwenImageForm() || isOpenAIImagesForm()) && (
                   <div>
                     <label className="text-xs text-gray-500">每张扣费</label>
                     <input
@@ -4310,6 +4390,11 @@ export default function ModelsPage() {
               {isBananaImageForm() && (
                 <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-6 text-gray-600">
                   Base URL 填 <code className="rounded bg-white px-1 py-0.5">https://otuapi.com</code>，Endpoint 固定为 <code className="rounded bg-white px-1 py-0.5">/v1/videos</code>。用户选择批量生成时，系统会按数量创建多个上游任务并合并结果。
+                </div>
+              )}
+              {isOpenAIImagesForm() && (
+                <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs leading-6 text-gray-600">
+                  无参考图时按 OpenAI Images Generations JSON 请求；上传参考图后自动切换到 <code className="rounded bg-white px-1 py-0.5">/v1/images/edits</code>，以 <code className="rounded bg-white px-1 py-0.5">image / image[]</code> multipart 文件上传。不会透传 <code className="rounded bg-white px-1 py-0.5">aspect_ratio / image_size / 1K / 2K / 4K</code> 等章鱼哥参数。
                 </div>
               )}
             </div>
@@ -4357,11 +4442,12 @@ export default function ModelsPage() {
                           const rr = safeParseJson(prev.runtime_rule, {});
                           return { ...prev, runtime_rule: JSON.stringify({ ...rr, image: { ...(rr.image || {}), default_size: e.target.value } }, null, 2), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), size: e.target.value }, null, 2) };
                         }
-                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: e.target.value }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality: normalizeImageQuality(e.target.value) }, null, 2) };
+                        const quality = isOpenAIImagesForm(prev) ? normalizeOpenAIImageQuality(e.target.value) : normalizeImageQuality(e.target.value);
+                        return { ...prev, runtime_rule: setImageRule(prev.runtime_rule, { default_quality: quality }), default_params: JSON.stringify({ ...(safeParseJson(prev.default_params, {}) || {}), quality }, null, 2) };
                       })
                     }
                   >
-                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
+                    {(isAliyunQwenImageForm() ? QWEN_IMAGE_SIZES : isOpenAIImagesForm() ? getImageRule(form.runtime_rule).supported_qualities : getImageRule(form.runtime_rule).supported_size_tiers).map((tier) => (
                       <option key={tier} value={tier}>{tier === "auto" ? "自动推荐（官方默认）" : tier}</option>
                     ))}
                   </select>
@@ -5248,6 +5334,7 @@ export default function ModelsPage() {
               modelId={form.id}
               upstreamModel={form.new_api_model}
               endpoint={form.new_api_endpoint}
+              requestMode={form.request_mode}
               modelBillingType={String((safeParseJson(form.price_rule, {}) as Record<string, unknown>).billing_type || "per_token")}
               onPrimaryBillingTypeChange={(billingType) => {
                 setForm((current) => ({

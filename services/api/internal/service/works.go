@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/starai/api/internal/util"
 )
@@ -149,6 +150,7 @@ func (s *WorksService) CleanupExpired(ctx context.Context, store ObjectDeleter, 
 		FROM works w
 		LEFT JOIN tasks t ON t.id = w.task_id
 		WHERE w.expires_at IS NOT NULL AND w.expires_at <= now()
+		  AND NOT EXISTS (SELECT 1 FROM gallery_items g WHERE g.work_id = w.id)
 		ORDER BY w.expires_at ASC LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
@@ -178,17 +180,53 @@ func (s *WorksService) CleanupExpired(ctx context.Context, store ObjectDeleter, 
 		}
 		items = append(items, expiredWork{work: w, userID: userID})
 	}
+	deletedCount := 0
 	for _, item := range items {
+		deleted, err := s.deleteExpired(ctx, item.userID, item.work.PublicID)
+		if err != nil {
+			return deletedCount, err
+		}
+		if !deleted {
+			continue
+		}
 		if store != nil {
 			for _, key := range WorkStorageKeys(&item.work, store) {
 				_ = store.Delete(ctx, key)
 			}
 		}
-		if err = s.Delete(ctx, item.userID, item.work.PublicID); err != nil {
-			return 0, err
+		deletedCount++
+	}
+	return deletedCount, nil
+}
+
+func (s *WorksService) deleteExpired(ctx context.Context, userID int64, publicID string) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var assetID *int64
+	err = tx.QueryRow(ctx, `
+		DELETE FROM works w
+		WHERE w.public_id=$1 AND w.user_id=$2
+		  AND w.expires_at IS NOT NULL AND w.expires_at <= now()
+		  AND NOT EXISTS (SELECT 1 FROM gallery_items g WHERE g.work_id = w.id)
+		RETURNING w.asset_id`, publicID, userID).Scan(&assetID)
+	if err == pgx.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if assetID != nil {
+		if _, err = tx.Exec(ctx, `DELETE FROM assets WHERE id=$1 AND user_id=$2 AND NOT EXISTS (SELECT 1 FROM works WHERE asset_id=$1)`, *assetID, userID); err != nil {
+			return false, err
 		}
 	}
-	return len(items), nil
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ParseWorkRetentionDays normalizes the JSON-decoded system setting.

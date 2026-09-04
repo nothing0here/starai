@@ -47,7 +47,7 @@ import { AudioOptionToolbar, AudioTopControls } from "./audio/AudioOptionToolbar
 import { AudioUploadButton } from "./audio/AudioUploadButton";
 import { VideoUploadArea } from "./video/VideoUploadArea";
 import { VideoOptionToolbar, VideoTopControls } from "./video/VideoOptionToolbar";
-import { ImageGenerationToolbar, buildImageGenerationParams, normalizeTier, type ImageSizeTier } from "./ImageGenerationToolbar";
+import { ImageGenerationToolbar, buildImageGenerationParams, normalizeRatio, normalizeTier, type ImageAspectRatio, type ImageSizeTier } from "./ImageGenerationToolbar";
 import { GenerationLanguageMenu, buildLanguageParams, useGenerationLanguages } from "./GenerationLanguageMenu";
 
 interface Message {
@@ -878,9 +878,11 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     if (!isImage) return {};
     const source = (workbenchInputSchema || {}) as Record<string, any>;
     const properties = { ...schemaProperties(source) };
-    for (const key of ["count", "n", "aspect_ratio", "image_size", "size", "quality", "max_reference_images"]) delete properties[key];
+    const adapter = String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase();
+    for (const key of ["count", "n", "aspect_ratio", "image_size", "size", "max_reference_images"]) delete properties[key];
+    if (adapter !== "openai_images") delete properties.quality;
     return { ...source, properties };
-  }, [isImage, workbenchInputSchema]);
+  }, [isImage, workbenchInputSchema, model.runtime_rule]);
   const hasSchemaFields = Object.keys(schemaProperties(workbenchInputSchema)).length > 0;
   const tag = CATEGORY_TAG[model.category] || { label: model.category, labelKey: `modelCategory.${model.category}`, className: "bg-gray-100 text-gray-600" };
   const modelName = td(`model.${model.code}.name`, model.display_name);
@@ -899,7 +901,9 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     )
   );
   const imageRuntime = ((model.runtime_rule as any)?.image || {}) as Record<string, unknown>;
-  const isAliyunQwenImage = isImage && String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase() === "aliyun_qwen_image_v3";
+  const imageAdapter = String((model.runtime_rule as any)?.upstream?.adapter || "").toLowerCase();
+  const isAliyunQwenImage = isImage && imageAdapter === "aliyun_qwen_image_v3";
+  const isOpenAIImages = isImage && imageAdapter === "openai_images";
   const imageCountOptions = Array.isArray(imageRuntime.count_options)
     ? imageRuntime.count_options.map(Number).filter((value) => Number.isFinite(value) && value > 0)
     : undefined;
@@ -1007,6 +1011,7 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
     setAudioRef(null);
     if (isImage) {
       setImageSize(defaultImageSizeForConfig(model.runtime_rule, defaults));
+      setImageRatio(normalizeRatio(String(defaults.aspect_ratio || "1:1")));
     }
     setBottom((prev) => ({
       ...prev,
@@ -2750,6 +2755,8 @@ export function ModelWorkspace({ model, initialPrompt, onOpenModelPicker, onOpen
                       countOptions={imageCountOptions}
                       countMax={imageCountMax}
                       sizeTiers={imageSizeTiers}
+                      ratios={isOpenAIImages ? (["1:1", "3:2", "2:3"] as ImageAspectRatio[]) : undefined}
+                      showSizeTier={!isOpenAIImages}
                     />
                     <VideoOptionToolbar schema={imageOptionSchema} values={params} onChange={setParams} />
                     <GenerationLanguageMenu languages={generationLanguages} value={languageCode} onChange={setLanguageCode} />

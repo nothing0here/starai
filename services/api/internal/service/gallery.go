@@ -229,8 +229,13 @@ func (s *GalleryService) PublishWork(ctx context.Context, userID int64, workPubl
 	mediaURL, coverURL := galleryMediaFromWork(wtype, meta, thumb)
 	publicID := util.NewPublicID("gal")
 	_, err = s.db.Exec(ctx, `
-		INSERT INTO gallery_items (public_id, work_id, user_id, model_code, title, prompt, cover_url, type, tags, status, is_paid, price)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		WITH published AS (
+			INSERT INTO gallery_items (public_id, work_id, user_id, model_code, title, prompt, cover_url, type, tags, status, is_paid, price)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			RETURNING work_id, status
+		)
+		UPDATE works SET expires_at=NULL
+		WHERE id=(SELECT work_id FROM published WHERE status='approved')`,
 		publicID, workID, userID, modelCode, title, prompt, coverURL, wtype, tagJSON, status, isPaid, price)
 	if err != nil {
 		return nil, err
@@ -254,10 +259,23 @@ func (s *GalleryService) Audit(ctx context.Context, id int64, status string, fea
 		if status != "approved" && status != "rejected" && status != "pending" {
 			return errors.New("无效状态")
 		}
-		s.db.Exec(ctx, `UPDATE gallery_items SET status=$1 WHERE id=$2`, status, id)
+		if status == "approved" {
+			_, err := s.db.Exec(ctx, `
+				WITH approved AS (
+					UPDATE gallery_items SET status=$1 WHERE id=$2 RETURNING work_id
+				)
+				UPDATE works SET expires_at=NULL WHERE id=(SELECT work_id FROM approved)`, status, id)
+			if err != nil {
+				return err
+			}
+		} else if _, err := s.db.Exec(ctx, `UPDATE gallery_items SET status=$1 WHERE id=$2`, status, id); err != nil {
+			return err
+		}
 	}
 	if featured != nil {
-		s.db.Exec(ctx, `UPDATE gallery_items SET is_featured=$1 WHERE id=$2`, *featured, id)
+		if _, err := s.db.Exec(ctx, `UPDATE gallery_items SET is_featured=$1 WHERE id=$2`, *featured, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

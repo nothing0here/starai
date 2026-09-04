@@ -73,6 +73,20 @@ function Test-ServiceHealthy([string]$Name, [int]$Port, [string]$Url) {
   return Wait-HttpOk -Url $Url -Retries 2 -DelayMs 400
 }
 
+function Test-StarAIWorkerRunning {
+  $workerDir = (Join-Path $Root "services/worker").ToLowerInvariant()
+  try {
+    return [bool](Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+      $_.CommandLine -and
+      $_.CommandLine.ToLowerInvariant().Contains($workerDir) -and
+      $_.CommandLine -match "go\s+run\s+\./cmd/worker"
+    } | Select-Object -First 1)
+  } catch {
+    Warn "Unable to inspect the existing Worker process: $($_.Exception.Message)"
+    return $false
+  }
+}
+
 function Stop-StarAIFrontendProcesses([string]$AppDirName) {
   $targetDir = (Join-Path $Root "apps/$AppDirName").ToLowerInvariant()
   $stopped = $false
@@ -326,7 +340,11 @@ if ($BackendOnly) {
   Info "Launching backend services (new windows)"
   Start-StarAIServiceWindow "Mock NEW API (:3002)" (Join-Path $Root "services/mock-new-api") "go run ./cmd/mock"
   Start-StarAIServiceWindow "API (:8080)" (Join-Path $Root "services/api") "go run ./cmd/api"
-  Start-StarAIServiceWindow "Worker" (Join-Path $Root "services/worker") "go run ./cmd/worker"
+  if (Test-StarAIWorkerRunning) {
+    Warn "Worker already running - reusing existing process"
+  } else {
+    Start-StarAIServiceWindow "Worker" (Join-Path $Root "services/worker") "go run ./cmd/worker"
+  }
   Info "Done."
   Info "API:   http://localhost:8080"
   Info "Mock:  http://localhost:3002"
@@ -359,7 +377,7 @@ $servicePorts = @{
   "Admin"        = 3001
 }
 $serviceHealth = @{
-  "Mock NEW API" = "http://localhost:3002"
+  "Mock NEW API" = "http://localhost:3002/health"
   "API"          = "http://localhost:8080/health"
   "Web"          = "http://localhost:3000"
   "Admin"        = "http://localhost:3001"
@@ -397,7 +415,11 @@ if (-not (Test-PortListening 3002)) {
 if (-not (Test-PortListening 8080)) {
   Start-StarAIServiceWindow "API (:8080)" (Join-Path $Root "services/api") "go run ./cmd/api"
 }
-Start-StarAIServiceWindow "Worker" (Join-Path $Root "services/worker") "go run ./cmd/worker"
+if (Test-StarAIWorkerRunning) {
+  Warn "Worker already running - reusing existing process"
+} else {
+  Start-StarAIServiceWindow "Worker" (Join-Path $Root "services/worker") "go run ./cmd/worker"
+}
 if (-not (Test-PortListening 3000)) {
   Start-StarAIServiceWindow "Web (:3000)" (Join-Path $Root "apps/web") "if (Test-Path '.next') { Remove-Item -Recurse -Force '.next' -ErrorAction SilentlyContinue }; pnpm dev"
 }

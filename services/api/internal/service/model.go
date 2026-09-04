@@ -47,7 +47,9 @@ type ModelDTO struct {
 
 func (s *ModelService) ListPublic(ctx context.Context, category string) ([]ModelDTO, error) {
 	q := `SELECT id, code, display_name, category, icon_url, description, tags, runtime_rule, input_schema, default_params, price_rule, is_enabled, sort_order
-		FROM models WHERE is_enabled=true`
+		FROM models WHERE is_enabled=true
+		AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+			OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))`
 	args := []interface{}{}
 	if category != "" && category != "all" {
 		if category == "chat" {
@@ -70,7 +72,9 @@ func (s *ModelService) GetByCode(ctx context.Context, code string, publicOnly bo
 	q := `SELECT id, code, display_name, category, icon_url, description, tags, runtime_rule, input_schema, default_params, price_rule, is_enabled, sort_order
 		FROM models WHERE code=$1`
 	if publicOnly {
-		q += ` AND is_enabled=true`
+		q += ` AND is_enabled=true
+			AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+				OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))`
 	}
 	var m ModelDTO
 	var tags, runtime, schema, defaults, price []byte
@@ -127,7 +131,9 @@ func (s *ModelService) GetFullByCode(ctx context.Context, code string) (*ModelFu
 		SELECT id, code, display_name, new_api_model, new_api_endpoint, request_mode, category,
 			icon_url, description, tags, input_schema, default_params, new_api_extra_params, price_rule, runtime_rule,
 			retention_days, is_enabled, sort_order
-		FROM models WHERE code=$1 AND is_enabled=true`, code).Scan(
+		FROM models WHERE code=$1 AND is_enabled=true
+			AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+				OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))`, code).Scan(
 		&m.ID, &m.Code, &m.DisplayName, &m.NewAPIModel, &m.NewAPIEndpoint, &m.RequestMode, &m.Category,
 		&m.IconURL, &m.Description, &tags, &schema, &defaults, &extra, &price, &runtime,
 		&m.RetentionDays, &m.IsEnabled, &m.SortOrder)
@@ -199,6 +205,8 @@ func (s *ModelService) ResolveChatModel(ctx context.Context, identifier string) 
 			retention_days, is_enabled, sort_order
 		FROM models
 		WHERE is_enabled=true
+		  AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+			OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))
 		  AND new_api_model=$1
 		  AND request_mode='chat_completions'
 		ORDER BY sort_order ASC, id ASC
@@ -286,6 +294,8 @@ func (s *ModelService) ResolveTaskModel(ctx context.Context, identifier string, 
 			retention_days, is_enabled, sort_order
 		FROM models
 		WHERE is_enabled=true
+		  AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+			OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))
 		  AND new_api_model=$1`+modeSQL+`
 		ORDER BY sort_order ASC, id ASC
 		LIMIT 1`, args...).Scan(
@@ -653,7 +663,10 @@ func perTokenPrice(rule map[string]interface{}, key string) float64 {
 
 func (s *ModelService) ListCategories(ctx context.Context) ([]map[string]string, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT DISTINCT category FROM models WHERE is_enabled=true ORDER BY category`)
+		SELECT DISTINCT category FROM models WHERE is_enabled=true
+		AND (NOT EXISTS (SELECT 1 FROM model_routes configured_route WHERE configured_route.model_id=models.id)
+			OR EXISTS (SELECT 1 FROM model_routes enabled_route WHERE enabled_route.model_id=models.id AND enabled_route.is_enabled=true))
+		ORDER BY category`)
 	if err != nil {
 		return nil, err
 	}
@@ -1199,6 +1212,16 @@ func defaultAPIDocParameters(doc *APIDocDTO) []map[string]interface{} {
 	switch doc.RequestMode {
 	case "images":
 		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "openai_images") {
+			return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
+				{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
+				{"name": "prompt", "type": "string", "required": true, "description": "生成或编辑指令"},
+				{"name": "image", "type": "file|file[]", "required": false, "description": "参考图文件；上传后使用 POST /v1/images/edits（multipart/form-data）"},
+				{"name": "n", "type": "integer", "required": false, "description": "生成数量，默认 1"},
+				{"name": "size", "type": "string", "required": false, "description": "OpenAI Images 尺寸，例如 auto、1024x1024、1536x1024、1024x1536"},
+				{"name": "quality", "type": "string", "required": false, "description": "生成质量", "enum": []string{"auto", "low", "medium", "high"}},
+			})
+		}
 		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "aliyun_qwen_image_v3") {
 			return appendSchemaAPIDocParameters(doc, []map[string]interface{}{
 				{"name": "model", "type": "string", "required": true, "description": "平台模型编码或后台接入模型名，例如 " + doc.ModelCode},
@@ -1283,6 +1306,12 @@ func appendSchemaAPIDocParameters(doc *APIDocDTO, items []map[string]interface{}
 func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 	switch doc.RequestMode {
 	case "images":
+		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
+		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "openai_images") {
+			return mergeAPIDocDefaults(doc, map[string]interface{}{
+				"model": doc.ModelCode, "prompt": "为产品生成一张高级质感的真实摄影图", "n": 1, "size": "1024x1024", "quality": "auto",
+			})
+		}
 		example := mergeAPIDocDefaults(doc, map[string]interface{}{
 			"model":        doc.ModelCode,
 			"prompt":       "为莫来石产品生成电商商品主图，白底，高级质感，真实摄影风格",
@@ -1291,7 +1320,6 @@ func defaultAPIDocRequestExample(doc *APIDocDTO) map[string]interface{} {
 			"image_size":   "1K",
 			"size":         "1024x1024",
 		})
-		upstream, _ := doc.RuntimeRule["upstream"].(map[string]interface{})
 		if strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "aliyun_qwen_image_v3") {
 			delete(example, "aspect_ratio")
 			delete(example, "image_size")
@@ -1482,6 +1510,9 @@ func (s *ModelService) Create(ctx context.Context, input CreateModelInput) (*Mod
 		return nil, err
 	}
 	if err := s.SyncPrimaryModelRoute(ctx, id, input); err != nil {
+		if _, cleanupErr := s.db.Exec(ctx, `DELETE FROM models WHERE id=$1`, id); cleanupErr != nil {
+			return nil, fmt.Errorf("创建模型线路失败: %v；清理未完成模型失败: %w", err, cleanupErr)
+		}
 		return nil, err
 	}
 	if err := s.ensureDefaultAPIDoc(ctx, id, input); err != nil {
@@ -1554,6 +1585,17 @@ func (s *ModelService) ensureDefaultAPIDoc(ctx context.Context, modelID int64, i
 }
 
 func (s *ModelService) SetEnabled(ctx context.Context, id int64, enabled bool) (*ModelDTO, error) {
+	if enabled {
+		var configured, usable bool
+		if err := s.db.QueryRow(ctx, `SELECT
+			EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1),
+			EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1 AND is_enabled=true)`, id).Scan(&configured, &usable); err != nil {
+			return nil, err
+		}
+		if configured && !usable {
+			return nil, errors.New("启用模型前请先启用至少一条上游线路")
+		}
+	}
 	result, err := s.db.Exec(ctx, `UPDATE models SET is_enabled=$1, updated_at=now() WHERE id=$2`, enabled, id)
 	if err != nil {
 		return nil, err

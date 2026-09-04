@@ -527,16 +527,9 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 		}
 	} else if requestMode == "images" {
 		protocol = mediaProtocol(extra)
-		body, err = prepareImageRequest(ImageRequest{
-			Model:  model,
-			Prompt: "test",
-			N:      1,
-			Size:   "1024x1024",
-		}, protocol, extra)
-		if err != nil {
-			result.Message = "测试请求创建失败：" + err.Error()
-			return result
-		}
+		// Only probe endpoint/auth validation. A valid prompt would start a paid,
+		// long-running image job and commonly outlive the admin HTTP request.
+		body, _ = json.Marshal(map[string]interface{}{"model": model, "prompt": "", "n": 0})
 	} else if requestMode == "video" {
 		protocol = mediaProtocol(extra)
 		body, err = prepareVideoRequest(VideoRequest{
@@ -604,7 +597,11 @@ func (c *Client) TestModelConnection(ctx context.Context, endpoint, requestMode,
 		result.Message = "连接、鉴权及模型路由正常"
 	case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity:
 		result.OK = true
-		result.Message = "连接与鉴权正常（上游参数校验已响应）"
+		if requestMode == "images" {
+			result.Message = "图片生成接口连接与鉴权正常（校验探针已响应，未提交生图；参考图编辑接口未实际生成验证）"
+		} else {
+			result.Message = "连接与鉴权正常（上游参数校验已响应）"
+		}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		result.Message = "鉴权失败，请检查 API Key、认证方式和请求头"
 	case resp.StatusCode == http.StatusNotFound:

@@ -43,6 +43,7 @@ const VIRAL_REMAKE_CODE = "viral_remake";
 const ONE_CLICK_VIRAL_REMAKE_CODE = "one_click_viral_remake";
 const VIDEO_REMAKE_CODE = "video_remake";
 const CONTENT_IMAGE_POST_CODE = "content_image_post";
+const VIDEO_CREATION_CODE = "video_creation";
 const GENERAL_CREATIVE_AGENT_CODE = "general_creative_agent";
 
 const MOBILE_SUBPAGE_LINKS = [
@@ -988,6 +989,13 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                     authenticated={Boolean(user)}
                     workflowCode={CONTENT_IMAGE_POST_CODE}
                     initialTemplateID="content-image-post"
+                  />
+                ) : activeAgentCode === VIDEO_CREATION_CODE ? (
+                  <InfiniteCanvasWorkspace
+                    key={activeAgentCode}
+                    authenticated={Boolean(user)}
+                    workflowCode={VIDEO_CREATION_CODE}
+                    initialTemplateID="story-short-video"
                   />
                 ) : activeAgentCode === GENERAL_CREATIVE_AGENT_CODE ? (
                   <CreativeAgentWorkspace key={activeAgentCode} />

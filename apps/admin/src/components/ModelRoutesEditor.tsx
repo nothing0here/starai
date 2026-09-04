@@ -60,7 +60,7 @@ function normalizedBillingType(value: unknown) {
   return supportedBillingTypes.has(billingType) ? billingType : "per_token";
 }
 
-const emptyRoute = (defaults: { upstreamModel: string; endpoint: string; billingType: string }): RouteForm => ({
+const emptyRoute = (defaults: { upstreamModel: string; endpoint: string; billingType: string; requestMode: string }): RouteForm => ({
   route_name: "",
   provider: "",
   protocol: "openai",
@@ -78,7 +78,7 @@ const emptyRoute = (defaults: { upstreamModel: string; endpoint: string; billing
     : { billing_type: defaults.billingType, unit_cost: 0 },
   priority: 100,
   weight: 100,
-  timeout_seconds: 120,
+  timeout_seconds: defaults.requestMode === "images" ? 600 : 120,
   max_retries: 0,
   is_enabled: true,
 });
@@ -121,14 +121,14 @@ interface PrimaryRouteConnection {
   apiKeyHeader: string;
 }
 
-export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBillingType, onPrimaryConnectionChange, onPrimaryBillingTypeChange }: { modelId: number; upstreamModel: string; endpoint: string; modelBillingType: string; onPrimaryConnectionChange?: (connection: PrimaryRouteConnection) => void; onPrimaryBillingTypeChange?: (billingType: string) => void }) {
+export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, requestMode, modelBillingType, onPrimaryConnectionChange, onPrimaryBillingTypeChange }: { modelId: number; upstreamModel: string; endpoint: string; requestMode: string; modelBillingType: string; onPrimaryConnectionChange?: (connection: PrimaryRouteConnection) => void; onPrimaryBillingTypeChange?: (billingType: string) => void }) {
   const defaultBillingType = normalizedBillingType(modelBillingType);
   const canSyncModelBillingType = supportedBillingTypes.has(String(modelBillingType || "").trim());
   const [routes, setRoutes] = useState<ModelRoute[]>([]);
   const [attempts, setAttempts] = useState<ModelRouteAttempt[]>([]);
   const [profits, setProfits] = useState<ModelRouteProfit[]>([]);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [form, setForm] = useState<RouteForm>(() => emptyRoute({ upstreamModel, endpoint, billingType: defaultBillingType }));
+  const [form, setForm] = useState<RouteForm>(() => emptyRoute({ upstreamModel, endpoint, billingType: defaultBillingType, requestMode }));
   const [advanced, setAdvanced] = useState({ headers: "{}", extra: "{}", runtime: "{}" });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -147,7 +147,7 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
   useEffect(() => { void load(); }, [load]);
 
   const beginCreate = () => {
-    const next = emptyRoute({ upstreamModel, endpoint, billingType: defaultBillingType });
+    const next = emptyRoute({ upstreamModel, endpoint, billingType: defaultBillingType, requestMode });
     setEditingId(0);
     setForm(next);
     setAdvanced({ headers: "{}", extra: "{}", runtime: "{}" });
@@ -161,7 +161,7 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
       upstream_model: route.upstream_model, endpoint: route.endpoint, base_url: route.base_url,
       api_key: route.api_key || "", auth_type: route.auth_type, api_key_header: route.api_key_header,
       headers: route.headers || {}, extra_params: route.extra_params || {}, runtime_rule: route.runtime_rule || {}, cost_rule: normalizedCostRule(route.cost_rule, defaultBillingType),
-      priority: route.priority, weight: route.weight, timeout_seconds: route.timeout_seconds,
+      priority: route.priority, weight: route.weight, timeout_seconds: requestMode === "images" ? Math.max(600, route.timeout_seconds) : route.timeout_seconds,
       max_retries: route.max_retries, is_enabled: route.is_enabled,
     });
     setAdvanced({ headers: jsonText(route.headers), extra: jsonText(route.extra_params), runtime: jsonText(route.runtime_rule) });
@@ -234,7 +234,7 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
   };
 
   const testAll = async () => {
-    if (!window.confirm("将依次检查全部已启用线路。部分上游可能因最小探测请求产生少量费用，是否继续？")) return;
+    if (!window.confirm("将依次检查全部已启用线路。图片线路只做参数校验，不会提交生图任务；是否继续？")) return;
     try {
       setBusy(true);
       const results = await adminApi<Array<{ result: { ok: boolean } }>>(`/models/${modelId}/routes/test-all`, { method: "POST" });
@@ -344,7 +344,7 @@ export function ModelRoutesEditor({ modelId, upstreamModel, endpoint, modelBilli
           <label className="text-xs text-gray-600">API Key<input type="password" value={form.api_key || ""} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className="mt-1 w-full rounded-lg border p-2 font-mono text-sm" placeholder="留空或保留掩码表示不修改" /></label>
           <label className="text-xs text-gray-600">优先级<input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2 text-sm" /></label>
           <label className="text-xs text-gray-600">同优先级权重<input type="number" min={1} value={form.weight} onChange={(e) => setForm({ ...form, weight: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2 text-sm" /></label>
-          <label className="text-xs text-gray-600">超时秒数<input type="number" min={1} value={form.timeout_seconds} onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2 text-sm" /></label>
+          <label className="text-xs text-gray-600">超时秒数{requestMode === "images" && <span className="ml-1 text-gray-400">（图片建议至少 600）</span>}<input type="number" min={1} value={form.timeout_seconds} onChange={(e) => setForm({ ...form, timeout_seconds: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2 text-sm" /></label>
           <label className="text-xs text-gray-600">单线路重试次数<input type="number" min={0} max={3} value={form.max_retries} onChange={(e) => setForm({ ...form, max_retries: Number(e.target.value) })} className="mt-1 w-full rounded-lg border p-2 text-sm" /></label>
           <div className="col-span-2 rounded-lg border border-emerald-100 bg-emerald-50/50 p-3">
           <div className="mb-1 text-xs font-medium text-gray-800">上游成本（平台算力单位）</div>

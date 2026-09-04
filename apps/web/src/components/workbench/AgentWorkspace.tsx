@@ -183,6 +183,11 @@ function textOf(v: unknown) {
 
 function modelSupportsImageReference(model?: Model | null) {
   if (!model) return false;
+  const capabilities = (model.runtime_rule?.capabilities || {}) as Record<string, any>;
+  if (capabilities.image_input === true || capabilities.reference_image === true || capabilities.reference_images === true) return true;
+  const imageRuntime = (model.runtime_rule?.image || {}) as Record<string, any>;
+  const imageReferences = (imageRuntime.reference_images || {}) as Record<string, any>;
+  if (Number(imageRuntime.max_reference_images || imageReferences.max || 0) > 0) return true;
   const runtime = (model.runtime_rule?.video || {}) as Record<string, any>;
   const profile = String(runtime.upload_profile || "").trim();
   if (profile && profile !== "none") return true;

@@ -93,6 +93,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		v1.POST("/chat/completions", h.ChatCompletion)
 		v1.POST("/messages", h.AnthropicMessages)
 		v1.POST("/images/generations", h.OpenAPIImageGeneration)
+		v1.POST("/images/edits", h.OpenAPIImageEdit)
 		v1.POST("/video/generations", h.OpenAPIVideoGeneration)
 		v1.POST("/audio/speech", h.OpenAPIAudioSpeech)
 		v1.GET("/tasks/:task_no", h.OpenAPIGetTask)
@@ -4327,6 +4328,14 @@ func (h *Handler) OpenAPIImageGeneration(c *gin.Context) {
 	h.openAPICreateMediaTask(c, "images", "prompt")
 }
 
+func (h *Handler) OpenAPIImageEdit(c *gin.Context) {
+	body, ok := h.openAPIImageEditBody(c)
+	if !ok {
+		return
+	}
+	h.openAPICreateMediaTaskFromBody(c, body, "images", "prompt")
+}
+
 func (h *Handler) OpenAPIVideoGeneration(c *gin.Context) {
 	h.openAPICreateMediaTask(c, "video", "prompt")
 }
@@ -4341,6 +4350,78 @@ func (h *Handler) openAPICreateMediaTask(c *gin.Context, requestMode, promptFiel
 		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "参数错误")
 		return
 	}
+	h.openAPICreateMediaTaskFromBody(c, body, requestMode, promptField)
+}
+
+func (h *Handler) openAPIImageEditBody(c *gin.Context) (map[string]interface{}, bool) {
+	if h.storage == nil {
+		openAPIError(c, http.StatusInternalServerError, "storage_unavailable", "对象存储未启用")
+		return nil, false
+	}
+	form, err := c.MultipartForm()
+	if err != nil {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "请使用 multipart/form-data 上传参考图")
+		return nil, false
+	}
+	body := make(map[string]interface{}, len(form.Value)+1)
+	for key, values := range form.Value {
+		if len(values) == 1 {
+			body[key] = values[0]
+		} else if len(values) > 1 {
+			body[key] = values
+		}
+	}
+	if strings.TrimSpace(stringAny(body["model"])) == "" || strings.TrimSpace(stringAny(body["prompt"])) == "" {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "model 和 prompt 不能为空")
+		return nil, false
+	}
+	files := append(form.File["image"], form.File["image[]"]...)
+	if len(files) == 0 {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "image 不能为空")
+		return nil, false
+	}
+	if len(files) > 20 {
+		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "参考图最多上传 20 张")
+		return nil, false
+	}
+	allowed := map[string]string{"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}
+	for _, file := range files {
+		if file.Size > 20<<20 {
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "单张参考图不能超过 20MB")
+			return nil, false
+		}
+		if _, ok := allowed[file.Header.Get("Content-Type")]; !ok {
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "参考图仅支持 png/jpg/webp/gif")
+			return nil, false
+		}
+	}
+	urls := make([]string, 0, len(files))
+	for _, file := range files {
+		contentType := file.Header.Get("Content-Type")
+		input, err := file.Open()
+		if err != nil {
+			openAPIError(c, http.StatusBadRequest, "invalid_request_error", "读取参考图失败")
+			return nil, false
+		}
+		objectName := fmt.Sprintf("openapi/image-edits/%d/%s%s", c.GetInt64("user_id"), uuid.NewString(), allowed[contentType])
+		uploadedURL, uploadErr := h.storage.Upload(c.Request.Context(), objectName, contentType, input, file.Size)
+		_ = input.Close()
+		if uploadErr != nil {
+			openAPIError(c, http.StatusInternalServerError, "upload_error", "参考图上传失败")
+			return nil, false
+		}
+		urls = append(urls, uploadedURL)
+	}
+	body["reference_images"] = urls
+	if raw, ok := body["wait"].(string); ok {
+		if wait, err := strconv.ParseBool(strings.TrimSpace(raw)); err == nil {
+			body["wait"] = wait
+		}
+	}
+	return body, true
+}
+
+func (h *Handler) openAPICreateMediaTaskFromBody(c *gin.Context, body map[string]interface{}, requestMode, promptField string) {
 	modelName := strings.TrimSpace(stringAny(body["model"]))
 	if modelName == "" {
 		openAPIError(c, http.StatusBadRequest, "invalid_request_error", "model 不能为空")

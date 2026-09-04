@@ -1,10 +1,36 @@
 package handler
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"mime/multipart"
+	"net/http/httptest"
+	"net/textproto"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/starai/api/internal/service"
 )
+
+type openAPIImageEditStore struct {
+	objects []string
+}
+
+func (s *openAPIImageEditStore) Upload(_ context.Context, objectName, _ string, r io.Reader, _ int64) (string, error) {
+	if _, err := io.ReadAll(r); err != nil {
+		return "", err
+	}
+	s.objects = append(s.objects, objectName)
+	return "https://cdn.example/" + objectName, nil
+}
+func (*openAPIImageEditStore) ReadAll(context.Context, string, int64) ([]byte, error) {
+	return nil, nil
+}
+func (*openAPIImageEditStore) Delete(context.Context, string) error { return nil }
+func (*openAPIImageEditStore) ObjectKeyFromURL(string) string       { return "" }
+func (*openAPIImageEditStore) PublicURL(objectName string) string   { return objectName }
 
 func openAPIMediaModel(profile string) *service.ModelFull {
 	return &service.ModelFull{RuntimeRule: map[string]interface{}{
@@ -49,6 +75,46 @@ func TestNormalizeOpenAPIImageAliases(t *testing.T) {
 	}
 	if _, leaked := params["response_format"]; leaked {
 		t.Fatalf("platform response_format leaked into task params: %#v", params)
+	}
+}
+
+func TestOpenAPIImageEditBodyUploadsImageArrayAsTaskReferences(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	_ = writer.WriteField("model", "gpt-image-1")
+	_ = writer.WriteField("prompt", "keep the subject")
+	_ = writer.WriteField("quality", "high")
+	_ = writer.WriteField("wait", "true")
+	for _, name := range []string{"first.png", "second.png"} {
+		header := textproto.MIMEHeader{}
+		header.Set("Content-Disposition", `form-data; name="image[]"; filename="`+name+`"`)
+		header.Set("Content-Type", "image/png")
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = part.Write([]byte("png"))
+	}
+	_ = writer.Close()
+
+	request := httptest.NewRequest("POST", "/v1/images/edits", &requestBody)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = request
+	c.Set("user_id", int64(42))
+	store := &openAPIImageEditStore{}
+	body, ok := (&Handler{storage: store}).openAPIImageEditBody(c)
+	if !ok {
+		t.Fatalf("multipart edit was rejected: %s", recorder.Body.String())
+	}
+	references, ok := body["reference_images"].([]string)
+	if !ok || len(references) != 2 || len(store.objects) != 2 {
+		t.Fatalf("reference images were not introduced into the task body: body=%#v uploads=%#v", body, store.objects)
+	}
+	if body["quality"] != "high" || body["wait"] != true || !strings.Contains(store.objects[0], "openapi/image-edits/42/") {
+		t.Fatalf("multipart fields or upload ownership were lost: body=%#v uploads=%#v", body, store.objects)
 	}
 }
 

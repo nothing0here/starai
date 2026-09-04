@@ -40,6 +40,15 @@ func TestNormalizeModelRouteDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultModelRouteTimeoutAllowsMediaCompletion(t *testing.T) {
+	if got := defaultModelRouteTimeout("images"); got != 600 {
+		t.Fatalf("image timeout = %d, want 600", got)
+	}
+	if got := defaultModelRouteTimeout("chat_completions"); got != 120 {
+		t.Fatalf("chat timeout = %d, want 120", got)
+	}
+}
+
 func TestNormalizeModelRoutePreservesCustomMediaEndpoint(t *testing.T) {
 	input := ModelRouteInput{
 		RouteName: "Primary", UpstreamModel: "wan-v1", BaseURL: "https://example.com",

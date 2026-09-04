@@ -17,6 +17,7 @@ import (
 	"math/rand"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"regexp"
@@ -297,7 +298,11 @@ func processImageTask(ctx context.Context, pool *pgxpool.Pool, baseURL, token st
 
 	routes, err := loadWorkerModelRoutes(ctx, pool, p.ModelID, baseURL, token, newAPIModel, endpoint, legacyExtraParams, legacyRuntimeRule)
 	if err != nil {
-		return failTask(ctx, pool, p, "MODEL_ROUTE_ERROR", "无法加载模型线路")
+		message := "无法加载模型线路"
+		if errors.Is(err, errNoEnabledModelRoutes) {
+			message = "该模型没有启用的上游线路，请联系管理员"
+		}
+		return failTask(ctx, pool, p, "MODEL_ROUTE_ERROR", message)
 	}
 	var selected workerGenerationAttemptResult
 	var lastRouteErr error
@@ -309,6 +314,9 @@ routeLoop:
 	for _, route := range routes {
 		if poolEnabled && !acquireWorkerRouteProbe(ctx, pool, route) {
 			continue
+		}
+		if route.ID > 0 {
+			_, _ = pool.Exec(ctx, `UPDATE tasks SET route_id=$1,updated_at=now() WHERE task_no=$2`, route.ID, p.TaskNo)
 		}
 		for retry := 0; retry <= route.MaxRetries; retry++ {
 			if attempt >= maxWorkerRouteAttempts {
@@ -354,7 +362,7 @@ routeLoop:
 	if !selectedOK {
 		message := "所有可用线路均调用失败"
 		if lastRouteErr != nil && strings.TrimSpace(lastRouteErr.Error()) != "" {
-			message += "：" + lastRouteErr.Error()
+			message += "：" + humanizeUpstreamFailure(lastRouteErr.Error())
 		}
 		return failTask(ctx, pool, p, "MODEL_PROVIDER_ERROR", message)
 	}
@@ -645,6 +653,8 @@ func workerRouteRequestTransform(route workerModelRoute) map[string]interface{} 
 	return route.LegacyRequestTransform
 }
 
+var errNoEnabledModelRoutes = errors.New("model has configured routes but none are enabled")
+
 func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int64, fallbackBaseURL, fallbackToken, legacyModel, legacyEndpoint string, legacyExtra, legacyRuntime map[string]interface{}) ([]workerModelRoute, error) {
 	rows, err := pool.Query(ctx, `SELECT id,protocol,upstream_model,endpoint,base_url,api_key,auth_type,api_key_header,headers,extra_params,runtime_rule,cost_rule,priority,weight,timeout_seconds,max_retries,health_status,consecutive_failures,cooldown_until
 		FROM model_routes WHERE model_id=$1 AND is_enabled=true ORDER BY priority,id`, modelID)
@@ -666,6 +676,7 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 		if err != nil {
 			return nil, fmt.Errorf("route %d API key decrypt failed; check MODEL_ROUTE_CIPHER_KEY: %w", route.ID, err)
 		}
+		apiKey = resolveWorkerAPIKeyReference(apiKey)
 		route.Connection = connectionConfig{BaseURL: trimRightSlash(baseURL), APIKey: apiKey, AuthType: authType, APIKeyHeader: apiKeyHeader, Headers: map[string]string{}}
 		for key, value := range headers {
 			if text, ok := value.(string); ok {
@@ -692,6 +703,7 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
 	// 熔断降级仅在多条启用线路时生效；单线路保持旧的直连行为，
 	// 不受冷却窗口限制，并自愈残留的熔断状态。
 	if len(routes) == 1 {
@@ -710,6 +722,13 @@ func loadWorkerModelRoutes(ctx context.Context, pool *pgxpool.Pool, modelID int6
 		routes = active
 	}
 	if len(routes) == 0 {
+		var hasConfiguredRoutes bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_routes WHERE model_id=$1)`, modelID).Scan(&hasConfiguredRoutes); err != nil {
+			return nil, err
+		}
+		if hasConfiguredRoutes {
+			return nil, errNoEnabledModelRoutes
+		}
 		protocol := strings.ToLower(strings.TrimSpace(stringAny(legacyExtra["protocol"])))
 		if connection, ok := legacyExtra["connection"].(map[string]interface{}); ok {
 			protocol = strings.ToLower(strings.TrimSpace(firstNonEmpty(stringAny(connection["protocol"]), protocol)))
@@ -756,6 +775,17 @@ func decryptWorkerRouteSecret(value, secret string) (string, error) {
 		return "", err
 	}
 	return string(plain), nil
+}
+
+func resolveWorkerAPIKeyReference(value string) string {
+	apiKey := strings.TrimSpace(value)
+	if strings.HasPrefix(apiKey, "${") && strings.HasSuffix(apiKey, "}") {
+		envVar := strings.TrimSuffix(strings.TrimPrefix(apiKey, "${"), "}")
+		if envValue := strings.TrimSpace(os.Getenv(envVar)); envValue != "" {
+			return envValue
+		}
+	}
+	return apiKey
 }
 
 func weightedWorkerRouteOrder(routes []workerModelRoute) {
@@ -981,6 +1011,8 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			body, _ = json.Marshal(buildVideoImagePayload(ctx, route.RuntimeRule, endpoint, upstreamModel, p.ModelCode, prompt, p.Input))
 		} else if hasMappedMediaPayload(route.RuntimeRule) {
 			body, _ = json.Marshal(buildMappedImagePayload(ctx, p.ModelCode, upstreamModel, route.RuntimeRule, extraParams, p.Input))
+		} else if isOpenAIImagesAdapter(route.RuntimeRule) {
+			body, _ = json.Marshal(buildOpenAIImagesPayload(upstreamModel, p.ModelCode, prompt, result.GenerationCount, p.Input))
 		} else {
 			size, _ := p.Input["size"].(string)
 			if size == "" {
@@ -1008,6 +1040,13 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 			body, _ = json.Marshal(imageBody)
 		}
 	}
+	openAIReferenceImages := []string(nil)
+	if isImage && isOpenAIImagesAdapter(route.RuntimeRule) {
+		openAIReferenceImages = referenceImageSources(p.Input["reference_images"])
+		if len(openAIReferenceImages) > 0 {
+			endpoint = openAIImageEditEndpoint(route.RuntimeRule, endpoint)
+		}
+	}
 	result.Endpoint = endpoint
 	var payload map[string]interface{}
 	_ = json.Unmarshal(body, &payload)
@@ -1029,6 +1068,13 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	var err error
 	if isImage && isVideoImageAPI(endpoint, upstreamModel) {
 		result.ResultData, result.UpstreamTaskID, err = runBananaImageBatch(ctx, pool, route.Connection, endpoint, payload, route.RuntimeRule, p.TaskNo, result.GenerationCount)
+	} else if isImage && isOpenAIImagesAdapter(route.RuntimeRule) {
+		timeout := upstreamRequestTimeout(route.RuntimeRule, false)
+		if route.TimeoutSeconds > 0 {
+			timeout = time.Duration(route.TimeoutSeconds) * time.Second
+		}
+		timeout = openAIImagesRequestTimeout(timeout)
+		result.ResponseBody, result.StatusCode, err = postOpenAIImagesUpstream(ctx, route.Connection, endpoint, payload, openAIReferenceImages, timeout)
 	} else if isVideo {
 		result.ResponseBody, result.StatusCode, err = postVideoUpstream(ctx, route.Connection, endpoint, payload, p.TaskNo)
 	} else {
@@ -1048,6 +1094,123 @@ func applyOpenAIImageOptions(out, input map[string]interface{}) {
 			out[key] = value
 		}
 	}
+}
+
+func isOpenAIImagesAdapter(runtimeRule map[string]interface{}) bool {
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "openai_images")
+}
+
+func openAIImagesRequestTimeout(configured time.Duration) time.Duration {
+	// Large synchronous image bodies can arrive after the route's legacy 120s
+	// default; aborting mid-body causes the paid request to be retried.
+	if configured < 10*time.Minute {
+		return 10 * time.Minute
+	}
+	return configured
+}
+
+func openAIImageEditEndpoint(runtimeRule map[string]interface{}, generationEndpoint string) string {
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	if endpoint := strings.TrimSpace(fmt.Sprint(upstream["edit_endpoint"])); endpoint != "" && endpoint != "<nil>" {
+		return endpoint
+	}
+	trimmed := strings.TrimRight(strings.TrimSpace(generationEndpoint), "/")
+	if strings.HasSuffix(strings.ToLower(trimmed), "/generations") {
+		return trimmed[:len(trimmed)-len("generations")] + "edits"
+	}
+	return "/v1/images/edits"
+}
+
+func buildOpenAIImagesPayload(upstreamModel, modelCode, prompt string, count int, input map[string]interface{}) map[string]interface{} {
+	model := strings.TrimSpace(upstreamModel)
+	if model == "" {
+		model = modelCode
+	}
+	size := normalizeOpenAIImageSize(fmt.Sprint(input["size"]))
+	payload := map[string]interface{}{
+		"model":   model,
+		"prompt":  prompt,
+		"n":       count,
+		"size":    size,
+		"quality": normalizeOpenAIImageQuality(input["quality"]),
+	}
+	for _, key := range []string{"background", "output_format", "output_compression", "moderation", "user", "response_format"} {
+		if value, ok := input[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			payload[key] = value
+		}
+	}
+	return payload
+}
+
+func normalizeOpenAIImageQuality(value interface{}) string {
+	quality := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	switch quality {
+	case "auto", "low", "medium", "high":
+		return quality
+	default:
+		return "auto"
+	}
+}
+
+func normalizeOpenAIImageSize(value string) string {
+	size := strings.ToLower(strings.TrimSpace(value))
+	if size == "auto" {
+		return size
+	}
+	parts := strings.Split(size, "x")
+	if len(parts) != 2 {
+		return "1024x1024"
+	}
+	width, widthErr := strconv.Atoi(parts[0])
+	height, heightErr := strconv.Atoi(parts[1])
+	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 || width == height {
+		return "1024x1024"
+	}
+	if width > height {
+		return "1536x1024"
+	}
+	return "1024x1536"
+}
+
+func referenceImageSources(value interface{}) []string {
+	if source, ok := value.(string); ok {
+		if source = strings.TrimSpace(source); source != "" {
+			return []string{source}
+		}
+		return nil
+	}
+	return stringSlice(value)
+}
+
+func postOpenAIImagesUpstream(ctx context.Context, conn connectionConfig, endpoint string, payload map[string]interface{}, references []string, timeout time.Duration) ([]byte, int, error) {
+	target := joinBaseEndpoint(conn.BaseURL, endpoint)
+	if len(references) == 0 {
+		body, _ := json.Marshal(payload)
+		return doJSONRequestWithLimit(ctx, conn, "POST", target, body, timeout, 96<<20)
+	}
+	files := make([]multipartFile, 0, len(references))
+	fileField := "image"
+	if len(references) > 1 {
+		fileField = "image[]"
+	}
+	for index, source := range references {
+		data, contentType, err := loadMediaBytes(ctx, normalizeReferenceImage(ctx, source))
+		if err != nil || len(data) == 0 {
+			if err == nil {
+				err = errors.New("empty image")
+			}
+			return nil, 0, fmt.Errorf("第 %d 张参考图读取失败: %w", index+1, err)
+		}
+		if !strings.HasPrefix(contentType, "image/") {
+			contentType = http.DetectContentType(data)
+		}
+		if !strings.HasPrefix(contentType, "image/") {
+			return nil, 0, fmt.Errorf("第 %d 张参考图不是有效图片", index+1)
+		}
+		files = append(files, multipartFile{Field: fileField, Name: fmt.Sprintf("%d-%s", index+1, fileNameForMIME(contentType)), ContentType: contentType, Data: data})
+	}
+	return doMultipartFilesRequest(ctx, conn, target, payload, files, timeout, 96<<20)
 }
 
 func requiresAliyunWorkspaceEndpoint(model string) bool {
@@ -1166,13 +1329,7 @@ func parseConnection(extra map[string]interface{}, fallbackBaseURL, fallbackToke
 		} else {
 			apiKey = decrypted
 		}
-		// Support environment variable reference: ${VAR_NAME}
-		if strings.HasPrefix(apiKey, "${") && strings.HasSuffix(apiKey, "}") {
-			envVar := strings.TrimSuffix(strings.TrimPrefix(apiKey, "${"), "}")
-			if envValue := strings.TrimSpace(os.Getenv(envVar)); envValue != "" {
-				apiKey = envValue
-			}
-		}
+		apiKey = resolveWorkerAPIKeyReference(apiKey)
 		cfg.APIKey = apiKey
 	}
 	if s, ok := conn["auth_type"].(string); ok && s != "" {
@@ -2174,18 +2331,34 @@ func fileNameForMIME(contentType string) string {
 	}
 }
 
+type multipartFile struct {
+	Field       string
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
 func doMultipartRequest(ctx context.Context, conn connectionConfig, target string, fields map[string]interface{}, fileField, fileName string, fileData []byte, contentType string, timeout time.Duration) ([]byte, int, error) {
+	return doMultipartFilesRequest(ctx, conn, target, fields, []multipartFile{{Field: fileField, Name: fileName, ContentType: contentType, Data: fileData}}, timeout, 2<<20)
+}
+
+func doMultipartFilesRequest(ctx context.Context, conn connectionConfig, target string, fields map[string]interface{}, files []multipartFile, timeout time.Duration, maxResponseBytes int64) ([]byte, int, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	for k, v := range fields {
 		_ = w.WriteField(k, fmt.Sprint(v))
 	}
-	fw, err := w.CreateFormFile(fileField, fileName)
-	if err != nil {
-		return nil, 0, err
-	}
-	if _, err := fw.Write(fileData); err != nil {
-		return nil, 0, err
+	for _, file := range files {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, file.Field, file.Name))
+		header.Set("Content-Type", file.ContentType)
+		fw, err := w.CreatePart(header)
+		if err != nil {
+			return nil, 0, err
+		}
+		if _, err := fw.Write(file.Data); err != nil {
+			return nil, 0, err
+		}
 	}
 	_ = w.Close()
 
@@ -2201,7 +2374,7 @@ func doMultipartRequest(ctx context.Context, conn connectionConfig, target strin
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	return respBody, resp.StatusCode, err
 }
 
@@ -2562,6 +2735,18 @@ func upstreamContentFailure(raw map[string]interface{}) string {
 func humanizeUpstreamFailure(msg string) string {
 	msg = strings.TrimSpace(msg)
 	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "tls handshake timeout") {
+		return "连接上游时 TLS 握手超时，请检查服务器到上游的网络或代理"
+	}
+	if strings.Contains(lower, "client.timeout") || strings.Contains(lower, "context deadline exceeded") {
+		return "等待上游响应超时；请求可能仍在生成，请检查上游网关超时设置"
+	}
+	if strings.Contains(lower, "504 gateway timeout") || strings.Contains(lower, "error code: 524") {
+		return "上游网关超时（HTTP 504/524），不是模型参数错误"
+	}
+	if strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<html") {
+		return "上游网关返回了 HTML 错误页，请检查该线路的网关日志"
+	}
 	if strings.Contains(lower, "unsafe") ||
 		strings.Contains(lower, "blocked by moderation") ||
 		strings.Contains(lower, "content moderation") ||

@@ -147,6 +147,15 @@ func normalizeModelRouteInput(in *ModelRouteInput) error {
 	return nil
 }
 
+func defaultModelRouteTimeout(requestMode string) int {
+	switch strings.ToLower(strings.TrimSpace(requestMode)) {
+	case "images":
+		return 600
+	default:
+		return 120
+	}
+}
+
 func validateRouteCostRule(rule map[string]interface{}) error {
 	if len(rule) == 0 {
 		return nil
@@ -450,7 +459,7 @@ func (s *ModelService) EnsureDefaultModelRoute(ctx context.Context, modelID int6
 		RouteName: routeName + " · 主线路", Provider: stringValue(connection["provider"]), Protocol: stringValue(connection["protocol"]),
 		UpstreamModel: modelInput.NewAPIModel, Endpoint: modelInput.NewAPIEndpoint, BaseURL: baseURL,
 		APIKey: stringValue(connection["api_key"]), AuthType: stringValue(connection["auth_type"]), APIKeyHeader: stringValue(connection["api_key_header"]),
-		Headers: headers, ExtraParams: map[string]interface{}{}, RuntimeRule: map[string]interface{}{}, CostRule: defaultRouteCostRule(modelInput.PriceRule), Priority: 100, Weight: 100, TimeoutSeconds: 120, IsEnabled: modelInput.IsEnabled,
+		Headers: headers, ExtraParams: map[string]interface{}{}, RuntimeRule: map[string]interface{}{}, CostRule: defaultRouteCostRule(modelInput.PriceRule), Priority: 100, Weight: 100, TimeoutSeconds: defaultModelRouteTimeout(modelInput.RequestMode), IsEnabled: modelInput.IsEnabled,
 	})
 	return err
 }
@@ -565,9 +574,17 @@ func (s *ModelService) syncModelFromPrimaryRoute(ctx context.Context, modelID in
 	if protocol == "openai" {
 		protocol = "openai_compatible"
 	}
+	storedAPIKey := primary.APIKey
+	if !isEnvSecretRef(storedAPIKey) {
+		var err error
+		storedAPIKey, err = util.EncryptSecret(storedAPIKey, s.routeCipherKey)
+		if err != nil {
+			return errors.New("模型密钥加密失败")
+		}
+	}
 	connectionPatch, _ := json.Marshal(map[string]interface{}{
 		"provider": primary.Provider, "protocol": protocol, "base_url": primary.BaseURL,
-		"api_key": primary.APIKey, "auth_type": primary.AuthType, "api_key_header": primary.APIKeyHeader,
+		"api_key": storedAPIKey, "auth_type": primary.AuthType, "api_key_header": primary.APIKeyHeader,
 	})
 	_, err := s.db.Exec(ctx, `UPDATE models SET new_api_model=$1,new_api_endpoint=$2,
 		new_api_extra_params=jsonb_set(COALESCE(new_api_extra_params,'{}'::jsonb),'{connection}',COALESCE(new_api_extra_params->'connection','{}'::jsonb)||$3::jsonb,true),updated_at=now()
