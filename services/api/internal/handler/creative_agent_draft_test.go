@@ -61,3 +61,17 @@ func TestAgentDraftConfirmedRequestUsesServerSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCreativeAgentLiteralAudioContentExcludesExecutionNotes(t *testing.T) {
+	slots := map[string]interface{}{
+		"script": "春风吹过山谷。", "style": "温柔", "target_duration_sec": 8, "aspect_ratio": "9:16",
+	}
+	for _, mediaType := range []string{"speech", "music"} {
+		if got := creativeAgentSlotPrompt(slots, mediaType); got != "春风吹过山谷。" {
+			t.Fatalf("%s content contains execution notes: %q", mediaType, got)
+		}
+	}
+	if got := creativeAgentSlotPrompt(slots, "video"); !strings.Contains(got, "画幅：9:16") {
+		t.Fatalf("video prompt lost useful constraints: %q", got)
+	}
+}

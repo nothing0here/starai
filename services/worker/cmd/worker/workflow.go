@@ -671,7 +671,27 @@ func processSimpleAgentWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL
 	start := time.Now()
 	var mediaTasks []map[string]interface{}
 	var errMsg string
-	if stringAny(generationInputs["creative_scene"]) == "detail_image" && stringAny(runtimeCfg["generation_type"]) != "video" {
+	if stringAny(generationInputs["creative_scene"]) == "content_image_post" && stringAny(runtimeCfg["generation_type"]) != "video" {
+		var contentPost map[string]interface{}
+		contentTask, exists := mapAny(analysis["content_task"])
+		if !exists {
+			contentTask = map[string]interface{}{
+				"task_id": "content_post", "objective": firstUserPrompt(inputs),
+				"channel":  firstNonEmpty(stringAny(inputs["platform"]), "通用社媒"),
+				"audience": "", "proposition": firstNonEmpty(stringAny(analysis["summary"]), finalPrompt),
+				"materials": []interface{}{}, "deliverables": []interface{}{"标题", "正文", "标签", "配图卡片"},
+				"constraints": []interface{}{"只使用已提供或可核验的信息"}, "style": stringAny(analysis["style"]),
+			}
+		}
+		outputs["content_task"] = contentTask
+		contentAnalysis := analysis
+		if previous, exists := mapAny(outputs["content_post"]); exists {
+			contentAnalysis = copyMap(analysis)
+			contentAnalysis["content_post"] = previous
+		}
+		mediaTasks, contentPost, errMsg = runAgentContentImagePostTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, runtimeCfg, generationInputs, contentAnalysis, finalPrompt)
+		outputs["content_post"] = contentPost
+	} else if stringAny(generationInputs["creative_scene"]) == "detail_image" && stringAny(runtimeCfg["generation_type"]) != "video" {
 		var detailPage map[string]interface{}
 		mediaTasks, detailPage, errMsg = runAgentDetailPageTasks(ctx, pool, baseURL, token, p.ProjectID, p.UserID, publicID, runtimeCfg, generationInputs, analysis, finalPrompt)
 		outputs["detail_page"] = detailPage
@@ -683,6 +703,9 @@ func processSimpleAgentWorkflow(ctx context.Context, pool *pgxpool.Pool, baseURL
 	out := map[string]interface{}{"media_tasks": mediaTasks, "cost": generationCost}
 	outputs["media_tasks"] = mediaTasks
 	outputs["current_step"] = "result"
+	if errMsg != "" {
+		outputs["current_step"] = "generate"
+	}
 	saveWorkflowOutputs(ctx, pool, p.ProjectID, outputs)
 	if errMsg != "" {
 		pool.Exec(ctx, `UPDATE workflow_node_runs SET status='failed', output=$1, error=$2, duration_ms=$3 WHERE id=$4`, mustJSON(out), errMsg, duration, nodeRunID)
@@ -2092,6 +2115,7 @@ func setLLMRequestContent(body map[string]interface{}, requestMode, system, user
 
 func buildAgentAnalysisSystemPrompt(category, presetCode string, candidateCount int, creativeScene string) string {
 	target := "图片"
+	engine := "电商AI创作智能体"
 	extra := "每个候选方案必须适合图片生成模型，包含主体、材质、构图、光线、背景、商品卖点、商业质感、平台电商主图规范；prompt 要能直接传给图片生成接口。"
 	if category == "video" {
 		target = "视频"
@@ -2109,7 +2133,16 @@ func buildAgentAnalysisSystemPrompt(category, presetCode string, candidateCount 
 每个模块结构：{"id":"detail_01","type":"hero|benefit|material|feature|usage|specification|closing","title":"模块标题","objective":"本模块目的","copy_title":"后期排版标题","copy_points":["已确认卖点"],"image_prompt":"只描述商品、场景、构图、材质、光影和文字留白区，不要求图片模型绘制文字"}。
 必须保持商品外观、颜色、包装、Logo位置和比例跨模块一致；不得编造用户未提供的成分、尺寸、容量、认证或功效。规格模块没有可靠参数时只提供版式和留白，不得杜撰数据。`
 	}
-	return fmt.Sprintf(`你是电商AI创作智能体的方案分析引擎，当前生成类型是%s。
+	contentPlan := ""
+	if creativeScene == "content_image_post" && category != "video" {
+		engine = "内容图文创作智能体"
+		contentPlan = `
+这是内容图文任务。除 candidates 外必须额外返回 content_task 和 content_post，正文与图片卡片组成一套可以直接发布、也可以进入无限画布继续编辑的内容包。
+content_task 结构：{"task_id":"content_post","objective":"用户目标","channel":"目标平台或通用社媒","audience":"目标受众","proposition":"核心表达","materials":["只列用户已提供的资料或参考素材"],"deliverables":["标题","正文","标签","配图卡片"],"constraints":["事实边界与明确限制"],"style":"统一内容与视觉风格"}。
+content_post 结构：{"platform":"目标平台或通用社媒","title":"不超过30字的标题","hook":"开头钩子","body":"结构完整、事实边界清楚的正文","cta":"自然的行动引导","hashtags":["#标签"],"cards":[{"id":"card_01","role":"cover|point|example|cta","headline":"卡片标题","copy":"配套短文案","image_prompt":"只描述画面主体、场景、构图、光线、色彩和文字留白，不要求图片模型绘制文字"}]}。
+cards 数量必须严格等于当前生成参数中的数量（未提供时4张，范围2–6），第一张为 cover，最后一张可为 cta，中间卡片逐点推进；所有卡片视觉风格、主体身份、色彩和版式保持一致。不得把标题、正文、标签直接画进图片，避免错字；不得杜撰新闻、数据、产品功效或来源。`
+	}
+	return fmt.Sprintf(`你是%s的方案分析引擎，当前生成类型是%s。
 只输出严格JSON，不要Markdown，不要标题，不要解释，不要出现“某模型的回答”。
 禁止输出与创作无关的运维、CPU、IO、数据库、系统瓶颈、监控等泛化建议。
 当前创作场景：%s
@@ -2132,7 +2165,8 @@ JSON结构：
   "detail_sections": []
 }
 %s
-%s`, target, scene, candidateCount, extra, detailPlan)
+%s
+%s`, engine, target, scene, candidateCount, extra, detailPlan, contentPlan)
 }
 
 func agentPresetInstruction(code, category string) string {
@@ -2157,6 +2191,8 @@ func agentCreativeSceneLabel(code string) string {
 	switch code {
 	case "detail_image":
 		return "商品详情图"
+	case "content_image_post":
+		return "内容图文"
 	case "scene_image":
 		return "场景图"
 	case "marketing_poster":
@@ -2177,6 +2213,8 @@ func agentCreativeSceneInstruction(code string) string {
 	switch code {
 	case "detail_image":
 		return "商品详情图 / Product detail image. 必须突出商品结构、材质细节、功能卖点、规格层次和详情页模块感；不要生成普通商品主图、单一白底主图或营销海报。"
+	case "content_image_post":
+		return "内容图文 / Content image post. 先形成可发布的标题、正文、标签和卡片结构，再为每张卡片设计视觉底图；图片之间必须主题一致、层次递进并保留文字排版空间；不要让图片模型直接绘制正文。"
 	case "scene_image":
 		return "电商场景图 / Lifestyle scene image. 必须保留商品主体识别度，并把商品放入真实、有购买欲的使用场景；强化环境、生活方式、光影和商业质感；不要生成普通白底主图。"
 	case "marketing_poster":
@@ -3274,6 +3312,135 @@ func workerURLFieldCount(value interface{}) int {
 		}
 	}
 	return 0
+}
+
+func runAgentContentImagePostTasks(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, projectID, userID int64, publicID string, runtimeCfg, inputs, analysis map[string]interface{}, basePrompt string) ([]map[string]interface{}, map[string]interface{}, string) {
+	modelCode := firstNonEmpty(stringAny(inputs["image_model_code"]), stringAny(runtimeCfg["generation_model_code"]))
+	if modelCode == "" {
+		return nil, map[string]interface{}{"status": "failed"}, "未配置图片生成模型"
+	}
+	var modelID int64
+	var requestMode string
+	var defaultsRaw, runtimeRaw []byte
+	if err := pool.QueryRow(ctx, `SELECT id, request_mode, default_params, runtime_rule FROM models WHERE code=$1 AND is_enabled=true`, modelCode).Scan(&modelID, &requestMode, &defaultsRaw, &runtimeRaw); err != nil {
+		return nil, map[string]interface{}{"status": "failed"}, "图片生成模型不存在：" + modelCode
+	}
+	if requestMode != "images" {
+		return nil, map[string]interface{}{"status": "failed"}, "内容图文必须配置图片生成模型"
+	}
+	defaults, runtimeRule := map[string]interface{}{}, map[string]interface{}{}
+	_ = json.Unmarshal(defaultsRaw, &defaults)
+	_ = json.Unmarshal(runtimeRaw, &runtimeRule)
+	post, _ := mapAny(analysis["content_post"])
+	if post == nil {
+		post = map[string]interface{}{}
+	}
+	cards := agentContentImageCards(post, inputs, basePrompt)
+	results := make([]map[string]interface{}, 0, len(cards))
+	completed := make([]map[string]interface{}, 0, len(cards))
+	imageURLs := make([]string, 0, len(cards))
+	firstErr := ""
+	for index, card := range cards {
+		if stringAny(card["status"]) == "succeeded" && stringAny(card["image_url"]) != "" {
+			completed = append(completed, copyMap(card))
+			imageURLs = append(imageURLs, stringAny(card["image_url"]))
+			continue
+		}
+		prompt := fmt.Sprintf("CONTENT CARD %d/%d\n卡片角色：%s\n卡片标题：%s\n配套文案：%s\n\n%s\n\n整组一致性要求：保持主体身份、视觉风格、品牌色、构图体系与光线统一；只生成高质量视觉底图并为后期标题和正文排版保留干净空间；不要在图片中绘制文字、标签、水印、Logo或未经用户确认的数据。\n内容主题：%s", index+1, len(cards), stringAny(card["role"]), stringAny(card["headline"]), stringAny(card["copy"]), stringAny(card["image_prompt"]), basePrompt)
+		prompt = agentPromptWithScene(prompt, inputs)
+		taskNo := newWorkflowTaskNo(index)
+		taskInput := agentMediaTaskInput(inputs, prompt, publicID)
+		applyAgentModelDefaults(taskInput, defaults, runtimeRule, "image")
+		taskInput["count"], taskInput["n"] = 1, 1
+		if references := referenceImageURLs(inputs); len(references) > 0 {
+			taskInput["reference_images"] = references
+		}
+		estimated := estimateModelCostByIDWorker(ctx, pool, modelID, taskInput, 0, 0, 0, 0)
+		inputJSON, _ := json.Marshal(taskInput)
+		_, err := pool.Exec(ctx, `INSERT INTO tasks (task_no, user_id, model_id, type, status, input, estimated_cost) VALUES ($1,$2,$3,'image','pending',$4,$5)`, taskNo, userID, modelID, inputJSON, estimated)
+		if err != nil {
+			if firstErr == "" {
+				firstErr = err.Error()
+			}
+			failed := map[string]interface{}{"task_no": taskNo, "status": "failed", "progress": 100, "error_message": err.Error(), "content_card": card}
+			failedCard := copyMap(card)
+			failedCard["task_no"], failedCard["status"] = taskNo, "failed"
+			completed = append(completed, failedCard)
+			results = append(results, failed)
+			continue
+		}
+		appendWorkflowMediaTask(ctx, pool, projectID, map[string]interface{}{"task_no": taskNo, "type": "image", "status": "pending", "progress": 5, "output": map[string]interface{}{}, "content_card": card})
+		_ = processImageTask(ctx, pool, baseURL, token, ImageTaskPayload{TaskNo: taskNo, UserID: userID, ModelID: modelID, ModelCode: modelCode, Input: taskInput})
+		item := loadAgentMediaTask(ctx, pool, taskNo)
+		item["type"], item["content_card"] = "image", card
+		appendWorkflowMediaTask(ctx, pool, projectID, item)
+		cardResult := copyMap(card)
+		cardResult["task_no"], cardResult["status"] = taskNo, stringAny(item["status"])
+		if stringAny(item["status"]) == "succeeded" {
+			out, _ := item["output"].(map[string]interface{})
+			imageURL := firstNonEmpty(stringAny(out["image_url"]), firstImageResultURL(out))
+			cardResult["image_url"] = imageURL
+			if imageURL != "" {
+				imageURLs = append(imageURLs, imageURL)
+			}
+		} else if firstErr == "" {
+			firstErr = firstNonEmpty(stringAny(item["error_message"]), "内容卡片生成失败")
+		}
+		completed = append(completed, cardResult)
+		results = append(results, item)
+	}
+	post = copyMap(post)
+	post["cards"], post["image_urls"] = completed, imageURLs
+	post["card_count"], post["completed_count"] = len(cards), len(imageURLs)
+	if len(imageURLs) == 0 {
+		post["status"] = "failed"
+		return results, post, firstNonEmpty(firstErr, "内容图文配图全部生成失败")
+	}
+	if len(imageURLs) < len(cards) {
+		post["status"] = "partial"
+		return results, post, firstNonEmpty(firstErr, "部分内容配图生成失败，可从失败卡片继续")
+	}
+	post["status"] = "completed"
+	return results, post, ""
+}
+
+func agentContentImageCards(post, inputs map[string]interface{}, basePrompt string) []map[string]interface{} {
+	wanted := intAny(inputs["image_count"])
+	if wanted < 2 || wanted > 6 {
+		wanted = 4
+	}
+	cards := []map[string]interface{}{}
+	if raw, ok := post["cards"].([]interface{}); ok {
+		for index, item := range raw {
+			card, _ := item.(map[string]interface{})
+			if card == nil || strings.TrimSpace(stringAny(card["image_prompt"])) == "" {
+				continue
+			}
+			next := copyMap(card)
+			if stringAny(next["id"]) == "" {
+				next["id"] = fmt.Sprintf("card_%02d", index+1)
+			}
+			cards = append(cards, next)
+			if len(cards) == wanted {
+				break
+			}
+		}
+	}
+	roles := []string{"cover", "point", "point", "example", "point", "cta"}
+	for len(cards) < wanted {
+		index := len(cards)
+		role := roles[index]
+		if index == wanted-1 {
+			role = "cta"
+		}
+		cards = append(cards, map[string]interface{}{
+			"id": fmt.Sprintf("card_%02d", index+1), "role": role,
+			"headline":     firstNonEmpty(stringAny(post["title"]), fmt.Sprintf("内容要点 %d", index+1)),
+			"copy":         firstNonEmpty(stringAny(post["hook"]), stringAny(post["cta"]), stringAny(post["body"])),
+			"image_prompt": fmt.Sprintf("围绕内容主题制作第%d张社媒配图，层次清晰，视觉重点明确，统一配色与版式，并预留安全文字排版区域。主题：%s", index+1, basePrompt),
+		})
+	}
+	return cards
 }
 
 func runAgentDetailPageTasks(ctx context.Context, pool *pgxpool.Pool, baseURL, token string, projectID, userID int64, publicID string, runtimeCfg, inputs, analysis map[string]interface{}, basePrompt string) ([]map[string]interface{}, map[string]interface{}, string) {

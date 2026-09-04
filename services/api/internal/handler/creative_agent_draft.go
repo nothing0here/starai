@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -88,7 +89,11 @@ func mergeCreativeAgentDraft(d *service.AgentDraft, plan map[string]interface{},
 	}
 	intent := stringAny(plan["intent"])
 	if intent == "workflow" {
-		intent = "video"
+		if stringAny(plan["workflow_code"]) == "content_image_post" {
+			intent = "image"
+		} else {
+			intent = "video"
+		}
 	}
 	if d.Slots["media_type"] == nil && (intent == "video" || intent == "image" || intent == "speech" || intent == "music") {
 		d.SetSlot("media_type", intent, "inferred", "")
@@ -133,7 +138,7 @@ func mergeCreativeAgentDraft(d *service.AgentDraft, plan map[string]interface{},
 	return nil
 }
 
-func creativeAgentSlotPrompt(slots map[string]interface{}) string {
+func creativeAgentSlotPrompt(slots map[string]interface{}, mediaTypes ...string) string {
 	base := stringAny(slots["generation_prompt"])
 	if base == "" {
 		base = stringAny(slots["script"])
@@ -143,6 +148,11 @@ func creativeAgentSlotPrompt(slots map[string]interface{}) string {
 	}
 	if base == "" {
 		return ""
+	}
+	// Speech and song prompts are literal content. Never make the model read or
+	// sing execution notes such as aspect ratio, style, or duration.
+	if len(mediaTypes) > 0 && (mediaTypes[0] == "speech" || mediaTypes[0] == "music") {
+		return base
 	}
 	constraints := []string{}
 	for _, field := range []struct{ key, label string }{{"target_duration_sec", "成品总秒数"}, {"character", "角色"}, {"style", "风格"}, {"aspect_ratio", "画幅"}, {"narration_perspective", "叙事视角"}, {"ending", "结尾要求"}} {
@@ -161,7 +171,17 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 	if d == nil {
 		return nil, fmt.Errorf("会话任务状态未初始化")
 	}
+	workflowCode := strings.TrimSpace(stringAny(plan["workflow_code"]))
+	reuseWorkflow := stringAny(plan["action"]) == "update" || agentIncrementalRequest(text) || strings.TrimSpace(text) == ""
+	if workflowCode == "" && reuseWorkflow {
+		workflowCode = strings.TrimSpace(stringAny(d.Plan["workflow_code"]))
+		if workflowCode != "" {
+			plan["workflow_code"] = workflowCode
+		}
+	}
+	plan = normalizeCreativeAgentWorkflowPlan(plan, text)
 	plan = guardCreativeAgentIntent(plan, text)
+	workflowCode = strings.TrimSpace(stringAny(plan["workflow_code"]))
 	// Validate a copy so a malformed delta cannot partially erase the old draft.
 	copyRaw, _ := json.Marshal(d)
 	candidate := &service.AgentDraft{}
@@ -201,17 +221,30 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 	} else {
 		intent := stringAny(plan["intent"])
 		if !creativeAgentTextOnly(text) && agentIncrementalRequest(text) && stringAny(d.Slots["media_type"]) != "" {
-			intent = stringAny(d.Slots["media_type"])
+			if workflowCode != "" {
+				intent = "workflow"
+			} else {
+				intent = stringAny(d.Slots["media_type"])
+			}
 		}
 		if intent == "workflow" || intent == "video" || intent == "image" || intent == "speech" || intent == "music" {
 			mediaType := intent
 			if mediaType == "workflow" {
-				mediaType = "video"
+				if workflowCode == "content_image_post" {
+					mediaType = "image"
+				} else {
+					mediaType = "video"
+				}
 			}
 			if stringAny(d.Slots["media_type"]) != mediaType {
 				d.SetSlot("media_type", mediaType, "inferred", "")
 			}
-			prompt := creativeAgentSlotPrompt(d.Slots)
+			if mediaType == "music" && d.Slots["is_instrumental"] == true && stringAny(d.Slots["music_prompt"]) == "" {
+				if description := stringAny(d.Slots["prompt"]); description != "" {
+					d.SetSlot("music_prompt", description, "inferred", "")
+				}
+			}
+			prompt := creativeAgentSlotPrompt(d.Slots, mediaType)
 			if stringAny(d.Slots["artifact_issue"]) != "" {
 				d.Missing = append(d.Missing, "generation_prompt")
 			}
@@ -225,7 +258,7 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 				d.Missing = append(d.Missing, "target_duration_sec")
 			}
 			params := map[string]interface{}{"max_retry": policy.MaxRetry}
-			for _, key := range []string{"target_duration_sec", "aspect_ratio", "quality", "audio_strategy", "narration_perspective", "is_instrumental", "music_prompt"} {
+			for _, key := range []string{"target_duration_sec", "image_count", "platform", "aspect_ratio", "quality", "audio_strategy", "narration_perspective", "is_instrumental", "music_prompt"} {
 				if value, ok := d.Slots[key]; ok {
 					params[key] = value
 				}
@@ -246,7 +279,21 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 				modelSource = "configuration"
 			}
 			d.SetSlot("model_code", selected, modelSource, "")
+			if workflowCode == "content_image_post" {
+				count := creativeAgentPositiveInt(params["image_count"])
+				if requested := creativeAgentRequestedImageCount(text); requested > 0 {
+					count = requested
+					d.SetSlot("image_count", count, "user", text)
+				}
+				if count < 2 || count > 6 {
+					count = 4
+				}
+				params["image_count"], params["count"], params["creative_scene"] = count, count, "content_image_post"
+			}
 			plan = map[string]interface{}{"intent": intent, "prompt": prompt, "params": params, "model_code": selected, "needs_confirm": true}
+			if intent == "workflow" {
+				plan["workflow_code"] = workflowCode
+			}
 			if mediaType == "video" && creativeAgentPositiveInt(d.Slots["target_duration_sec"]) > policy.MaxDuration {
 				d.Missing = append(d.Missing, "target_duration_sec")
 				plan["intent"], plan["reply"], plan["needs_confirm"] = "clarify", fmt.Sprintf("当前业务允许的成品最长为%d秒，请调整总时长；原文案和素材仍保留。", policy.MaxDuration), false
@@ -276,6 +323,30 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 						}
 						d.Missing = append(d.Missing, field)
 					}
+				} else if mediaType == "image" {
+					mapped, field, issue := creativeAgentImageModelParams(model, plan["params"].(map[string]interface{}))
+					if issue != "" {
+						d.Missing = append(d.Missing, field)
+						plan["intent"], plan["reply"], plan["needs_confirm"] = "clarify", issue, false
+					} else {
+						plan["params"], plan["reply"] = mapped, "方案已更新，请核对图片内容、画幅与清晰度后确认执行。"
+					}
+				} else if mediaType == "speech" {
+					if gender := stringAny(d.Slots["voice_gender"]); gender != "" {
+						key, voice, ok := creativeAgentVoiceForGender(model, gender)
+						if !ok {
+							d.Missing = append(d.Missing, "voice_gender")
+							plan["intent"], plan["reply"], plan["needs_confirm"] = "clarify", "所选语音模型没有可确认的"+map[string]string{"male": "男声", "female": "女声"}[gender]+"音色，请更换模型或调整声音要求。", false
+						} else {
+							plan["params"].(map[string]interface{})[key] = voice
+							plan["reply"] = "方案已更新，将使用匹配的" + map[string]string{"male": "男声", "female": "女声"}[gender] + "音色；请核对朗读正文后确认执行。"
+						}
+					} else {
+						plan["reply"] = "方案已更新，请核对朗读正文与模型后确认执行。"
+					}
+				} else if mediaType == "music" && creativeAgentMusicNeedsStyle(model) && stringAny(d.Slots["music_prompt"]) == "" {
+					d.Missing = append(d.Missing, "music_prompt")
+					plan["intent"], plan["reply"], plan["needs_confirm"] = "clarify", "歌词或纯音乐需求已保留，请再描述曲风、情绪或使用场景。", false
 				} else {
 					plan["reply"] = "方案已更新，请核对完整内容与模型后确认执行。"
 				}
@@ -292,7 +363,11 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 						plan[key] = d.Slots[key]
 					}
 				}
-				if stringAny(plan["intent"]) == "workflow" {
+				if stringAny(plan["intent"]) == "workflow" && workflowCode == "content_image_post" {
+					p := plan["params"].(map[string]interface{})
+					p["image_model_code"] = selected
+					p["creative_guidance"] = policy.CreationGuidance
+				} else if stringAny(plan["intent"]) == "workflow" {
 					p := plan["params"].(map[string]interface{})
 					p["image_model_code"], p["narration_model_code"] = stringAny(configured["image_model_code"]), stringAny(configured["speech_model_code"])
 					p["dialogue_model_codes"] = []string{stringAny(configured["analysis_model_code"])}
@@ -320,6 +395,21 @@ func (h *Handler) finalizeCreativeAgentDraft(ctx context.Context, userID int64, 
 		return nil, err
 	}
 	return plan, nil
+}
+
+func creativeAgentRequestedImageCount(text string) int {
+	match := regexp.MustCompile(`([2-6二三四五六])\s*(?:张|幅)(?:配图|图片|图)?|([2-6二三四五六])\s*个(?:卡片|图文卡)`).FindStringSubmatch(text)
+	if len(match) != 3 {
+		return 0
+	}
+	raw := match[1]
+	if raw == "" {
+		raw = match[2]
+	}
+	if value, err := strconv.Atoi(raw); err == nil {
+		return value
+	}
+	return map[string]int{"二": 2, "三": 3, "四": 4, "五": 5, "六": 6}[raw]
 }
 
 // Recalculate from persisted slots, without invoking an LLM or creating a task.

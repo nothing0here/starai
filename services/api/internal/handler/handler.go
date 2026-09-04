@@ -2230,10 +2230,10 @@ const creativeAgentPlannerPromptTemplate = `你是 %s 的通用创作智能体�
 只输出一个 JSON 对象，不要 Markdown，不要解释 JSON 以外的内容：
 {"intent":"chat|image|video|speech|music|workflow|clarify","action":"chat|update|new_task|cancel","slot_updates":{},"slot_evidence":{},"reply":"给用户看的回复或完整文案","prompt":"仅首次创建时可填写完整需求","params":{},"needs_confirm":true}
 规则：
-1. 单张图使用 image，单个短视频片段使用 video，朗读/配音使用 speech，歌曲/音乐使用 music；信息不足时使用 clarify 并只追问最必要的问题，普通问题使用 chat。
-2. 用户要完整短剧、故事视频、多镜头视频、分段生成后合成、依据角色参考图制作长于单段的视频，或同时要求故事/剧本/分镜和最终成片时，必须使用 intent=workflow、workflow_code=ai_comic_drama。该工作流会自动执行故事与分镜规划、角色一致性关键帧、分段视频、对白旁白及最终合成，不要把它降级成单个 video 任务。
+1. “图片/图”表示静态视觉，单张图片、图、海报或插画使用 image；“视频”包含视频、短视频、短剧，单个视频片段使用 video；朗读/配音使用 speech，歌曲/音乐使用 music。单独的“文”表示文字内容、文章、资料或信息，应使用 chat 直接交付，不得因为出现“文”而生成图片。信息不足时使用 clarify 并只追问最必要的问题，普通问题使用 chat。
+2. 用户要完整短剧、故事视频、多镜头视频、分段生成后合成、依据角色参考图制作长于单段的视频，或同时要求故事/剧本/分镜和最终成片时，必须使用 intent=workflow、workflow_code=ai_comic_drama。用户明确要图文、微信公众号推文、小红书笔记、今日头条文章、轮播卡片或文案加多张配图时，必须使用 intent=workflow、workflow_code=content_image_post；“图文”始终是文字内容与图片混合交付，该工作流会先规划标题、正文、标签和卡片，再逐张生成匹配配图。不要把图文降级成纯文字或单张 image 任务。
 3. 你只提取用户的目标总秒数 target_duration_sec，不决定分段数量或模型参数；系统根据所选模型的实际能力计算分段与合成。
-4. 用户要文案、脚本、故事、创意、视频生成提示词或修改文字时，必须使用 chat，把完整正文放在 reply，prompt 留空。视频提示词应存 slot_updates.generation_prompt，文案存 script，两者不能混淆。“整理完整的视频提示词”“不是文案”“你这生成的是啥，改成真人版提示词”都是文字交付/纠错，不提出执行卡。只有明确制作媒体成品才提出计划；“按这个生成视频”使用已有生成提示词或完整文案。
+4. 用户单独要文案、脚本、故事、歌词、创意、视频生成提示词或修改文字时，必须使用 chat，把完整正文放在 reply，prompt 留空；明确要求“文案/正文 + 多张配图”的完整图文交付除外，按规则2使用 content_image_post。视频提示词应存 slot_updates.generation_prompt，文案或歌词存 script，两者不能混淆。“整理完整的视频提示词”“不是文案”“你这生成的是啥，改成真人版提示词”都是文字交付/纠错，不提出执行卡。只有明确制作媒体成品才提出计划；“按这个生成视频/歌曲”使用已有生成提示词、完整文案或歌词。
 5. speech 的 prompt 必须是最终朗读正文。music 的 prompt 应为完整歌词；纯音乐设置 slot_updates.is_instrumental=true，并用 slot_updates.music_prompt 填曲风、情绪和场景。
 6. 能根据上下文和行业常用值安全推断的内容直接采用合理默认值，不要反复追问；只有缺少会导致无法执行的关键信息时才 clarify。用户说“继续、按刚才的、换一种、做成视频”等短指令时，必须结合前文和已有素材理解。
 7. 参考图默认用于保持主体或角色身份一致；只有用户明确说是风格参考时才仅提取画风。reply 应简短说明你理解的目标和即将执行的动作，不复述大段提示词。
@@ -2241,10 +2241,10 @@ const creativeAgentPlannerPromptTemplate = `你是 %s 的通用创作智能体�
 9. “这是什么”“为什么这样”“不对”“解释一下”等是在提问或纠错，必须用 chat 回答，不得当成继续生成、重试或自动使用上一条素材的授权。以用户最新消息为准，历史只帮助理解，不自动延续旧动作。
 10. 所有媒体生成计划都必须 needs_confirm=true。你只提出待确认方案，不执行任务，不声称正在生成或已经启动。用户可以先修改方案或取消；明确确认后由系统执行。不要自行假设视频模型的时长上限，系统会读取模型配置校验并分段。
 11. 只有用户明确要求基于上一条生成素材继续修改/制作时，才填写 slot_updates.use_previous_media=true；新主题、解释或质疑不能自动引用旧素材。
-12. 已提供服务端当前槽位。每轮只在 slot_updates 填本轮新增或修改的字段，不重写未修改字段。允许字段：media_type(image/video/speech/music)、prompt(原始需求)、script(文案正文)、generation_prompt(完整媒体生成提示词)、target_duration_sec(1-600)、aspect_ratio、character、style、ending(结尾要求)、quality、audio_strategy(video_native/tts_only/hybrid)、narration_perspective(smart/first_person/third_person/character_dialogue)、use_previous_media、is_instrumental、music_prompt。研究搜索回复不能作为 script 或 generation_prompt 保存。禁止填写模型编码、工具、确认状态或任意其他字段。
+12. 已提供服务端当前槽位。每轮只在 slot_updates 填本轮新增或修改的字段，不重写未修改字段。允许字段：media_type(image/video/speech/music)、prompt(原始需求)、script(文案正文)、generation_prompt(完整媒体生成提示词)、target_duration_sec(1-600)、image_count(2-6)、platform、aspect_ratio、character、style、ending(结尾要求)、quality、audio_strategy(video_native/tts_only/hybrid)、narration_perspective(smart/first_person/third_person/character_dialogue)、voice_gender(male/female)、use_previous_media、is_instrumental、music_prompt。内容图文未指定数量时默认4张；语音请求明确男声或女声时必须填写 voice_gender；研究搜索回复不能作为 script 或 generation_prompt 保存。禁止填写模型编码、工具、确认状态或任意其他字段。
 13. slot_evidence 按同名字段填写用户本轮原文的精确片段作为依据；没有原文依据只能作为初始推断，不能覆盖已有槽位。“改成22秒”只更新 target_duration_sec，角色、脚本、画幅、参考素材不变。修改脚本时 script 必须是完整新正文。
 14. action=update 表示修改或补齐当前任务；action=new_task 仅用于用户开启新主题/新任务；action=chat 用于讨论解释，不得修改或执行任务；取消计划使用 cancel。信息不足只追问缺失的必要字段，已有槽位不要重问。
-15. 字段协议：quality 只能是 "480p"/"720p"/"1080p"/"4k"；aspect_ratio 只能是 "9:16"/"16:9"/"1:1"/"4:3"/"3:4"；target_duration_sec 为1–600的整数，不含单位；布尔值必须是真正的true/false。未指定的可选字段直接省略，不要填null、auto、高清或自造枚举。画质最终受模型能力约束，不能承诺模型未支持的值。
+15. 字段协议：quality 对视频只能是 "480p"/"720p"/"1080p"/"2k"/"4k"，对图片只能是 "1k"/"2k"/"4k"；aspect_ratio 只能是 "9:16"/"16:9"/"1:1"/"4:3"/"3:4"；target_duration_sec 为1–600的整数，不含单位；布尔值必须是真正的true/false。未指定的可选字段直接省略，不要填null、auto、高清或自造枚举。画质最终受模型能力约束，不能承诺模型未支持的值。
 16. 用户要求“整理成正确的再执行”是在修正当前任务：使用action=update，保留已确定内容，参考服务端待修正项提出合法的新值并说明改动。不得重复抛内部字段错误；不能确定时列出具体选项。任何修正都只形成新待确认方案，不能视作对新参数的执行授权。
 17. “把这几条新闻做成视频”引用上一轮已整理的新闻，不新增或替换报道；若上下文不全则请求补充。10秒多条新闻适合标题快报，先给出精简播报内容及画面方案供确认，不把整篇报道塞入短视频，不编造事实。`
 
@@ -2373,6 +2373,7 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 		util.BadRequest(c, "通用智能体参数错误")
 		return
 	}
+	middleware.RecordCreativeAgentPlanRequest()
 	if configured := stringAny(h.creativeAgentRuntimeConfig(c.Request.Context())["analysis_model_code"]); configured != "" {
 		req.ModelCode = configured
 	}
@@ -2571,7 +2572,12 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 	}
 	plan := parseCreativeAgentPlan(result.Content)
 	if plan == nil {
-		plan = map[string]interface{}{"intent": "chat", "reply": result.Content, "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}
+		middleware.RecordCreativeAgentContractFailure()
+		if creativeAgentMediaRequest(latestUserMessage) || agentIncrementalRequest(latestUserMessage) {
+			plan = creativeAgentPlanContractFallback()
+		} else {
+			plan = map[string]interface{}{"intent": "chat", "reply": result.Content, "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}
+		}
 	}
 	if len(searchResults) > 0 {
 		ensureCreativeAgentSearchReply(plan, searchResults)
@@ -2584,6 +2590,9 @@ func (h *Handler) CreativeAgentPlan(c *gin.Context) {
 	if err != nil {
 		util.BadRequest(c, err.Error())
 		return
+	}
+	if stringAny(plan["intent"]) == "clarify" {
+		middleware.RecordCreativeAgentClarification()
 	}
 	_ = h.chat.AppendConversationMessage(c.Request.Context(), c.GetInt64("user_id"), result.ConversationID, "user", latestUserMessage)
 	savedPlan, _ := json.Marshal(plan)
@@ -2629,6 +2638,15 @@ func (h *Handler) creativeAgentPlanStream(
 			return
 		}
 		util.BadRequest(c, err.Error())
+		return
+	}
+	latestUserMessage := req.Messages[len(req.Messages)-1].Content
+	// Once a streaming request has an upstream stream and will expose its
+	// conversation id, persist the user turn immediately. If the stream breaks,
+	// the conversation remains reopenable and the planning version can retry.
+	if err := h.chat.AppendConversationMessage(context.Background(), userID, conversationID, "user", latestUserMessage); err != nil {
+		_ = h.chat.UnfreezeStream(context.Background(), userID, requestID, estimated)
+		util.BadRequest(c, "通用智能体会话保存失败")
 		return
 	}
 
@@ -2703,8 +2721,10 @@ func (h *Handler) creativeAgentPlanStream(
 		return
 	}
 
-	latestUserMessage := req.Messages[len(req.Messages)-1].Content
-	plan := creativeAgentPlanFromStream(fullContent)
+	plan, contractOK := creativeAgentPlanFromStreamResult(fullContent, latestUserMessage)
+	if !contractOK {
+		middleware.RecordCreativeAgentContractFailure()
+	}
 	if len(searchResults) > 0 {
 		ensureCreativeAgentSearchReply(plan, searchResults)
 		if warning := validateCreativeAgentCitations(plan, len(searchResults)); warning != "" && searchWarning == "" {
@@ -2718,11 +2738,13 @@ func (h *Handler) creativeAgentPlanStream(
 		flusher.Flush()
 		return
 	}
+	if stringAny(plan["intent"]) == "clarify" {
+		middleware.RecordCreativeAgentClarification()
+	}
 	if mode == "" && strings.TrimSpace(pending) != "" && stringAny(plan["intent"]) == "chat" {
 		writeCreativeAgentSSE(c, "delta", map[string]interface{}{"content": stringAny(plan["reply"])})
 	}
 
-	_ = h.chat.AppendConversationMessage(context.Background(), userID, conversationID, "user", latestUserMessage)
 	savedPlan, _ := json.Marshal(plan)
 	_ = h.chat.AppendConversationMessage(context.Background(), userID, conversationID, "assistant", string(savedPlan))
 	if len(req.AssetIDs) > 0 {
@@ -2746,20 +2768,37 @@ func (h *Handler) creativeAgentPlanStream(
 	flusher.Flush()
 }
 
-func creativeAgentPlanFromStream(content string) map[string]interface{} {
+func creativeAgentPlanFromStream(content string, userText ...string) map[string]interface{} {
+	plan, _ := creativeAgentPlanFromStreamResult(content, userText...)
+	return plan
+}
+
+func creativeAgentPlanFromStreamResult(content string, userText ...string) (map[string]interface{}, bool) {
 	text := strings.TrimSpace(content)
+	planProtocol := false
 	if first, rest, ok := strings.Cut(text, "\n"); ok {
 		switch strings.ToUpper(strings.TrimSpace(first)) {
 		case "CHAT":
-			return map[string]interface{}{"intent": "chat", "reply": strings.TrimSpace(rest), "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}
+			return map[string]interface{}{"intent": "chat", "reply": strings.TrimSpace(rest), "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}, true
 		case "PLAN":
+			planProtocol = true
 			text = strings.TrimSpace(rest)
 		}
 	}
 	if plan := parseCreativeAgentPlan(text); plan != nil {
-		return plan
+		return plan, true
 	}
-	return map[string]interface{}{"intent": "chat", "reply": text, "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}
+	if planProtocol || (len(userText) > 0 && (creativeAgentMediaRequest(userText[0]) || agentIncrementalRequest(userText[0]))) {
+		return creativeAgentPlanContractFallback(), false
+	}
+	return map[string]interface{}{"intent": "chat", "reply": text, "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false}, false
+}
+
+func creativeAgentPlanContractFallback() map[string]interface{} {
+	return map[string]interface{}{
+		"intent": "clarify", "action": "update", "slot_updates": map[string]interface{}{}, "slot_evidence": map[string]interface{}{},
+		"reply": "本轮规划结果格式异常，未创建任务；已有需求和素材仍保留，请直接重试。", "prompt": "", "params": map[string]interface{}{}, "needs_confirm": false,
+	}
 }
 
 func writeCreativeAgentSSE(c *gin.Context, event string, value interface{}) {
@@ -3703,17 +3742,77 @@ func isCreativeAgentPlan(plan map[string]interface{}) bool {
 	if plan == nil {
 		return false
 	}
-	for _, key := range []string{"intent", "reply", "prompt", "params"} {
-		if _, ok := plan[key]; ok {
-			return true
+	intent, ok := plan["intent"].(string)
+	if !ok {
+		return false
+	}
+	switch intent {
+	case "chat", "image", "video", "speech", "music", "workflow", "clarify":
+	default:
+		return false
+	}
+	for _, key := range []string{"reply", "prompt", "workflow_code"} {
+		if value, exists := plan[key]; exists {
+			if _, valid := value.(string); !valid {
+				return false
+			}
 		}
 	}
-	return false
+	for _, key := range []string{"params", "slot_updates", "slot_evidence"} {
+		if value, exists := plan[key]; exists {
+			if _, valid := value.(map[string]interface{}); !valid {
+				return false
+			}
+		}
+	}
+	if value, exists := plan["needs_confirm"]; exists {
+		if _, valid := value.(bool); !valid {
+			return false
+		}
+	}
+	if value, exists := plan["action"]; exists {
+		action, valid := value.(string)
+		if !valid {
+			return false
+		}
+		switch action {
+		case "", "chat", "update", "new_task", "cancel":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeCreativeAgentWorkflowPlan(plan map[string]interface{}, userMessage string) map[string]interface{} {
 	intent := strings.ToLower(strings.TrimSpace(stringAny(plan["intent"])))
 	params, _ := plan["params"].(map[string]interface{})
+	workflowCode := strings.TrimSpace(stringAny(plan["workflow_code"]))
+	imageRequest, videoRequest := creativeAgentImageRequest(userMessage), creativeAgentVideoRequest(userMessage)
+	contentImage := creativeAgentContentImageWorkflowCue(userMessage) || (workflowCode == "content_image_post" && !imageRequest && !videoRequest)
+	if contentImage && intent != "clarify" {
+		intent = "workflow"
+		plan["intent"] = intent
+		if strings.TrimSpace(stringAny(plan["prompt"])) == "" {
+			prompt := strings.TrimSpace(stringAny(plan["reply"]))
+			if prompt == "" {
+				prompt = userMessage
+			}
+			plan["prompt"] = prompt
+		}
+	} else if imageRequest && !videoRequest && intent != "clarify" {
+		intent, plan["intent"] = "image", "image"
+		plan["workflow_code"] = ""
+		if strings.TrimSpace(stringAny(plan["prompt"])) == "" {
+			plan["prompt"] = userMessage
+		}
+	} else if videoRequest && !imageRequest && intent != "clarify" {
+		intent, plan["intent"] = "video", "video"
+		plan["workflow_code"] = ""
+		if strings.TrimSpace(stringAny(plan["prompt"])) == "" {
+			plan["prompt"] = userMessage
+		}
+	}
 	minSeconds, maxSeconds, hasDuration := creativeAgentRequestedDuration(params, userMessage)
 	if intent == "video" && (maxSeconds > 15 || creativeAgentWorkflowCue(userMessage)) {
 		intent = "workflow"
@@ -3723,14 +3822,24 @@ func normalizeCreativeAgentWorkflowPlan(plan map[string]interface{}, userMessage
 		return plan
 	}
 	// The planner may choose only explicitly supported, user-facing workflows.
-	plan["workflow_code"] = "ai_comic_drama"
+	if contentImage {
+		plan["workflow_code"] = "content_image_post"
+	} else {
+		plan["workflow_code"] = "ai_comic_drama"
+	}
 	if params == nil {
 		params = map[string]interface{}{}
 	}
 	if strings.TrimSpace(stringAny(params["_mode"])) != "step" {
 		params["_mode"] = "auto"
 	}
-	if hasDuration {
+	if contentImage {
+		count := creativeAgentPositiveInt(params["image_count"])
+		if count < 2 || count > 6 {
+			count = 4
+		}
+		params["image_count"], params["count"], params["creative_scene"] = count, count, "content_image_post"
+	} else if hasDuration {
 		grid, mode, total := creativeAgentDurationLayout(minSeconds, maxSeconds)
 		target := total
 		if minSeconds == maxSeconds {
@@ -3850,19 +3959,33 @@ func (h *Handler) CreativeAgentRunWorkflow(c *gin.Context) {
 	}
 	req.WorkflowCode = strings.TrimSpace(req.WorkflowCode)
 	req.Prompt = strings.TrimSpace(req.Prompt)
-	if req.WorkflowCode != "ai_comic_drama" || req.Prompt == "" {
+	if (req.WorkflowCode != "ai_comic_drama" && req.WorkflowCode != "content_image_post") || req.Prompt == "" {
 		util.BadRequest(c, "通用智能体暂不支持该工作流")
 		return
 	}
 	inputs := copyStringMap(req.Params)
-	videoModel, modelErr := h.models.GetFullByCode(c.Request.Context(), stringAny(inputs["video_model_code"]))
-	if modelErr != nil || videoModel == nil || !videoModel.IsEnabled || videoModel.RequestMode != "video" {
-		util.BadRequest(c, "已确认的视频模型不可用，请重新选择并确认")
-		return
-	}
-	if err := validateCreativeVideoExecution(videoModel, inputs, true); err != nil {
-		util.BadRequest(c, err.Error())
-		return
+	if req.WorkflowCode == "content_image_post" {
+		imageModel, modelErr := h.models.GetFullByCode(c.Request.Context(), stringAny(inputs["image_model_code"]))
+		if modelErr != nil || imageModel == nil || !imageModel.IsEnabled || !creativeAgentModelSupportsType(imageModel, "image") {
+			util.BadRequest(c, "已确认的图片模型不可用，请重新选择并确认")
+			return
+		}
+		inputs["creative_scene"] = "content_image_post"
+		count := creativeAgentPositiveInt(inputs["image_count"])
+		if count < 2 || count > 6 {
+			count = 4
+		}
+		inputs["image_count"], inputs["count"] = count, count
+	} else {
+		videoModel, modelErr := h.models.GetFullByCode(c.Request.Context(), stringAny(inputs["video_model_code"]))
+		if modelErr != nil || videoModel == nil || !videoModel.IsEnabled || videoModel.RequestMode != "video" {
+			util.BadRequest(c, "已确认的视频模型不可用，请重新选择并确认")
+			return
+		}
+		if err := validateCreativeVideoExecution(videoModel, inputs, true); err != nil {
+			util.BadRequest(c, err.Error())
+			return
+		}
 	}
 	inputs["prompt"] = req.Prompt
 	inputs["asset_ids"] = append([]string{}, req.AssetIDs...)
@@ -3886,6 +4009,7 @@ func (h *Handler) CreativeAgentRunWorkflow(c *gin.Context) {
 		return
 	}
 	_ = h.chat.CompleteAgentDraft(context.Background(), c.GetInt64("user_id"), req.ConversationID, req.PlanVersion, "workflow", project.PublicID, "")
+	middleware.RecordCreativeAgentSubmission()
 	if strings.TrimSpace(req.ConversationID) != "" {
 		h.appendCreativeAgentEvent(c.Request.Context(), c.GetInt64("user_id"), req.ConversationID, map[string]interface{}{
 			"type": "creative_agent_workflow", "project_id": project.PublicID, "workflow_code": req.WorkflowCode, "prompt": req.Prompt, "asset_ids": req.AssetIDs,
@@ -3938,8 +4062,8 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 	}
 	req.ModelCode = strings.TrimSpace(req.ModelCode)
 	req.Prompt = strings.TrimSpace(req.Prompt)
-	if req.ModelCode == "" || req.Prompt == "" {
-		util.BadRequest(c, "生成模型和提示词不能为空")
+	if req.ModelCode == "" {
+		util.BadRequest(c, "生成模型不能为空")
 		return
 	}
 	model, err := h.models.GetFullByCode(c.Request.Context(), req.ModelCode)
@@ -3954,6 +4078,20 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 	if req.Params == nil {
 		req.Params = map[string]interface{}{}
 	}
+	if req.MediaType == "music" {
+		req.Prompt, req.Params = prepareCreativeMusicExecution(model, req.Prompt, req.Params)
+	}
+	if req.MediaType == "image" {
+		mapped, _, issue := creativeAgentImageModelParams(model, req.Params)
+		if issue != "" || fmt.Sprint(mapped["image_size"]) != fmt.Sprint(req.Params["image_size"]) {
+			util.BadRequest(c, "图片模型能力或清晰度映射已变化，请重新规划并确认后执行")
+			return
+		}
+	}
+	if req.Prompt == "" && req.MediaType != "music" {
+		util.BadRequest(c, "生成提示词不能为空")
+		return
+	}
 	billingLabel := map[string]string{
 		"image": "Agent 图片生成", "video": "Agent 视频生成", "speech": "Agent 音频生成", "music": "Agent 音频生成",
 	}[req.MediaType]
@@ -3961,15 +4099,6 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 		if err := validateCreativeVideoExecution(model, req.Params, false); err != nil {
 			util.BadRequest(c, err.Error())
 			return
-		}
-	}
-	if req.MediaType == "music" {
-		audioConfig, _ := model.RuntimeRule["audio"].(map[string]interface{})
-		secondaryKey := strings.TrimSpace(stringAny(audioConfig["secondary_prompt_key"]))
-		if secondaryKey != "" && secondaryKey != "music_prompt" {
-			if value, ok := req.Params["music_prompt"]; ok {
-				req.Params[secondaryKey] = value
-			}
 		}
 	}
 	req.Params["asset_ids"] = append([]string{}, req.AssetIDs...)
@@ -3995,8 +4124,18 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 		req.Params["reference_videos"] = videoURLs
 	}
 	if len(audioURLs) > 0 && (req.MediaType == "video" || req.MediaType == "speech" || req.MediaType == "music") {
+		if (req.MediaType == "speech" || req.MediaType == "music") && !creativeAgentAudioSupportsReference(model) {
+			util.BadRequest(c, "所选音频模型不支持参考音频，请更换模型或移除素材")
+			return
+		}
 		req.Params["reference_audio"] = audioURLs[0]
 		req.Params["reference_audios"] = audioURLs
+	}
+	if req.MediaType == "video" {
+		if err := applyCreativeVideoReferenceMode(model, req.Params, len(imageURLs), len(videoURLs), len(audioURLs)); err != nil {
+			util.BadRequest(c, err.Error())
+			return
+		}
 	}
 	if !h.enforceContentSafety(c, c.GetInt64("user_id"), "creative_agent_generate", req) {
 		return
@@ -4017,6 +4156,7 @@ func (h *Handler) CreativeAgentGenerate(c *gin.Context) {
 		return
 	}
 	_ = h.chat.CompleteAgentDraft(context.Background(), c.GetInt64("user_id"), req.ConversationID, req.PlanVersion, "generation", task.TaskNo, "")
+	middleware.RecordCreativeAgentSubmission()
 	if strings.TrimSpace(req.ConversationID) != "" {
 		h.appendCreativeAgentEvent(c.Request.Context(), c.GetInt64("user_id"), req.ConversationID, map[string]interface{}{
 			"type": "creative_agent_generation", "task_no": task.TaskNo, "media_type": req.MediaType, "model_code": req.ModelCode, "prompt": req.Prompt, "asset_ids": req.AssetIDs,

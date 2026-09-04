@@ -30,10 +30,10 @@ type MediaPreview = { url: string; type: "image" | "video" };
 type GenerationType = "image" | "video" | "speech" | "music";
 type AgentPlanResponse = { conversation_id?: string; plan?: Plan; search_required?: boolean; search_hint?: string; search_results?: SearchResult[]; search_trace?: SearchTrace; search_warning?: string };
 
-const HOT_PROMPTS = ["根据角色参考图生成 40-50 秒完整短剧", "先写故事文案，再按文案生成短剧成片", "生成一张产品主图", "做一个 10 秒产品展示视频"];
+const HOT_PROMPTS = ["生成一套小红书图文笔记和 4 张配图", "根据角色参考图生成 40-50 秒完整短剧", "生成一张产品主图", "做一个 10 秒产品展示视频"];
 const CREATIVE_FEATURES = [
   { icon: "✦", title: "理解并连续创作", subtitle: "从自然语言识别目标，自动整理提示词并衔接上一轮结果" },
-  { icon: "🖼️", title: "图片生成与改图", subtitle: "支持参考素材、连续改图和多种图片生成模型" },
+  { icon: "🖼️", title: "图片与内容图文", subtitle: "支持单图、连续改图，以及标题正文与多张配图的一体化生成" },
   { icon: "🎬", title: "短剧工作流", subtitle: "自动完成剧本、分镜、分段生成与成片合成" },
   { icon: "🎵", title: "语音与音乐", subtitle: "分别调用文本转语音或歌曲音乐模型完成创作" },
 ];
@@ -120,12 +120,22 @@ function runProgress(run: TaskState) {
   if (typeof run.progress === "number") return run.progress;
   if (run.status === "succeeded") return 100;
   const outputs = run.outputs || {};
+  const step = run.current_step || String(outputs.current_step || "");
+  if (run.workflow_code === "content_image_post" || run.inputs?.creative_scene === "content_image_post" || Boolean(outputs.content_post)) {
+    if (step === "result") return 100;
+    if (step === "generate") {
+      const total = Math.max(2, Number(run.inputs?.image_count) || 4);
+      const completed = (run.media_tasks || []).filter((item) => item.type === "image" && item.status === "succeeded").length;
+      const active = [...(run.media_tasks || [])].reverse().find((item) => item.type === "image" && item.status !== "succeeded" && item.status !== "failed");
+      return Math.round(35 + 60 * Math.min(1, (completed + Math.min(0.95, Number(active?.progress || 0) / 100)) / total));
+    }
+    return step === "confirm" ? 35 : run.status === "pending" ? 3 : 10;
+  }
   const plan = outputs.comic_drama && typeof outputs.comic_drama === "object" ? outputs.comic_drama as Record<string, unknown> : {};
   const total = Math.max(1, Array.isArray(plan.storyboards) ? plan.storyboards.length : Number(run.inputs?.storyboard_grid) || 1);
   const completed = (value: unknown, key: string) => Array.isArray(value) ? value.filter((item) => item && typeof item === "object" && Boolean((item as Record<string, unknown>)[key]) && (item as Record<string, unknown>).status !== "failed").length : 0;
   const active = (type: string) => [...(run.media_tasks || [])].reverse().find((item) => item.type === type && item.status !== "succeeded" && item.status !== "failed");
   const fraction = (type: string) => Math.max(0, Math.min(0.95, Number(active(type)?.progress || 0) / 100));
-  const step = run.current_step || String(outputs.current_step || "");
   if (step === "result") return 100;
   if (step === "compose") return 94;
   if (step === "narrations") return Math.round(80 + 12 * Math.min(1, (completed(outputs.narrations, "audio_url") + fraction("audio")) / total));
@@ -152,40 +162,51 @@ const WORKFLOW_STAGES = [
   ["compose", "成片合成"],
 ] as const;
 
+const CONTENT_IMAGE_STAGES = [
+  ["analysis", "内容策划"],
+  ["generate", "卡片配图"],
+] as const;
+
 function WorkflowRunCard({ task, busy, onRetry }: { task: TaskState; busy: boolean; onRetry: () => void }) {
   const progress = runProgress(task);
   const step = task.current_step || String(task.outputs?.current_step || "");
   const latestRuns = new Map<string, string>();
   for (const run of task.node_runs || []) if (run.node_id) latestRuns.set(run.node_id, run.status || "pending");
   const media = runMedia(task);
+  const contentImage = task.workflow_code === "content_image_post" || task.inputs?.creative_scene === "content_image_post" || Boolean(task.outputs?.content_post);
+  const stages = contentImage ? CONTENT_IMAGE_STAGES : WORKFLOW_STAGES;
   const plan = task.outputs?.comic_drama && typeof task.outputs.comic_drama === "object" ? task.outputs.comic_drama as Record<string, unknown> : {};
-  const outline = typeof plan.outline === "string" ? plan.outline : typeof plan.intent === "string" ? plan.intent : "";
+  const contentPost = task.outputs?.content_post && typeof task.outputs.content_post === "object" ? task.outputs.content_post as Record<string, unknown> : {};
+  const outline = contentImage
+    ? [contentPost.title, contentPost.hook, contentPost.body, Array.isArray(contentPost.hashtags) ? contentPost.hashtags.join(" ") : ""].filter(Boolean).join("\n\n")
+    : typeof plan.outline === "string" ? plan.outline : typeof plan.intent === "string" ? plan.intent : "";
   const isActive = task.status === "pending" || task.status === "running";
+  const title = contentImage ? "内容创作工作流" : "成片工作流";
 
   return (
     <div className="soft-card mx-auto mt-4 max-w-5xl overflow-hidden px-4 py-4 text-xs text-gray-500 dark:text-gray-300">
       <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0"><div className="font-semibold text-gray-800 dark:text-white">成片工作流 · {task.public_id}</div><div className="mt-0.5 truncate">{task.status === "failed" ? task.error_message || "生成失败" : task.status === "succeeded" ? "成片已完成" : `正在执行：${WORKFLOW_STAGES.find(([id]) => id === step)?.[1] || "准备任务"}`}</div></div>
+        <div className="min-w-0"><div className="font-semibold text-gray-800 dark:text-white">{title} · {task.public_id}</div><div className="mt-0.5 truncate">{task.status === "failed" ? task.error_message || "生成失败" : task.status === "succeeded" ? contentImage ? "图文内容已完成" : "成片已完成" : `正在执行：${stages.find(([id]) => id === step)?.[1] || "准备任务"}`}</div></div>
         <div className="flex shrink-0 items-center gap-2"><span className="font-mono text-sm font-semibold text-primary">{progress}%</span>{task.status === "failed" ? <button type="button" disabled={busy} onClick={onRetry} className="inline-flex h-8 items-center gap-1 rounded-lg bg-primary px-2.5 font-medium text-white disabled:opacity-50"><RotateCcw size={13} />按当前模型续传</button> : isActive ? <Loader2 size={17} className="animate-spin text-primary" /> : null}</div>
       </div>
       <div className="relative mt-3 h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-white/10" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
         <div className={`h-full rounded-full bg-gradient-to-r from-cyan-500 via-primary to-emerald-400 transition-all duration-700 ${isActive ? "animate-pulse" : ""}`} style={{ width: `${progress}%` }} />
       </div>
-      <div className="mt-3 grid grid-cols-5 gap-1.5">
-        {WORKFLOW_STAGES.map(([id, label], index) => {
+      <div className={`mt-3 grid gap-1.5 ${contentImage ? "grid-cols-2" : "grid-cols-5"}`}>
+        {stages.map(([id, label], index) => {
           const state = latestRuns.get(id);
           const active = step === id || (id === "comic_plan" && step === "storyboard_confirm");
-          const done = task.status === "succeeded" || state === "succeeded" || (!active && WORKFLOW_STAGES.findIndex(([stage]) => stage === step) > index);
+          const done = task.status === "succeeded" || state === "succeeded" || (!active && stages.findIndex(([stage]) => stage === step) > index);
           return <div key={id} className={`rounded-lg border px-2 py-2 text-center transition ${active && isActive ? "border-primary/40 bg-primary/10 text-primary" : done ? "border-emerald-200 bg-emerald-50 text-emerald-600 dark:border-emerald-400/20 dark:bg-emerald-400/10" : state === "failed" ? "border-red-200 bg-red-50 text-red-500" : "border-gray-100 bg-gray-50 text-gray-400 dark:border-white/5 dark:bg-white/5"}`}><div className="mb-1 text-sm">{done ? "✓" : active && isActive ? "●" : state === "failed" ? "!" : "○"}</div><div className="truncate">{label}</div></div>;
         })}
       </div>
       <details className="group mt-3 rounded-xl border border-gray-100 p-3 dark:border-white/10">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-2 font-medium text-gray-700 dark:text-gray-200">
-          <span>过程素材 · 图片 {media.images.length} · 分段视频 {media.videos.length} · 配音 {media.audios.length}</span>
+          <span>{contentImage ? `内容与配图 · 图片 ${media.images.length}` : `过程素材 · 图片 ${media.images.length} · 分段视频 ${media.videos.length} · 配音 ${media.audios.length}`}</span>
           <ChevronDown size={15} className="shrink-0 transition-transform group-open:rotate-180" />
         </summary>
         {outline ? <p className="mt-3 whitespace-pre-wrap rounded-lg bg-gray-50 px-3 py-2 leading-5 text-gray-600 dark:bg-white/5 dark:text-gray-300">{outline}</p> : null}
-        {media.images.length ? <div className="mt-3 flex gap-2 overflow-x-auto pb-1">{media.images.map((url, index) => <a key={url} href={url} target="_blank" rel="noreferrer"><img src={url} loading="lazy" alt={`已完成关键帧 ${index + 1}`} className="h-20 w-20 shrink-0 rounded-lg object-cover" /></a>)}</div> : null}
+        {media.images.length ? <div className="mt-3 flex gap-2 overflow-x-auto pb-1">{media.images.map((url, index) => <a key={url} href={url} target="_blank" rel="noreferrer"><img src={url} loading="lazy" alt={contentImage ? `内容配图 ${index + 1}` : `已完成关键帧 ${index + 1}`} className="h-20 w-20 shrink-0 rounded-lg object-cover" /></a>)}</div> : null}
         {media.videos.length ? <div className="mt-3 grid gap-2 sm:grid-cols-2">{media.videos.map((url, index) => <div key={url}><p className="mb-1">分段视频 {index + 1}</p><video src={url} controls preload="none" className="w-full rounded-lg bg-black" aria-label={`分段视频 ${index + 1}`} /></div>)}</div> : null}
         {media.audios.length ? <div className="mt-3 space-y-2">{media.audios.map((url, index) => <audio key={url} src={url} controls preload="none" className="w-full" aria-label={`配音 ${index + 1}`} />)}</div> : null}
         {!outline && !media.images.length && !media.videos.length && !media.audios.length ? <p className="mt-2">素材生成后会逐步显示在这里。</p> : null}
@@ -550,9 +571,9 @@ export function CreativeAgentWorkspace({
   };
 
   const runWorkflow = async (nextPlan: Plan, activeConversationId: string) => {
-    if (nextPlan.workflow_code !== "ai_comic_drama") throw new Error("Agent 选择了暂不支持的工作流");
+    if (nextPlan.workflow_code !== "ai_comic_drama" && nextPlan.workflow_code !== "content_image_post") throw new Error("Agent 选择了暂不支持的工作流");
     const generationPrompt = nextPlan.prompt?.trim();
-    if (!generationPrompt) throw new Error("Agent 未能整理出可执行的故事或短剧内容");
+    if (!generationPrompt) throw new Error(nextPlan.workflow_code === "content_image_post" ? "Agent 未能整理出可执行的图文主题" : "Agent 未能整理出可执行的故事或短剧内容");
     const referenceImages = nextPlan.params?.use_previous_media ? Array.from(new Set(latestGeneratedMedia.images)) : [];
     const result = await api<TaskState>("/api/creative-agent/run-workflow", {
       method: "POST",
@@ -565,7 +586,7 @@ export function CreativeAgentWorkspace({
         params: {
           ...(nextPlan.params || {}),
           image_model_code: imageModelCode,
-          video_model_code: nextPlan.model_code,
+          video_model_code: nextPlan.workflow_code === "ai_comic_drama" ? nextPlan.model_code : undefined,
         },
         asset_ids: assetIDs,
         reference_image_urls: referenceImages,
@@ -1087,7 +1108,7 @@ export function CreativeAgentWorkspace({
                     ) : null}
                     {message.resultRunId && message.videos?.length ? (
                       <div className="mt-2 space-y-2">
-                        {message.videos.map((url) => <video key={url} src={url} controls preload="metadata" className="w-full rounded-xl bg-black" aria-label="成品视频" />)}
+                        {message.videos.map((url) => <video key={url} src={url} controls playsInline preload="metadata" className="h-auto max-h-[60dvh] w-auto max-w-full rounded-xl bg-black object-contain sm:max-h-[520px]" aria-label="成品视频" />)}
                       </div>
                     ) : message.videos?.length ? (
                       <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">

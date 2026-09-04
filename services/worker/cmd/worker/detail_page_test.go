@@ -48,6 +48,33 @@ func TestDetailSectionPromptEnforcesConsistencyAndNoRenderedText(t *testing.T) {
 	}
 }
 
+func TestAgentContentImageCardsKeepsPlanAndFillsRequestedCount(t *testing.T) {
+	post := map[string]interface{}{
+		"title": "秋季护肤指南",
+		"cards": []interface{}{
+			map[string]interface{}{"id": "cover", "role": "cover", "headline": "换季别焦虑", "copy": "三步稳住皮肤", "image_prompt": "秋日暖色护肤静物"},
+		},
+	}
+	cards := agentContentImageCards(post, map[string]interface{}{"image_count": 4}, "秋季护肤")
+	if len(cards) != 4 || cards[0]["id"] != "cover" || cards[3]["role"] != "cta" {
+		t.Fatalf("unexpected content cards: %#v", cards)
+	}
+	for _, card := range cards {
+		if strings.TrimSpace(stringAny(card["image_prompt"])) == "" {
+			t.Fatalf("card has no image prompt: %#v", card)
+		}
+	}
+}
+
+func TestContentImageAnalysisPromptRequiresPublishableStructure(t *testing.T) {
+	prompt := buildAgentAnalysisSystemPrompt("image", "content_image_post", 1, "content_image_post")
+	for _, expected := range []string{"content_task", "objective", "deliverables", "content_post", "title", "body", "hashtags", "cards 数量必须严格等于", "不得把标题、正文、标签直接画进图片"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("content image prompt missing %q: %s", expected, prompt)
+		}
+	}
+}
+
 func TestComposeDetailPageLongImage(t *testing.T) {
 	root := t.TempDir()
 	store, err := storage.NewLocal(root, "http://localhost:8080/uploads-local")

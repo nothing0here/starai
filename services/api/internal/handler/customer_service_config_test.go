@@ -77,6 +77,17 @@ func TestParseCreativeAgentPlan(t *testing.T) {
 	if parseCreativeAgentPlan("{\"sources\":[1,2]}") != nil {
 		t.Fatal("expected unrelated JSON object to return nil")
 	}
+	for _, invalid := range []string{
+		`{"intent":"generate_video","prompt":"cat"}`,
+		`{"intent":"video","params":[]}`,
+		`{"intent":"chat","reply":42}`,
+		`{"intent":"image","needs_confirm":"yes"}`,
+		`{"intent":"image","action":"execute"}`,
+	} {
+		if parseCreativeAgentPlan(invalid) != nil {
+			t.Fatalf("expected invalid planner contract to be rejected: %s", invalid)
+		}
+	}
 }
 
 func TestCreativeAgentPlanFromStream(t *testing.T) {
@@ -87,6 +98,10 @@ func TestCreativeAgentPlanFromStream(t *testing.T) {
 	image := creativeAgentPlanFromStream("PLAN\n{\"intent\":\"image\",\"reply\":\"正在生成\",\"prompt\":\"一只猫\",\"params\":{}}")
 	if image["intent"] != "image" || image["prompt"] != "一只猫" {
 		t.Fatalf("unexpected streamed generation plan: %#v", image)
+	}
+	bad := creativeAgentPlanFromStream("PLAN\n{\"intent\":\"video\",\"params\":[]}", "生成一个10秒视频")
+	if bad["intent"] != "clarify" || bad["needs_confirm"] != false {
+		t.Fatalf("invalid streamed plan must fail closed: %#v", bad)
 	}
 }
 
@@ -129,6 +144,48 @@ func TestNormalizeCreativeAgentWorkflowPlan(t *testing.T) {
 	}, "根据角色参考图生成48秒完整视频")
 	if misclassified["intent"] != "workflow" || misclassified["workflow_code"] != "ai_comic_drama" {
 		t.Fatalf("long-form video was not promoted to workflow: %#v", misclassified)
+	}
+
+	contentPost := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "image", "prompt": "秋季护肤主题", "params": map[string]interface{}{},
+	}, "生成一套小红书图文笔记和配图")
+	contentParams := contentPost["params"].(map[string]interface{})
+	if contentPost["intent"] != "workflow" || contentPost["workflow_code"] != "content_image_post" || contentParams["image_count"] != 4 || contentParams["creative_scene"] != "content_image_post" {
+		t.Fatalf("content image request was not promoted to workflow: %#v", contentPost)
+	}
+
+	for text, expected := range map[string]string{
+		"生成一张图":      "image",
+		"制作一个短视频":    "video",
+		"写一篇微信公众号推文": "workflow",
+		"整理一份资料信息":   "chat",
+	} {
+		routed := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{"intent": "chat", "reply": "已理解", "params": map[string]interface{}{}}, text)
+		if routed["intent"] != expected {
+			t.Fatalf("route %q=%v, want %s: %#v", text, routed["intent"], expected, routed)
+		}
+		if expected == "workflow" && (routed["workflow_code"] != "content_image_post" || strings.TrimSpace(stringAny(routed["prompt"])) == "") {
+			t.Fatalf("content workflow is incomplete: %#v", routed)
+		}
+	}
+	standaloneImage := normalizeCreativeAgentWorkflowPlan(map[string]interface{}{
+		"intent": "image", "workflow_code": "content_image_post", "params": map[string]interface{}{},
+	}, "生成一张图")
+	if standaloneImage["intent"] != "image" || standaloneImage["workflow_code"] != "" {
+		t.Fatalf("standalone image inherited stale content workflow: %#v", standaloneImage)
+	}
+}
+
+func TestCreativeAgentRequestedImageCount(t *testing.T) {
+	for text, want := range map[string]int{
+		"生成6张配图":   6,
+		"改成四张":     4,
+		"需要3个卡片":   3,
+		"把第4个要点改短": 0,
+	} {
+		if got := creativeAgentRequestedImageCount(text); got != want {
+			t.Fatalf("creativeAgentRequestedImageCount(%q)=%d, want %d", text, got, want)
+		}
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 func TestCreativeAgentIntentBoundary(t *testing.T) {
 	for _, text := range []string{
 		"开学季，做为一个程序员，给我一段程序开发人员15秒的短视频文案",
-		"生成一段15秒的短视频文案", "这是什么？", "为什么又生成了", "解释一下", "先别生成视频，先写文案", "取消生成", "修改一下脚本",
+		"生成一段15秒的短视频文案", "帮我写一段歌词", "润色这段歌词", "这是什么？", "为什么又生成了", "解释一下", "先别生成视频，先写文案", "取消生成", "修改一下脚本",
 	} {
 		plan := guardCreativeAgentIntent(map[string]interface{}{"intent": "video", "prompt": "生成一段视频文案", "needs_confirm": false}, text)
 		if plan["intent"] != "chat" || plan["needs_confirm"] != false || plan["prompt"] != "" {
@@ -24,6 +24,29 @@ func TestCreativeAgentIntentBoundary(t *testing.T) {
 		plan := guardCreativeAgentIntent(map[string]interface{}{"intent": "video", "needs_confirm": false}, text)
 		if plan["intent"] != "video" || plan["needs_confirm"] != true {
 			t.Fatalf("%q must require confirmation: %#v", text, plan)
+		}
+	}
+}
+
+func TestCreativeAgentMediaNounBoundary(t *testing.T) {
+	for _, text := range []string{"生成一张图", "画一幅插画", "制作产品图片"} {
+		if !creativeAgentImageRequest(text) || creativeAgentVideoRequest(text) || creativeAgentContentImageWorkflowCue(text) {
+			t.Fatalf("%q should be an image request", text)
+		}
+	}
+	for _, text := range []string{"生成视频", "制作短视频", "拍一部短剧"} {
+		if !creativeAgentVideoRequest(text) || creativeAgentImageRequest(text) {
+			t.Fatalf("%q should be a video request", text)
+		}
+	}
+	for _, text := range []string{"生成图文", "写一篇微信公众号推文", "做一篇小红书笔记", "创作今日头条文章"} {
+		if !creativeAgentContentImageWorkflowCue(text) {
+			t.Fatalf("%q should be a mixed content-image request", text)
+		}
+	}
+	for _, text := range []string{"写一篇文章", "整理资料信息", "解释这段文字", "分析一篇小红书笔记"} {
+		if creativeAgentMediaRequest(text) {
+			t.Fatalf("%q should remain text-only", text)
 		}
 	}
 }
@@ -100,6 +123,126 @@ func TestCreativeAgentVideoParametersFollowSelectedModel(t *testing.T) {
 		if err := validateCreativeVideoExecution(model, params, false); err == nil {
 			t.Fatalf("execution bypassed unsupported %s", tc.key)
 		}
+	}
+}
+
+func TestCreativeAgentMapsRatioAndQualityToNativeVideoSize(t *testing.T) {
+	model := &service.ModelFull{ModelDTO: service.ModelDTO{
+		Code:          "veo-size",
+		DefaultParams: map[string]interface{}{"size": "1280x720"},
+		InputSchema: map[string]interface{}{"properties": map[string]interface{}{
+			"duration": map[string]interface{}{"enum": []interface{}{8}},
+			"size":     map[string]interface{}{"enum": []interface{}{"1280x720", "720x1280", "1920x1080", "1080x1920"}},
+		}},
+	}}
+	plan := prepareCreativeAgentVideoPlan(map[string]interface{}{"intent": "video", "params": map[string]interface{}{
+		"target_duration_sec": 8, "aspect_ratio": "9:16", "quality": "1080p",
+	}}, "", model)
+	params := plan["params"].(map[string]interface{})
+	if plan["intent"] != "video" || params["size"] != "1080x1920" {
+		t.Fatalf("explicit portrait quality did not override model default: %#v", plan)
+	}
+	if err := validateCreativeVideoExecution(model, params, false); err != nil {
+		t.Fatal(err)
+	}
+
+	portrait := prepareCreativeAgentVideoPlan(map[string]interface{}{"intent": "video", "params": map[string]interface{}{
+		"target_duration_sec": 8, "aspect_ratio": "9:16",
+	}}, "", model)
+	if portrait["params"].(map[string]interface{})["size"] != "720x1280" {
+		t.Fatalf("default quality portrait mapping failed: %#v", portrait)
+	}
+
+	unsupported := prepareCreativeAgentVideoPlan(map[string]interface{}{"intent": "video", "params": map[string]interface{}{
+		"target_duration_sec": 8, "aspect_ratio": "9:16", "quality": "4k",
+	}}, "", model)
+	if unsupported["intent"] != "clarify" || unsupported["invalid_field"] != "quality" {
+		t.Fatalf("unsupported native size became executable: %#v", unsupported)
+	}
+
+	stale := copyStringMap(params)
+	stale["size"] = "1280x720"
+	if err := validateCreativeVideoExecution(model, stale, false); err == nil {
+		t.Fatal("stale default size bypassed confirmed portrait mapping")
+	}
+	if got := creativeAgentDimensionRatio(900, 1200); got != "3:4" {
+		t.Fatalf("dimension ratio = %q, want 3:4", got)
+	}
+}
+
+func TestCreativeAgentMapsImageQualityTier(t *testing.T) {
+	model := &service.ModelFull{ModelDTO: service.ModelDTO{
+		Code: "gpt-image", DefaultParams: map[string]interface{}{"quality": "1K"},
+		RuntimeRule: map[string]interface{}{"image": map[string]interface{}{"supported_sizes": []interface{}{"1K", "2K", "4K"}}},
+	}}
+	mapped, field, issue := creativeAgentImageModelParams(model, map[string]interface{}{"quality": "4k", "aspect_ratio": "9:16"})
+	if issue != "" || field != "" || mapped["quality"] != "4K" || mapped["image_size"] != "4K" {
+		t.Fatalf("image tier mapping failed: mapped=%#v field=%q issue=%q", mapped, field, issue)
+	}
+	if _, field, issue = creativeAgentImageModelParams(model, map[string]interface{}{"quality": "1080p"}); field != "quality" || issue == "" {
+		t.Fatalf("inexact image quality was silently accepted: field=%q issue=%q", field, issue)
+	}
+}
+
+func TestCreativeAgentMapsVoiceGenderAndMusicInputs(t *testing.T) {
+	speech := &service.ModelFull{ModelDTO: service.ModelDTO{InputSchema: map[string]interface{}{"properties": map[string]interface{}{
+		"voice": map[string]interface{}{
+			"enum":                      []interface{}{"female-default", "male-default"},
+			"x-agent-default-by-gender": map[string]interface{}{"female": "female-default", "male": "male-default"},
+		},
+	}}}}
+	if key, voice, ok := creativeAgentVoiceForGender(speech, "male"); !ok || key != "voice" || voice != "male-default" {
+		t.Fatalf("male voice mapping failed: key=%q voice=%q ok=%v", key, voice, ok)
+	}
+	delete(speech.InputSchema["properties"].(map[string]interface{})["voice"].(map[string]interface{}), "x-agent-default-by-gender")
+	if _, voice, ok := creativeAgentVoiceForGender(speech, "male"); !ok || voice != "male-default" {
+		t.Fatalf("female label was mistaken for male: voice=%q ok=%v", voice, ok)
+	}
+
+	funMusic := &service.ModelFull{ModelDTO: service.ModelDTO{InputSchema: map[string]interface{}{"properties": map[string]interface{}{
+		"mode": map[string]interface{}{"enum": []interface{}{"song", "instrumental"}},
+	}}}, RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"secondary_prompt_key": "lyrics"}}}
+	prompt, params := prepareCreativeMusicExecution(funMusic, "[Verse]\n春风吹过", map[string]interface{}{"music_prompt": "轻快流行"})
+	if prompt != "轻快流行" || params["lyrics"] != "[Verse]\n春风吹过" || params["mode"] != "song" {
+		t.Fatalf("description/lyrics mapping reversed: prompt=%q params=%#v", prompt, params)
+	}
+	prompt, params = prepareCreativeMusicExecution(funMusic, "不要唱", map[string]interface{}{"music_prompt": "舒缓钢琴", "is_instrumental": true})
+	if prompt != "舒缓钢琴" || params["mode"] != "instrumental" || params["lyrics"] != nil {
+		t.Fatalf("instrumental mapping failed: prompt=%q params=%#v", prompt, params)
+	}
+
+	miniMax := &service.ModelFull{RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{
+		"secondary_prompt_key": "music_prompt", "prompt_required": false,
+	}}}
+	prompt, params = prepareCreativeMusicExecution(miniMax, "生成纯音乐", map[string]interface{}{"music_prompt": "电影感弦乐", "is_instrumental": true})
+	if prompt != "" || params["music_prompt"] != "电影感弦乐" {
+		t.Fatalf("instrumental lyrics were not cleared: prompt=%q params=%#v", prompt, params)
+	}
+}
+
+func TestCreativeAgentSelectsVideoReferenceMode(t *testing.T) {
+	veo := &service.ModelFull{RuntimeRule: map[string]interface{}{"video": map[string]interface{}{
+		"upload_profile": "veo_reference", "mode_param": "generation_mode",
+	}}}
+	params := map[string]interface{}{"generation_mode": "text"}
+	if err := applyCreativeVideoReferenceMode(veo, params, 1, 0, 0); err != nil || params["generation_mode"] != "reference" {
+		t.Fatalf("reference image did not enable native mode: params=%#v err=%v", params, err)
+	}
+	if err := applyCreativeVideoReferenceMode(veo, map[string]interface{}{}, 0, 1, 0); err == nil {
+		t.Fatal("unsupported reference video was silently ignored")
+	}
+	seedance := &service.ModelFull{RuntimeRule: map[string]interface{}{"video": map[string]interface{}{"upload_profile": "seedance_2"}}}
+	params = map[string]interface{}{}
+	if err := applyCreativeVideoReferenceMode(seedance, params, 1, 1, 1); err != nil || params["generation_mode"] != "image_video_audio" {
+		t.Fatalf("multimodal mode mapping failed: params=%#v err=%v", params, err)
+	}
+}
+
+func TestCreativeAgentDetectsAudioReferenceCapability(t *testing.T) {
+	unsupported := &service.ModelFull{RuntimeRule: map[string]interface{}{"upstream": map[string]interface{}{"include": []interface{}{"format"}}}}
+	supported := &service.ModelFull{RuntimeRule: map[string]interface{}{"upstream": map[string]interface{}{"include": []interface{}{"format", "reference_audio"}}}}
+	if creativeAgentAudioSupportsReference(unsupported) || !creativeAgentAudioSupportsReference(supported) {
+		t.Fatal("audio reference capability detection failed")
 	}
 }
 

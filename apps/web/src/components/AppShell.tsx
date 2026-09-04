@@ -42,6 +42,7 @@ const INFINITE_CANVAS_CODE = "infinite_canvas";
 const VIRAL_REMAKE_CODE = "viral_remake";
 const ONE_CLICK_VIRAL_REMAKE_CODE = "one_click_viral_remake";
 const VIDEO_REMAKE_CODE = "video_remake";
+const CONTENT_IMAGE_POST_CODE = "content_image_post";
 const GENERAL_CREATIVE_AGENT_CODE = "general_creative_agent";
 
 const MOBILE_SUBPAGE_LINKS = [
@@ -288,7 +289,11 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
         setAgents(items);
         setAgentsLoaded(true);
         if (!isMobile) {
-          setActiveAgentCode((prev) => prev && items.some((item) => item.code === prev) ? prev : items[0]?.code);
+          setActiveAgentCode((prev) =>
+            prev && prev !== GENERAL_CREATIVE_AGENT_CODE && items.some((item) => item.code === prev)
+              ? prev
+              : items.find((item) => item.code !== GENERAL_CREATIVE_AGENT_CODE)?.code
+          );
         }
       })
       .catch((error) => {
@@ -404,7 +409,11 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                   setActiveModel(null);
                 }
                 if (item.id === "agents") {
-                  const code = activeAgentCode || (agentsLoaded ? agents[0]?.code : INFINITE_CANVAS_CODE);
+                  const code = activeAgentCode && activeAgentCode !== GENERAL_CREATIVE_AGENT_CODE
+                    ? activeAgentCode
+                    : agentsLoaded
+                      ? agents.find((agent) => agent.code !== GENERAL_CREATIVE_AGENT_CODE)?.code
+                      : INFINITE_CANVAS_CODE;
                   setActiveAgentCode(code);
                   router.push(`/app/agents/${encodeURIComponent(code || INFINITE_CANVAS_CODE)}`);
                 }
@@ -972,6 +981,13 @@ export function AppShell({ children, selectedModelCode, selectedAgentCode }: App
                     authenticated={Boolean(user)}
                     workflowCode={VIDEO_REMAKE_CODE}
                     initialTemplateID="video-remake"
+                  />
+                ) : activeAgentCode === CONTENT_IMAGE_POST_CODE ? (
+                  <InfiniteCanvasWorkspace
+                    key={activeAgentCode}
+                    authenticated={Boolean(user)}
+                    workflowCode={CONTENT_IMAGE_POST_CODE}
+                    initialTemplateID="content-image-post"
                   />
                 ) : activeAgentCode === GENERAL_CREATIVE_AGENT_CODE ? (
                   <CreativeAgentWorkspace key={activeAgentCode} />

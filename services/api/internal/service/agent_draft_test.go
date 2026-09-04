@@ -28,10 +28,13 @@ func TestAgentSlotsValidateAndRequireEvidenceForReplacement(t *testing.T) {
 	if d.Slots["character"] != "Bob" || d.Sources["character"].Source != "user" {
 		t.Fatal(d.Slots)
 	}
-	for _, update := range []map[string]interface{}{{"confirmed": true}, {"model_code": "injected"}, {"target_duration_sec": 999}, {"target_duration_sec": 15.5}, {"use_previous_media": "true"}, {"aspect_ratio": "wrong"}} {
+	for _, update := range []map[string]interface{}{{"confirmed": true}, {"model_code": "injected"}, {"target_duration_sec": 999}, {"target_duration_sec": 15.5}, {"image_count": 1}, {"image_count": 7}, {"use_previous_media": "true"}, {"aspect_ratio": "wrong"}} {
 		if err := ApplyAgentSlotUpdates(d, update, nil, "test"); err == nil {
 			t.Fatalf("invalid slot accepted: %v", update)
 		}
+	}
+	if err := ApplyAgentSlotUpdates(d, map[string]interface{}{"image_count": 4, "platform": "小红书"}, map[string]interface{}{"image_count": "4张", "platform": "小红书"}, "小红书生成4张配图"); err != nil {
+		t.Fatalf("valid content image slots rejected: %v", err)
 	}
 	if err := ApplyAgentSlotUpdates(d, map[string]interface{}{"style": "changed", "unknown": true}, map[string]interface{}{"style": "changed"}, "changed"); err == nil {
 		t.Fatal("invalid update accepted")

@@ -15,6 +15,10 @@ var httpDurationMS atomic.Uint64
 var rateLimitedRequests atomic.Uint64
 var paymentWebhookRejected atomic.Uint64
 var contentSafetyBlocked atomic.Uint64
+var creativeAgentPlanRequests atomic.Uint64
+var creativeAgentContractFailures atomic.Uint64
+var creativeAgentClarifications atomic.Uint64
+var creativeAgentSubmissions atomic.Uint64
 
 func Metrics() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -44,6 +48,22 @@ func RecordContentSafetyBlocked() {
 	contentSafetyBlocked.Add(1)
 }
 
+func RecordCreativeAgentPlanRequest() {
+	creativeAgentPlanRequests.Add(1)
+}
+
+func RecordCreativeAgentContractFailure() {
+	creativeAgentContractFailures.Add(1)
+}
+
+func RecordCreativeAgentClarification() {
+	creativeAgentClarifications.Add(1)
+}
+
+func RecordCreativeAgentSubmission() {
+	creativeAgentSubmissions.Add(1)
+}
+
 func PrometheusText(workerHeartbeatAgeSeconds int64) string {
 	return fmt.Sprintf(`# HELP starai_http_requests_total Total HTTP requests.
 # TYPE starai_http_requests_total counter
@@ -66,8 +86,20 @@ starai_payment_webhook_rejected_total %d
 # HELP starai_content_safety_blocked_total Total user requests blocked by platform content safety rules.
 # TYPE starai_content_safety_blocked_total counter
 starai_content_safety_blocked_total %d
+# HELP starai_creative_agent_plan_requests_total Total accepted creative Agent planning requests.
+# TYPE starai_creative_agent_plan_requests_total counter
+starai_creative_agent_plan_requests_total %d
+# HELP starai_creative_agent_contract_failures_total Total planner outputs rejected by the structured response contract.
+# TYPE starai_creative_agent_contract_failures_total counter
+starai_creative_agent_contract_failures_total %d
+# HELP starai_creative_agent_clarifications_total Total creative Agent plans that require another user turn.
+# TYPE starai_creative_agent_clarifications_total counter
+starai_creative_agent_clarifications_total %d
+# HELP starai_creative_agent_submissions_total Total confirmed creative Agent media and workflow submissions.
+# TYPE starai_creative_agent_submissions_total counter
+starai_creative_agent_submissions_total %d
 # HELP starai_worker_heartbeat_age_seconds Seconds since the latest worker heartbeat, or -1 when unavailable.
 # TYPE starai_worker_heartbeat_age_seconds gauge
 starai_worker_heartbeat_age_seconds %d
-`, httpRequests.Load(), httpErrors.Load(), httpInFlight.Load(), httpDurationMS.Load(), rateLimitedRequests.Load(), paymentWebhookRejected.Load(), contentSafetyBlocked.Load(), workerHeartbeatAgeSeconds)
+`, httpRequests.Load(), httpErrors.Load(), httpInFlight.Load(), httpDurationMS.Load(), rateLimitedRequests.Load(), paymentWebhookRejected.Load(), contentSafetyBlocked.Load(), creativeAgentPlanRequests.Load(), creativeAgentContractFailures.Load(), creativeAgentClarifications.Load(), creativeAgentSubmissions.Load(), workerHeartbeatAgeSeconds)
 }

@@ -63,9 +63,10 @@ import {
 } from "@starai/shared-types";
 import { api, apiForLocale, importAssetFromURL, listAssets, uploadAsset } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
+import { socialPublishText } from "./contentCreationResult";
 import { SchemaForm, schemaDefaults, schemaProperties } from "./SchemaForm";
 
-type CanvasNodeKind = "textInput" | "imageInput" | "generator" | "compositor";
+type CanvasNodeKind = "textInput" | "imageInput" | "generator" | "compositor" | "contentResult";
 type GeneratorKind = "text" | "image" | "video" | "audio";
 type StoryNarrationMode = "narration" | "first_person" | "third_person" | "character_dialogue" | "smart";
 type StorySpeechItem = {
@@ -141,6 +142,10 @@ type CanvasNodeData = Record<string, unknown> & {
   storySpeechPlan?: StorySpeechItem[];
   storyVoiceAssignments?: Record<string, string>;
   storyVoiceOverrides?: Record<string, string>;
+  contentRole?: "publish_copy" | "publish_image" | "result";
+  contentIndex?: number;
+  contentCopyNodeID?: string;
+  contentImageNodeIDs?: string[];
   viralGroupID?: string;
   viralRole?: "brief" | "reference" | "brand" | "audio" | "analysis" | "keyframe" | "video" | "final";
   viralVariant?: "viral" | "video" | "one_click";
@@ -312,6 +317,7 @@ const NODE_TEMPLATES = [
   { id: "text-image", icon: Sparkles, titleKey: "canvas.template.textImage", descKey: "canvas.template.textImageDesc", tone: "orange" },
   { id: "image-image", icon: ImageIcon, titleKey: "canvas.template.imageImage", descKey: "canvas.template.imageImageDesc", tone: "emerald" },
   { id: "text-image-mix", icon: FileImage, titleKey: "canvas.template.textImageMix", descKey: "canvas.template.textImageMixDesc", tone: "blue" },
+  { id: "content-image-post", icon: Images, titleKey: "canvas.template.contentImagePost", descKey: "canvas.template.contentImagePostDesc", tone: "emerald" },
   { id: "multi-image", icon: Images, titleKey: "canvas.template.multiImage", descKey: "canvas.template.multiImageDesc", tone: "amber" },
   { id: "text-video", icon: Film, titleKey: "canvas.template.textVideo", descKey: "canvas.template.textVideoDesc", tone: "pink" },
   { id: "image-video", icon: Boxes, titleKey: "canvas.template.imageVideo", descKey: "canvas.template.imageVideoDesc", tone: "violet" },
@@ -346,6 +352,7 @@ const DEFAULT_TEMPLATE_ZH: Record<string, { name: string; description: string }>
   "text-image": { name: "文字生图片", description: "文本提示词连接图片生成节点" },
   "image-image": { name: "图片生图片", description: "文本需求连接带参考图入口的图片生成节点" },
   "text-image-mix": { name: "文案与配图", description: "文本需求先生成文案，再生成配图" },
+  "content-image-post": { name: "内容创作", description: "面向公众号、小红书和今日头条生成文字内容与多张配图" },
   "multi-image": { name: "多图对比", description: "同一文本需求并行生成两套图片方案" },
   "text-video": { name: "文字生视频", description: "文本提示词连接视频生成节点" },
   "image-video": { name: "首帧生视频", description: "文本需求连接支持人像形象和首帧素材的视频生成节点" },
@@ -2203,6 +2210,89 @@ function GeneratorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   );
 }
 
+function ContentResultNode({ id, data, selected }: NodeProps<CanvasNode>) {
+  const { t } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const resultText = socialPublishText(String(data.outputText || ""));
+  const imageURLs = Array.isArray(data.outputUrls) ? data.outputUrls.map(String).filter(Boolean) : [];
+  const ready = Boolean(resultText || imageURLs.length);
+
+  return (
+    <NodeFrame
+      id={id}
+      selected={selected}
+      title={data.label || t("canvas.result.title")}
+      icon={<MessageSquareText size={16} />}
+      source={false}
+      className={open ? "w-[380px]" : "w-[300px]"}
+      headerActions={(
+        <button
+          type="button"
+          aria-label={t(open ? "canvas.result.collapse" : "canvas.result.expand")}
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+          className="nodrag flex h-7 items-center gap-1 rounded-lg px-2 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10"
+        >
+          {t(open ? "canvas.result.collapse" : "canvas.result.expand")}
+          <ChevronDown size={13} className={`transition ${open ? "rotate-180" : ""}`} />
+        </button>
+      )}
+    >
+      {open ? (
+        <div className="nodrag nowheel space-y-3 p-3">
+          {resultText ? (
+            <>
+              <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-xl bg-gray-50 p-3 text-xs leading-5 text-gray-700 dark:bg-white/5 dark:text-gray-200">{resultText}</div>
+              <button
+                type="button"
+                onClick={async () => {
+                  await copyCanvasText(resultText);
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1600);
+                }}
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 text-sm font-semibold text-white hover:bg-emerald-600"
+              >
+                {copied ? <Check size={16} /> : <Copy size={16} />}
+                {t(copied ? "canvas.result.copied" : "canvas.result.copy")}
+              </button>
+            </>
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-200 px-3 py-5 text-center text-xs leading-5 text-gray-400 dark:border-white/10">{t("canvas.result.waiting")}</div>
+          )}
+          <div className="flex items-center justify-between text-[11px] font-medium text-gray-500 dark:text-gray-300">
+            <span>{t("canvas.result.images")}</span>
+            <span>{imageURLs.length}/4</span>
+          </div>
+          {imageURLs.length > 0 && (
+            <div className="grid grid-cols-4 gap-2">
+              {imageURLs.map((url, index) => (
+                <button
+                  key={`${url}-${index}`}
+                  type="button"
+                  title={t("canvas.result.downloadImage", { index: index + 1 })}
+                  onClick={() => void downloadCanvasResult(url, `starai-content-${index + 1}-${Date.now()}.png`)}
+                  className="group relative aspect-square overflow-hidden rounded-lg bg-gray-100 dark:bg-white/5"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={url} alt={t("canvas.result.image", { index: index + 1 })} className="h-full w-full object-cover" />
+                  <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition group-hover:bg-black/40 group-hover:opacity-100"><Download size={15} /></span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] leading-4 text-gray-400">{t("canvas.result.hint")}</p>
+        </div>
+      ) : (
+        <button type="button" onClick={() => setOpen(true)} className="nodrag flex w-full items-center justify-between gap-3 px-3 py-3 text-left text-[11px] text-gray-500 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-white/5">
+          <span>{ready ? t("canvas.result.ready", { count: imageURLs.length }) : t("canvas.result.waitingShort")}</span>
+          <ChevronDown size={14} className="shrink-0" />
+        </button>
+      )}
+    </NodeFrame>
+  );
+}
+
 function CompositorNode({ id, data, selected }: NodeProps<CanvasNode>) {
   const actions = useContext(CanvasNodeActions);
   const { t } = useI18n();
@@ -2312,6 +2402,7 @@ const nodeTypes = {
   imageInput: ImageInputNode,
   generator: GeneratorNode,
   compositor: CompositorNode,
+  contentResult: ContentResultNode,
 };
 
 function CanvasEditor({
@@ -4456,6 +4547,35 @@ function CanvasEditor({
       const output = generator("image", 0, t("canvas.node.copyIllustration"), 2);
       nextNodes = [textNode, copyNode, output];
       nextEdges = [connect(textNode, copyNode), connect(copyNode, output)];
+    } else if (templateID === "content-image-post") {
+      const textNode = text(t("canvas.template.contentImagePostPrompt"));
+      const copyNode = generator("text", 0, t("canvas.node.contentPostPlan"));
+      copyNode.data.prompt = t("canvas.template.contentImagePlannerPrompt");
+      copyNode.data.contentRole = "publish_copy";
+      const images = Array.from({ length: 4 }, (_, index) => {
+        const imageNode = generator("image", index * 260, `${t("canvas.node.contentPostImage")} ${index + 1}`, 2);
+        imageNode.data.prompt = t("canvas.template.contentImageCardPrompt", { index: index + 1 });
+        imageNode.data.contentRole = "publish_image";
+        imageNode.data.contentIndex = index;
+        return imageNode;
+      });
+      const resultNode: CanvasNode = {
+        id: newNodeID(),
+        type: "contentResult",
+        position: { x: originX + 1290, y: originY + 390 },
+        data: {
+          label: t("canvas.result.title"),
+          contentRole: "result",
+          contentCopyNodeID: copyNode.id,
+          contentImageNodeIDs: images.map((imageNode) => imageNode.id),
+        },
+      };
+      nextNodes = [textNode, copyNode, ...images, resultNode];
+      nextEdges = [
+        connect(textNode, copyNode),
+        ...images.map((imageNode) => connect(copyNode, imageNode)),
+        ...images.map((imageNode) => connect(imageNode, resultNode)),
+      ];
     } else if (templateID === "ecommerce-visual-pack") {
       const textNode = text();
       const mainImage = generator("image", 0, t("canvas.node.productMainImage"));
@@ -4701,8 +4821,11 @@ function CanvasEditor({
       const { inputID, segmentCount, segmentDuration } = viralBootstrap;
       window.setTimeout(() => configureViral(inputID, segmentCount, segmentDuration), 0);
     }
-    window.setTimeout(() => void setViewport({ x: Math.min(0, 180 - originX), y: 80, zoom: 1 }, { duration: 350 }), 50);
-  }, [audioModels, chatModels, configureStory, configureViral, imageModels, setEdges, setNodes, setViewport, t, videoModels, workspaceRuntime]);
+    window.setTimeout(() => {
+      if (templateID === "content-image-post") void fitView({ padding: 0.16, maxZoom: 0.72, duration: 400 });
+      else void setViewport({ x: Math.min(0, 180 - originX), y: 80, zoom: 1 }, { duration: 350 });
+    }, 50);
+  }, [audioModels, chatModels, configureStory, configureViral, fitView, imageModels, setEdges, setNodes, setViewport, t, videoModels, workspaceRuntime]);
 
   const bootstrapInitialTemplate = useCallback(() => {
     if (!initialTemplateID) return;
@@ -5094,6 +5217,16 @@ function CanvasEditor({
   const hasContinuation = hasCheckpoint && executableNodes.some(nodeNeedsContinuation);
   const hasPartialFailure = executableNodes.some((node) => node.data.status === "succeeded")
     && executableNodes.some((node) => node.data.status === "failed" || node.data.status === "blocked");
+  const renderedNodes = useMemo(() => nodes.map((node) => {
+    if (node.type !== "contentResult") return node;
+    const copyNode = nodes.find((item) => item.id === node.data.contentCopyNodeID);
+    const imageURLs = (Array.isArray(node.data.contentImageNodeIDs) ? node.data.contentImageNodeIDs : [])
+      .flatMap((id) => nodes.find((item) => item.id === id)?.data.outputUrl || []);
+    return {
+      ...node,
+      data: { ...node.data, outputText: copyNode?.data.outputText || "", outputUrls: imageURLs },
+    };
+  }), [nodes]);
 
   return (
     <CanvasNodeActions.Provider value={actions}>
@@ -5110,7 +5243,7 @@ function CanvasEditor({
           }}
         />
         <ReactFlow<CanvasNode, CanvasEdge>
-          nodes={nodes}
+          nodes={renderedNodes}
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}

@@ -49,7 +49,7 @@ func TestAgentLightweightDatabaseFlow(t *testing.T) {
  CREATE TABLE workflow_definitions(id bigserial PRIMARY KEY,code text UNIQUE,name text,description text,icon text,category text,nodes jsonb DEFAULT '[]',input_schema jsonb DEFAULT '{}',price_rule jsonb DEFAULT '{}',display_config jsonb DEFAULT '{}',runtime_config jsonb DEFAULT '{}',is_enabled boolean DEFAULT true,sort_order int DEFAULT 0,updated_at timestamptz DEFAULT now());
  CREATE TABLE models(id bigserial PRIMARY KEY,code text,display_name text DEFAULT '',new_api_model text DEFAULT '',new_api_endpoint text DEFAULT '',request_mode text DEFAULT 'video',category text DEFAULT 'video',icon_url text,description text,tags jsonb DEFAULT '[]',input_schema jsonb,default_params jsonb DEFAULT '{}',new_api_extra_params jsonb DEFAULT '{}',price_rule jsonb DEFAULT '{}',runtime_rule jsonb DEFAULT '{}',retention_days int DEFAULT 7,is_enabled boolean DEFAULT true,sort_order int DEFAULT 0);
  INSERT INTO workflow_definitions(code,name,category,runtime_config) VALUES ('general_creative_agent','Agent','workflow','{"video_model_code":"eight","image_model_code":"image","speech_model_code":"speech","analysis_model_code":"chat"}');
- INSERT INTO models(code,input_schema) VALUES ('eight','{"properties":{"duration":{"enum":[8]}}}'),('twelve','{"properties":{"duration":{"enum":[12]}}}');
+ INSERT INTO models(code,input_schema) VALUES ('eight','{"properties":{"duration":{"enum":[8]},"ratio":{"enum":["16:9","9:16"]}}}'),('twelve','{"properties":{"duration":{"enum":[12]},"ratio":{"enum":["16:9","9:16"]}}}');
  INSERT INTO conversations(public_id,user_id) VALUES ('conv',1);`)
 	if err != nil {
 		t.Fatal(err)

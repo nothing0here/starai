@@ -14,7 +14,7 @@ import (
 // This adapter repairs LLM proposals, not execution inputs. The strict service
 // whitelist remains authoritative; unresolved changes never grant confirmation.
 var creativeSlotGuidance = map[string]string{
-	"quality":               "画质可选 480p、720p、1080p、4K，或回复“使用默认画质”；具体可用项还会按所选模型核对",
+	"quality":               "视频画质可选 480p、720p、1080p、2K、4K；图片清晰度可选 1K、2K、4K；也可回复“使用默认画质”，具体可用项会按所选模型核对",
 	"aspect_ratio":          "画幅可选 9:16（竖屏）、16:9（横屏）、1:1、4:3、3:4",
 	"target_duration_sec":   "请填写 1–600 的整数秒数，例如“10秒”；超出范围需调整时长，不会擅自截短",
 	"media_type":            "请说明制作图片、视频、配音还是音乐",
@@ -22,6 +22,7 @@ var creativeSlotGuidance = map[string]string{
 	"narration_perspective": "请说明自动安排、第一人称、第三人称或角色对白",
 	"use_previous_media":    "请明确是否引用上一条生成的素材",
 	"is_instrumental":       "请明确制作纯音乐还是带歌词的歌曲",
+	"voice_gender":          "请明确使用男声还是女声",
 	"prompt":                "请提供文本形式的制作需求（不超过 20000 字）",
 	"script":                "请提供完整文案正文（不超过 20000 字）",
 	"generation_prompt":     "请提供一个完整的生成提示词（不超过 20000 字）",
@@ -65,6 +66,13 @@ func normalizeCreativeSlotValue(key string, value interface{}) interface{} {
 		}
 	case "media_type", "audio_strategy", "narration_perspective":
 		return strings.ToLower(strings.TrimSpace(s))
+	case "voice_gender":
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "male", "man", "男", "男性", "男声":
+			return "male"
+		case "female", "woman", "女", "女性", "女声":
+			return "female"
+		}
 	}
 	return value
 }
@@ -94,6 +102,14 @@ func prepareCreativeSlotUpdates(d *service.AgentDraft, updates, evidence map[str
 		delete(d.SlotIssues, "quality")
 		delete(updates, "quality")
 		notes = append(notes, "已按你的要求使用模型默认画质。")
+	}
+	if gender, quote, ok := creativeAgentRequestedVoiceGender(text); ok {
+		updates["voice_gender"], evidence["voice_gender"] = gender, quote
+	}
+	if regexp.MustCompile(`纯音乐|无歌词|不要歌词|不需要歌词`).MatchString(text) {
+		updates["is_instrumental"], evidence["is_instrumental"] = true, text
+	} else if regexp.MustCompile(`带歌词|有人声|演唱|唱一首`).MatchString(text) {
+		updates["is_instrumental"], evidence["is_instrumental"] = false, text
 	}
 	keys := make([]string, 0, len(updates))
 	for key := range updates {
@@ -143,6 +159,24 @@ func prepareCreativeSlotUpdates(d *service.AgentDraft, updates, evidence map[str
 		}
 	}
 	return updates, evidence, notes, nil
+}
+
+func creativeAgentRequestedVoiceGender(text string) (string, string, bool) {
+	pattern := regexp.MustCompile(`(?i)(不要|不用|不是|拒绝|取消)?\s*(男声|女声|男性|女性|male|female)`)
+	gender, quote := "", ""
+	for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+		if strings.TrimSpace(match[1]) != "" {
+			continue
+		}
+		quote = strings.TrimSpace(match[2])
+		switch strings.ToLower(quote) {
+		case "男声", "男性", "male":
+			gender = "male"
+		case "女声", "女性", "female":
+			gender = "female"
+		}
+	}
+	return gender, quote, gender != ""
 }
 
 func creativeAgentRequestedAspectRatio(text string) (string, string, bool) {

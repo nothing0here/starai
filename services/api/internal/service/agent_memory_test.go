@@ -19,3 +19,11 @@ func TestAgentMemoryKeepsRecentDialogueAndBoundedExcerpts(t *testing.T) {
 		t.Fatalf("invalid memory: %v %q", recent, summary)
 	}
 }
+
+func TestAgentMemoryDoesNotDuplicatePersistedStreamingRetry(t *testing.T) {
+	p := DefaultAgentPolicy()
+	recent, _ := buildAgentMemory([]runtime.ChatMessage{{Role: "user", Content: "生成一张猫咪图片"}}, "生成一张猫咪图片", p)
+	if len(recent) != 1 {
+		t.Fatalf("streaming retry duplicated latest user turn: %#v", recent)
+	}
+}

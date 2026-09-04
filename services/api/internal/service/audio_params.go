@@ -66,6 +66,11 @@ func validateAudioTaskParams(model *ModelFull, params map[string]interface{}) er
 	modelName := strings.ToLower(strings.TrimSpace(model.NewAPIModel))
 	endpoint := strings.ToLower(strings.TrimSpace(model.NewAPIEndpoint))
 	lyrics := strings.TrimSpace(audioStringValue(params["lyrics"]))
+	if lyrics == "" && mappedUpstreamKey(parseUpstreamConfig(model.RuntimeRule), "prompt", "prompt") == "lyrics" {
+		// Some music APIs name the primary user textarea "prompt" locally but
+		// map it to lyrics upstream. Validate the canonical value we will send.
+		lyrics = prompt
+	}
 	musicPrompt := strings.TrimSpace(audioStringValue(params["music_prompt"]))
 	if strings.Contains(modelName, "fun-music") {
 		if prompt == "" && lyrics == "" {

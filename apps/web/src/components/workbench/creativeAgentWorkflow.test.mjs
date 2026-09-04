@@ -74,3 +74,30 @@ test("legacy nested history and failed materials remain separated", () => {
   assert.deepEqual(workflowMaterials(legacy).audios, ["voice.wav"]);
   assert.deepEqual(workflowSuccessMessage(legacy).videos, ["final.mp4"]);
 });
+
+test("content image workflow returns publishable copy and final card images", () => {
+  const contentRun = {
+    public_id: "content-a",
+    workflow_code: "content_image_post",
+    status: "succeeded",
+    outputs: {
+      content_post: {
+        title: "秋季护肤指南",
+        hook: "换季别焦虑",
+        body: "三步建立稳定的护肤节奏。",
+        hashtags: ["#秋季护肤", "#生活方式"],
+        cards: [
+          { image_url: "cover.png" },
+          { image_url: "point.png" },
+        ],
+      },
+      media_tasks: [{ type: "image", status: "succeeded", output: { image_url: "cover.png" } }],
+    },
+  };
+  assert.deepEqual(finalWorkflowMedia(contentRun), { images: ["cover.png", "point.png"], videos: [], audios: [] });
+  assert.deepEqual(workflowMaterials(contentRun).images, ["cover.png"]);
+  const message = workflowSuccessMessage(contentRun);
+  assert.match(message.content, /秋季护肤指南/);
+  assert.match(message.content, /#秋季护肤/);
+  assert.deepEqual(message.images, ["cover.png", "point.png"]);
+});

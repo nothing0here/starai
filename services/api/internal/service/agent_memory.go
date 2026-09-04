@@ -55,7 +55,9 @@ func buildAgentMemory(history []runtime.ChatMessage, latest string, p AgentPolic
 	for i := range recent {
 		recent[i].Content = agentMemoryClip(recent[i].Content, 12000)
 	}
-	recent = append(recent, runtime.ChatMessage{Role: "user", Content: latest})
+	if len(recent) == 0 || recent[len(recent)-1].Role != "user" || strings.TrimSpace(recent[len(recent)-1].Content) != strings.TrimSpace(latest) {
+		recent = append(recent, runtime.ChatMessage{Role: "user", Content: latest})
+	}
 	return recent, summary
 }
 

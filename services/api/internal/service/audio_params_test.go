@@ -92,6 +92,10 @@ func TestValidateAudioTaskParamsForOptionalMusicInputs(t *testing.T) {
 			name:  "minimax optimizer can create lyrics from description",
 			model: minimaxMusicValidationModel(), params: map[string]interface{}{"lyrics_optimizer": true, "music_prompt": "warm piano"},
 		},
+		{
+			name:  "minimax accepts primary prompt mapped to lyrics",
+			model: minimaxMusicValidationModel(), params: map[string]interface{}{"prompt": "[Verse] hello", "music_prompt": "warm piano"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -106,6 +110,9 @@ func TestValidateAudioTaskParamsForOptionalMusicInputs(t *testing.T) {
 func minimaxMusicValidationModel() *ModelFull {
 	return &ModelFull{
 		NewAPIModel: "music-2.6", NewAPIEndpoint: "/v1/music_generation",
-		RuntimeRule: map[string]interface{}{"audio": map[string]interface{}{"prompt_required": false}},
+		RuntimeRule: map[string]interface{}{
+			"audio":    map[string]interface{}{"prompt_required": false},
+			"upstream": map[string]interface{}{"map": map[string]interface{}{"prompt": "lyrics"}},
+		},
 	}
 }

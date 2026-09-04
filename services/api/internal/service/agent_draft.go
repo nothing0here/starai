@@ -59,21 +59,27 @@ func ApplyAgentSlotUpdates(d *AgentDraft, updates, evidence map[string]interface
 	for key, value := range updates {
 		valid := false
 		switch key {
-		case "prompt", "script", "generation_prompt", "character", "style", "ending", "music_prompt":
+		case "prompt", "script", "generation_prompt", "character", "style", "ending", "music_prompt", "platform":
 			s, ok := value.(string)
 			valid = ok && len([]rune(s)) <= 20000
 		case "media_type":
 			s, ok := value.(string)
 			valid = ok && (s == "image" || s == "video" || s == "speech" || s == "music")
+		case "voice_gender":
+			s, ok := value.(string)
+			valid = ok && (s == "male" || s == "female")
 		case "target_duration_sec":
 			n := intFromAgentAny(value)
 			valid = n >= 1 && n <= 600 && fmt.Sprint(n) == fmt.Sprint(value)
+		case "image_count":
+			n := intFromAgentAny(value)
+			valid = n >= 2 && n <= 6 && fmt.Sprint(n) == fmt.Sprint(value)
 		case "aspect_ratio":
 			s, ok := value.(string)
 			valid = ok && (s == "" || s == "16:9" || s == "9:16" || s == "1:1" || s == "4:3" || s == "3:4")
 		case "quality":
 			s, ok := value.(string)
-			valid = ok && (s == "" || s == "480p" || s == "720p" || s == "1080p" || s == "4k")
+			valid = ok && (s == "" || s == "480p" || s == "720p" || s == "1080p" || s == "1k" || s == "2k" || s == "4k")
 		case "audio_strategy":
 			s, ok := value.(string)
 			valid = ok && (s == "" || s == "video_native" || s == "tts_only" || s == "hybrid")

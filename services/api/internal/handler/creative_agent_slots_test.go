@@ -60,6 +60,26 @@ func TestCreativeSlotRecognizesNamedOrientation(t *testing.T) {
 	}
 }
 
+func TestCreativeSlotRecognizesVoiceAndInstrumentalMode(t *testing.T) {
+	for _, test := range []struct{ text, want string }{
+		{"请用男声朗读", "male"},
+		{"不要男声，改用女声", "female"},
+		{"female voice please", "female"},
+	} {
+		gender, _, ok := creativeAgentRequestedVoiceGender(test.text)
+		if !ok || gender != test.want {
+			t.Fatalf("text=%q gender=%q ok=%v, want %q", test.text, gender, ok, test.want)
+		}
+	}
+	draft := &service.AgentDraft{}
+	if err := mergeCreativeAgentDraft(draft, map[string]interface{}{"intent": "music", "prompt": "舒缓钢琴", "slot_updates": map[string]interface{}{}}, "生成一段无歌词的纯音乐"); err != nil {
+		t.Fatal(err)
+	}
+	if draft.Slots["is_instrumental"] != true {
+		t.Fatalf("instrumental intent was not preserved: %#v", draft.Slots)
+	}
+}
+
 func TestCreativeSlotIssuesPreserveDemandAcrossCorrection(t *testing.T) {
 	d := &service.AgentDraft{Version: 2, Slots: map[string]interface{}{"script": "保留播报文案", "quality": "720p", "target_duration_sec": 10, "media_type": "video"}}
 	if err := mergeCreativeAgentDraft(d, map[string]interface{}{"intent": "video", "slot_updates": map[string]interface{}{"style": "演播室风格"}}, "改为8K画质，9:16"); err != nil {
@@ -126,7 +146,7 @@ func TestCreativeSlotRepairDatabaseConfirmation(t *testing.T) {
 	_, err = pool.Exec(ctx, `CREATE TABLE conversations(public_id text PRIMARY KEY,user_id bigint,agent_state jsonb DEFAULT '{}',updated_at timestamptz DEFAULT now());
 CREATE TABLE workflow_definitions(code text,name text,description text,icon text,category text,nodes jsonb,input_schema jsonb,price_rule jsonb,display_config jsonb,runtime_config jsonb,is_enabled bool,sort_order int);
 CREATE TABLE models(id bigint,code text,display_name text,new_api_model text,new_api_endpoint text,request_mode text,category text,icon_url text,description text,tags jsonb,input_schema jsonb,default_params jsonb,new_api_extra_params jsonb,price_rule jsonb,runtime_rule jsonb,retention_days int,is_enabled bool,sort_order int);
-INSERT INTO models VALUES (1,'video_test','Video','','','video','video',NULL,NULL,'[]','{"properties":{"duration":{"enum":[8]}}}','{}','{}','{}','{}',7,true,0);
+INSERT INTO models VALUES (1,'video_test','Video','','','video','video',NULL,NULL,'[]','{"properties":{"duration":{"enum":[8]},"ratio":{"enum":["16:9","9:16"]}}}','{}','{}','{}','{}',7,true,0);
 INSERT INTO conversations(public_id,user_id) VALUES ('news',1);`)
 	if err != nil {
 		t.Fatal(err)
