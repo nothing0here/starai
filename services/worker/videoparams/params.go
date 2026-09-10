@@ -92,6 +92,9 @@ func BuildUpstreamVideoPayload(
 	if strings.EqualFold(upCfg.Adapter, "aliyun_video_generation") {
 		out = buildAliyunVideoPayload(modelName, params)
 	}
+	if strings.EqualFold(upCfg.Adapter, "linkai_video") {
+		out = buildLinkAIVideoPayload(out, params)
+	}
 	modelLower := strings.ToLower(modelName)
 	if instruction, ok := params["instruction"]; ok && (strings.Contains(modelLower, "qwen-audio") || strings.Contains(modelLower, "cosyvoice")) && !omitAutoValue(instruction) {
 		setPayloadValue(out, "input.instruction", instruction)
@@ -100,6 +103,129 @@ func BuildUpstreamVideoPayload(
 		out["_video_upload_profile"] = uploadProfile
 	}
 	return SanitizeUpstreamPayload(out, "")
+}
+
+// linkAIVideoDurations are the durations the Link-AI video relay accepts for
+// Seedance-class models; other values are snapped to the nearest option.
+var linkAIVideoDurations = []int{4, 5, 8, 10, 15}
+
+// buildLinkAIVideoPayload renders the flat JSON body used by relay video APIs
+// such as Link-AI (POST /v1/videos/generations): model, prompt, public media
+// URLs, aspect ratio, duration and size tier. Platform-only params are dropped
+// because the relay rejects unknown fields.
+func buildLinkAIVideoPayload(out, params map[string]interface{}) map[string]interface{} {
+	next := map[string]interface{}{}
+	if model, ok := out["model"]; ok {
+		next["model"] = model
+	}
+	if prompt, ok := out["prompt"]; ok {
+		next["prompt"] = prompt
+	}
+	mode := strings.ToLower(strings.TrimSpace(fmt.Sprint(params["generation_mode"])))
+	if mode == "<nil>" {
+		mode = ""
+	}
+	var images []string
+	if mode == "first_frame" || mode == "first_last" {
+		images = append(images, mediaURLList(params["first_frame"])...)
+		if mode == "first_last" {
+			images = append(images, mediaURLList(params["last_frame"])...)
+		}
+		if len(images) > 0 {
+			next["image_mode"] = "first_last_frame"
+		}
+	} else {
+		images = append(images, mediaURLList(params["reference_images"])...)
+	}
+	if len(images) > 9 {
+		images = images[:9]
+	}
+	if len(images) > 0 {
+		next["images"] = images
+	}
+	if videos := mediaURLList(params["reference_videos"]); len(videos) > 0 {
+		next["videos"] = videos
+	}
+	if audios := mediaURLList(params["reference_audios"]); len(audios) > 0 {
+		next["audios"] = audios
+	}
+	if aspectRatio := linkAIVideoAspectRatio(params); aspectRatio != "" {
+		next["aspect_ratio"] = aspectRatio
+	}
+	if size := linkAIVideoSize(params); size != "" {
+		next["size"] = size
+	}
+	if duration := linkAIVideoDuration(params); duration > 0 {
+		next["duration"] = duration
+	}
+	for _, key := range []string{"generate_audio", "watermark"} {
+		if value, ok := params[key]; ok && value != nil {
+			next[key] = value
+		}
+	}
+	// Keeping the payload out of the Sora/Veo image promotions downstream is
+	// what preserves the multi-image `images` array this relay expects.
+	next["_linkai_video"] = true
+	next["_preserve_video_params"] = true
+	return next
+}
+
+func linkAIVideoAspectRatio(params map[string]interface{}) string {
+	for _, key := range []string{"ratio", "aspect_ratio", "orientation"} {
+		value := strings.TrimSpace(fmt.Sprint(params[key]))
+		if value == "" || value == "<nil>" {
+			continue
+		}
+		switch strings.ToLower(value) {
+		case "portrait", "vertical":
+			return "9:16"
+		case "landscape", "horizontal":
+			return "16:9"
+		case "adaptive", "auto", "smart":
+			return ""
+		}
+		return value
+	}
+	return ""
+}
+
+func linkAIVideoSize(params map[string]interface{}) string {
+	for _, key := range []string{"resolution", "size"} {
+		value := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(fmt.Sprint(params[key])), " ", ""))
+		switch value {
+		case "480P", "720P", "1080P":
+			return value
+		case "720X1280", "1280X720":
+			return "720P"
+		case "1920X1080", "1080X1920":
+			return "1080P"
+		}
+	}
+	return ""
+}
+
+func linkAIVideoDuration(params map[string]interface{}) int {
+	raw, ok := params["duration"]
+	if !ok || raw == nil {
+		return 0
+	}
+	value := 0
+	switch typed := normalizeVideoDuration(raw).(type) {
+	case int:
+		value = typed
+	case float64:
+		value = int(math.Round(typed))
+	}
+	if value <= 0 {
+		return 0
+	}
+	best := linkAIVideoDurations[0]
+	for _, option := range linkAIVideoDurations {
+		if math.Abs(float64(option-value)) < math.Abs(float64(best-value)) {
+			best = option
+		}
+	}
+	return best
 }
 
 func buildAliyunQwenImagePayload(model string, params map[string]interface{}) map[string]interface{} {
@@ -214,6 +340,7 @@ func intValue(value interface{}) int {
 func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[string]interface{} {
 	delete(out, "connection")
 	preserveVideoParams, _ := out["_preserve_video_params"].(bool)
+	linkAIVideo, _ := out["_linkai_video"].(bool)
 	uploadProfile := strings.ToLower(strings.TrimSpace(fmt.Sprint(out["_video_upload_profile"])))
 	normalizedEndpoint := strings.ToLower(strings.TrimSpace(endpoint))
 	if strings.Contains(normalizedEndpoint, "/v2/video_generation") ||
@@ -223,6 +350,7 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 	if endpoint != "" {
 		delete(out, "_preserve_video_params")
 		delete(out, "_video_upload_profile")
+		delete(out, "_linkai_video")
 	}
 	platformOnly := []string{
 		"n", "count", "asset_ids", "reference_asset_ids", "file_asset_ids",
@@ -239,7 +367,11 @@ func SanitizeUpstreamPayload(out map[string]interface{}, endpoint string) map[st
 	}
 	normalizeAspectRatioField(out)
 	if endpoint == "" || strings.Contains(endpoint, "/v1/videos") {
-		if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" || isVeoVideoModel(out["model"]) {
+		if linkAIVideo {
+			// Relay video APIs (Link-AI) take explicit images/videos/audios
+			// arrays and reject both the Sora single image_url shape and
+			// base64 payloads, so the arrays are forwarded untouched.
+		} else if uploadProfile == "frame_pair" || uploadProfile == "veo_frame_pair" || uploadProfile == "veo_reference" || uploadProfile == "omni_reference" || isVeoVideoModel(out["model"]) {
 			promoteVeoImages(out)
 		} else {
 			promoteSoraImageURL(out)

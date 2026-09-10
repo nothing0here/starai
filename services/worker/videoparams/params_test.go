@@ -32,6 +32,57 @@ func TestBuildUpstreamPayloadPreservesConfiguredVideoDurations(t *testing.T) {
 	}
 }
 
+func TestBuildLinkAIVideoPayloadKeepsPublicMediaURLs(t *testing.T) {
+	rule := map[string]interface{}{
+		"video": map[string]interface{}{"upload_profile": "seedance_2"},
+		"upstream": map[string]interface{}{
+			"adapter": "linkai_video",
+			"include": []interface{}{"ratio", "resolution", "duration", "generate_audio", "watermark", "reference_images", "reference_videos"},
+		},
+	}
+	got := BuildUpstreamVideoPayload(
+		"doubao-seedance-2-0-fast",
+		"doubao-seedance-2-0-fast",
+		rule,
+		map[string]interface{}{},
+		map[string]interface{}{
+			"prompt":           "复刻片段",
+			"duration":         12,
+			"ratio":            "9:16",
+			"resolution":       "720p",
+			"generate_audio":   true,
+			"watermark":        false,
+			"reference_images": []interface{}{"https://cdn.example.com/keyframe.png"},
+			"reference_videos": []interface{}{"https://cdn.example.com/ref.mp4"},
+		},
+	)
+	got = SanitizeUpstreamPayload(got, "/v1/videos/generations")
+
+	images, ok := got["images"].([]string)
+	if !ok || len(images) != 1 || images[0] != "https://cdn.example.com/keyframe.png" {
+		t.Fatalf("images = %#v, want the public reference URL", got["images"])
+	}
+	if _, leaked := got["image_url"]; leaked {
+		t.Fatalf("payload must not fall back to the Sora single image_url shape: %#v", got)
+	}
+	videos, ok := got["videos"].([]string)
+	if !ok || len(videos) != 1 || videos[0] != "https://cdn.example.com/ref.mp4" {
+		t.Fatalf("videos = %#v, want the public reference video URL", got["videos"])
+	}
+	if got["aspect_ratio"] != "9:16" || got["size"] != "720P" {
+		t.Fatalf("aspect_ratio/size = %#v/%#v, want 9:16/720P", got["aspect_ratio"], got["size"])
+	}
+	if duration, ok := got["duration"].(int); !ok || duration != 10 {
+		t.Fatalf("duration = %#v, want the nearest supported value 10", got["duration"])
+	}
+	if _, leaked := got["_linkai_video"]; leaked {
+		t.Fatalf("internal marker leaked into the upstream body: %#v", got)
+	}
+	if _, leaked := got["_preserve_video_params"]; leaked {
+		t.Fatalf("internal marker leaked into the upstream body: %#v", got)
+	}
+}
+
 func TestBuildAliyunQwenImagePayload(t *testing.T) {
 	got := BuildUpstreamVideoPayload("qwen", "qwen-image-3.0-pro", map[string]interface{}{
 		"upstream": map[string]interface{}{"adapter": "aliyun_qwen_image_v3", "map": map[string]interface{}{"prompt": "input.prompt"}},

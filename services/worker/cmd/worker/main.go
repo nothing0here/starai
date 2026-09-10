@@ -1057,8 +1057,12 @@ func executeWorkerGenerationAttempt(ctx context.Context, pool *pgxpool.Pool, p I
 	if isVideo {
 		payload = videoparams.SanitizeUpstreamPayload(payload, endpoint)
 	}
-	if err := normalizePayloadMedia(ctx, payload, endpoint); err != nil {
-		return result, err
+	// Relay video APIs (Link-AI) only accept public media URLs, so the worker
+	// must not inline reference images as base64 data URIs for those routes.
+	if !workerKeepsPublicMediaURLs(route.RuntimeRule) {
+		if err := normalizePayloadMedia(ctx, payload, endpoint); err != nil {
+			return result, err
+		}
 	}
 	if isVideo {
 		if err := validateOmniReferencePayload(payload); err != nil {
@@ -1099,6 +1103,14 @@ func applyOpenAIImageOptions(out, input map[string]interface{}) {
 func isOpenAIImagesAdapter(runtimeRule map[string]interface{}) bool {
 	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
 	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "openai_images")
+}
+
+// workerKeepsPublicMediaURLs reports whether the upstream only accepts public
+// media URLs. Link-AI style video relays reject base64 data URIs, so reference
+// images must be forwarded as the storage URLs our users already have.
+func workerKeepsPublicMediaURLs(runtimeRule map[string]interface{}) bool {
+	upstream, _ := runtimeRule["upstream"].(map[string]interface{})
+	return strings.EqualFold(strings.TrimSpace(fmt.Sprint(upstream["adapter"])), "linkai_video")
 }
 
 func openAIImagesRequestTimeout(configured time.Duration) time.Duration {
