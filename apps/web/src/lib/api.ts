@@ -28,18 +28,53 @@ function responseMessage(value: unknown): string {
   return "";
 }
 
+function plainText(raw: string): string {
+  return raw
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const GATEWAY_ERROR_PATTERN = /<(!doctype|html)|cloudflare|bad gateway|gateway time-?out|error code \d{3}/i;
+
+/**
+ * Build a user-facing message for a failed HTTP response. Gateway pages
+ * (Cloudflare/nginx 5xx HTML, empty bodies from a proxy that gave up on a slow
+ * origin) are replaced by a short retry hint instead of dumping raw markup into
+ * the UI.
+ */
+function httpFailureMessage(status: number, raw: string, fallback: string): string {
+  let json: unknown = null;
+  try {
+    json = raw ? JSON.parse(raw) : null;
+  } catch {
+    json = null;
+  }
+  const message = responseMessage(json);
+  if (message) return message;
+  if (status >= 500 || GATEWAY_ERROR_PATTERN.test(raw)) {
+    return `${fallback}（HTTP ${status}），服务暂时不可用，请稍后重试`;
+  }
+  const detail = plainText(raw).slice(0, 160);
+  return `${fallback}（HTTP ${status}）${detail ? `：${detail}` : ""}`;
+}
+
 async function parseResponse<T>(res: Response, fallback: string): Promise<T> {
   const raw = await res.text();
   let json: unknown;
   try {
     json = raw ? JSON.parse(raw) : null;
   } catch {
-    const detail = raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
-    throw new Error(`${fallback}（HTTP ${res.status}）${detail ? `：${detail}` : ""}`);
+    json = null;
   }
 
   if (!res.ok) {
-    throw new Error(responseMessage(json) || `${fallback}（HTTP ${res.status}）`);
+    throw new Error(responseMessage(json) || httpFailureMessage(res.status, raw, fallback));
+  }
+
+  if (json === null && raw) {
+    throw new Error(httpFailureMessage(res.status, raw, fallback));
   }
 
   if (json && typeof json === "object" && "code" in json) {
@@ -51,6 +86,116 @@ async function parseResponse<T>(res: Response, fallback: string): Promise<T> {
   }
 
   return json as T;
+}
+
+export type ChatStreamHandlers = {
+  onContent?: (delta: string, accumulated: string) => void;
+  onReasoning?: (delta: string, accumulated: string) => void;
+  signal?: AbortSignal;
+};
+
+export type ChatStreamResult = {
+  content: string;
+  reasoning: string;
+  cost: number;
+};
+
+/**
+ * Run a chat completion over SSE and accumulate the answer on the client.
+ *
+ * Long multimodal calls (video analysis, long structured answers) can easily
+ * take one to three minutes. A buffered request stays silent for that whole
+ * time, which proxies in front of the API eventually abort with their own
+ * gateway error page; streaming returns bytes within the first seconds and
+ * keeps the connection alive until the model finishes.
+ */
+export async function streamChatCompletion(
+  path: string,
+  payload: Record<string, unknown>,
+  handlers: ChatStreamHandlers = {}
+): Promise<ChatStreamResult> {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      ...localeHeaders(),
+      ...legacyAuthHeaders(),
+    },
+    credentials: "include",
+    body: JSON.stringify({ ...payload, stream: true }),
+    signal: handlers.signal,
+  });
+
+  if (!res.ok) {
+    throw new Error(httpFailureMessage(res.status, await res.text(), "请求失败"));
+  }
+
+  const contentType = res.headers.get("Content-Type") || "";
+  if (!res.body || !contentType.includes("text/event-stream")) {
+    const raw = await res.text();
+    let json: unknown = null;
+    try {
+      json = raw ? JSON.parse(raw) : null;
+    } catch {
+      json = null;
+    }
+    const body = (json || {}) as { content?: unknown; reasoning_content?: unknown; cost?: unknown };
+    const message = responseMessage(json);
+    if (message && !body.content) throw new Error(message);
+    return {
+      content: typeof body.content === "string" ? body.content : "",
+      reasoning: typeof body.reasoning_content === "string" ? body.reasoning_content : "",
+      cost: Number(body.cost || 0),
+    };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+  let reasoning = "";
+  let cost = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+    for (const event of events) {
+      let dataText = "";
+      for (const line of event.split("\n")) {
+        if (line.startsWith("data:")) dataText += line.slice(5).trim();
+      }
+      if (!dataText || dataText === "[DONE]") continue;
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = JSON.parse(dataText) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const streamError = data?.error;
+      if (streamError && typeof streamError === "object") {
+        const message = (streamError as { message?: unknown }).message;
+        throw new Error(typeof message === "string" && message.trim() ? message : "模型服务异常");
+      }
+      const choice = Array.isArray(data?.choices) ? (data?.choices as Array<Record<string, unknown>>)[0] : undefined;
+      const delta = (choice?.delta || {}) as { content?: unknown; reasoning_content?: unknown };
+      if (typeof delta.content === "string" && delta.content) {
+        content += delta.content;
+        handlers.onContent?.(delta.content, content);
+      }
+      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+        reasoning += delta.reasoning_content;
+        handlers.onReasoning?.(delta.reasoning_content, reasoning);
+      }
+      const streamCost = Number(data?.cost);
+      if (Number.isFinite(streamCost) && streamCost > 0) cost = streamCost;
+    }
+  }
+
+  return { content, reasoning, cost };
 }
 
 export async function api<T>(

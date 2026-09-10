@@ -61,7 +61,7 @@ import {
   parseAudioRuntime,
   parseVideoRuntime,
 } from "@starai/shared-types";
-import { api, apiForLocale, importAssetFromURL, listAssets, uploadAsset } from "@/lib/api";
+import { api, apiForLocale, importAssetFromURL, listAssets, streamChatCompletion, uploadAsset } from "@/lib/api";
 import { useI18n } from "@/i18n/I18nProvider";
 import { socialPublishHTML, socialPublishText } from "./contentCreationResult";
 import { supportsVideoAnalysis } from "./canvasModelCapabilities";
@@ -3597,9 +3597,14 @@ function CanvasEditor({
     try {
       if (node.data.mediaKind === "text") {
         update(id, { status: "running", progress: 28, progressStage: "canvas.progress.text" });
-        const result = await api<{ content: string; cost: number }>("/api/chat/completions", {
-          method: "POST",
-          body: JSON.stringify({
+        // Long multimodal analysis (a video plus brand images) can take one to
+        // three minutes. Streaming keeps bytes flowing so proxies in front of
+        // the API never turn a slow answer into a gateway error page.
+        let streamedText = "";
+        let lastStreamPaint = 0;
+        const result = await streamChatCompletion(
+          "/api/chat/completions",
+          {
             model_code: modelCode,
             messages: [{ role: "user", content: prompt }],
             params: {
@@ -3607,11 +3612,19 @@ function CanvasEditor({
               ...(imageInputs.length ? { reference_images: imageInputs } : {}),
               ...(videoInputs.length ? { reference_videos: videoInputs } : {}),
             },
-            stream: false,
             ephemeral: true,
-          }),
-        });
-        const outputText = String(result?.content || "").trim();
+          },
+          {
+            onContent: (_delta, accumulated) => {
+              streamedText = accumulated;
+              const now = Date.now();
+              if (now - lastStreamPaint < 600) return;
+              lastStreamPaint = now;
+              update(id, { outputText: accumulated, outputKind: "text" });
+            },
+          }
+        );
+        const outputText = String(result?.content || streamedText || "").trim();
         if (storyRole === "storyboard" && outputText && storyStoryboardSegments(outputText, Number(node.data.storySegmentCount || 0)).length === 0) {
           update(id, {
             status: "failed",

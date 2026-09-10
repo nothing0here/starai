@@ -616,10 +616,13 @@ routeLoop:
 	return nil, nil, lastErr
 }
 
-func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent, reasoningContent string, usage *runtime.ChatUsage, estimated float64) (string, error) {
+// FinalizeStream charges the actual usage of a finished stream and returns the
+// conversation id together with the settled cost so streaming callers can show
+// the same numbers the non-streaming responses report.
+func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestID string, input CompletionInput, fullContent, reasoningContent string, usage *runtime.ChatUsage, estimated float64) (string, float64, error) {
 	model, err := s.ResolveInputModel(ctx, &input)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	normalized := runtime.ChatUsage{}
 	if usage != nil {
@@ -634,11 +637,11 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	}
 	if err := s.billing.Charge(ctx, userID, estimated, actualCost, "chat", requestID, "chat_usage", chatBillingLabel(input.BillingLabel, "对话消费")); err != nil {
 		s.logCall(ctx, requestID, userID, model.ID, nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, 0, "billing_failed", err, 0)
-		return "", fmt.Errorf("对话结算失败: %w", err)
+		return "", 0, fmt.Errorf("对话结算失败: %w", err)
 	}
 	s.logCallWithRoute(ctx, requestID, userID, model.ID, routeID(selectedRoute), nil, normalized.PromptTokens, normalized.CompletionTokens, normalized.TotalTokens, actualCost, providerCost, "success", nil, 0)
 	if input.Ephemeral {
-		return input.ConversationID, nil
+		return input.ConversationID, actualCost, nil
 	}
 
 	convID := input.ConversationID
@@ -651,7 +654,7 @@ func (s *ChatService) FinalizeStream(ctx context.Context, userID int64, requestI
 	if convID != "" && len(input.Messages) > 0 {
 		s.saveMessages(ctx, convID, userID, input.Messages, fullContent, reasoningContent)
 	}
-	return convID, nil
+	return convID, actualCost, nil
 }
 
 func (s *ChatService) UnfreezeStream(ctx context.Context, userID int64, requestID string, estimated float64) error {

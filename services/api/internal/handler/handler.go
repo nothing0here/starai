@@ -1401,7 +1401,7 @@ func (h *Handler) nativeChatStream(c *gin.Context, input service.CompletionInput
 			break
 		}
 	}
-	_, finalizeErr := h.chat.FinalizeStream(context.Background(), c.GetInt64("user_id"), requestID, input, fullContent, "", usage, estimated)
+	_, _, finalizeErr := h.chat.FinalizeStream(context.Background(), c.GetInt64("user_id"), requestID, input, fullContent, "", usage, estimated)
 	if finalizeErr != nil {
 		writeNativeSSE(c, "error", map[string]interface{}{"type": "error", "error": map[string]interface{}{"type": "api_error", "message": "费用结算失败"}})
 		flusher.Flush()
@@ -1840,13 +1840,13 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 			break
 		}
 	}
-	_, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, fullReasoningContent, usage, estimated)
+	_, finalizeCost, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, fullReasoningContent, usage, estimated)
 	if finalizeErr != nil {
 		openAIStreamError(c, "费用结算失败，请联系客服核对账单")
 		flusher.Flush()
 		return
 	}
-	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{}, "stop", usage)
+	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"cost": finalizeCost}, "stop", usage)
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
 }
@@ -2717,7 +2717,7 @@ func (h *Handler) creativeAgentPlanStream(
 		}
 	}
 
-	if _, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, reasoningContent, usage, estimated); finalizeErr != nil {
+	if _, _, finalizeErr := h.chat.FinalizeStream(context.Background(), userID, requestID, input, fullContent, reasoningContent, usage, estimated); finalizeErr != nil {
 		writeCreativeAgentSSE(c, "error", map[string]interface{}{"message": "费用结算失败，请联系客服核对账单"})
 		flusher.Flush()
 		return
