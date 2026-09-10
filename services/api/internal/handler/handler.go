@@ -1846,7 +1846,13 @@ func (h *Handler) chatStreamSingle(c *gin.Context, userID int64, input service.C
 		flusher.Flush()
 		return
 	}
-	writeOpenAIStreamChunk(c, requestID, input.ModelCode, map[string]interface{}{"cost": finalizeCost}, "stop", usage)
+	// Mirror the non-streaming payload: the settled cost travels as a top-level
+	// field of the final chunk so clients can show it next to the answer.
+	final := buildOpenAIStreamPayload(requestID, input.ModelCode, map[string]interface{}{}, "stop", usage)
+	final["cost"] = finalizeCost
+	if data, err := json.Marshal(final); err == nil {
+		_, _ = c.Writer.Write([]byte("data: " + string(data) + "\n\n"))
+	}
 	c.Writer.Write([]byte("data: [DONE]\n\n"))
 	flusher.Flush()
 }
