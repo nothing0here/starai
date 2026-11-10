@@ -113,8 +113,10 @@ func (s *Service) sendSMTP(cfg Config, to, subject, body string) error {
 	if from == "" {
 		from = cfg.User
 	}
-	// QQ/163 等个人邮箱要求 MAIL FROM 与登录账号一致，否则会被拒（501/502）。
-	if !strings.EqualFold(extractEmail(from), strings.TrimSpace(cfg.User)) {
+	// Gmail/Google Workspace allows a verified "Send mail as" alias in From
+	// while authenticating as the primary account. QQ/163 and similar providers
+	// require MAIL FROM to match the login account (501/502).
+	if !allowsAliasFrom(cfg.Host) && !strings.EqualFold(extractEmail(from), strings.TrimSpace(cfg.User)) {
 		from = cfg.User
 	}
 	msg := buildMessage(from, to, subject, body)
@@ -125,6 +127,11 @@ func (s *Service) sendSMTP(cfg Config, to, subject, body string) error {
 		return sendTLS(addr, cfg.Host, auth, from, []string{to}, msg)
 	}
 	return smtp.SendMail(addr, auth, extractEmail(from), []string{to}, msg)
+}
+
+func allowsAliasFrom(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	return h == "smtp.gmail.com" || h == "smtp-relay.gmail.com"
 }
 
 func (s *Service) sendResend(ctx context.Context, cfg Config, to, subject, body string) error {

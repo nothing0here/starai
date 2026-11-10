@@ -75,7 +75,11 @@ func (s *EmailOTPService) SendCode(ctx context.Context, email, captchaID, captch
 		return nil, errors.New("邮件服务未启用，请在后台「系统配置」中配置 SMTP 或 Resend，或开启「验证码调试模式」")
 	}
 
-	log.Printf("[email_otp] to=%s code=%s provider=%s enabled=%v debug=%v", email, code, mailCfg.Provider, mailCfg.Enabled, debug)
+	if debug {
+		log.Printf("[email_otp] to=%s code=%s provider=%s enabled=%v", email, code, mailCfg.Provider, mailCfg.Enabled)
+	} else {
+		log.Printf("[email_otp] to=%s provider=%s enabled=%v", email, mailCfg.Provider, mailCfg.Enabled)
+	}
 	if debug {
 		res.DebugCode = code
 		if !mailCfg.Enabled {
